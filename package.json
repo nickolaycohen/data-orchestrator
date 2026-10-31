@@ -1,0 +1,18 @@
+{
+  "name": "data-orchestrator",
+  "version": "1.0.0",
+  "description": "Central Orchestration Hub and Web Dashboard for Media, Drive Storage, IDrive, and Gmail Governance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n \"API,WEB\" -c \"cyan,magenta\" \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": ".venv/bin/python3 -m uvicorn backend.main:app --port 8008 --reload",
+    "dev:web": "vite --port 5173",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "vite": "^6.2.0"
+  }
+}

@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Data Orchestrator — Unified Governance & Curation Command Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Top Navigation Header -->
+      <header class="app-header">
+        <div class="header-brand">
+          <div class="brand-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+              <polyline points="2 17 12 22 22 17"></polyline>
+              <polyline points="2 12 12 17 22 12"></polyline>
+            </svg>
+          </div>
+          <div class="brand-titles">
+            <h1>Data Orchestrator</h1>
+            <span class="brand-tag">Central Command & Governance</span>
+          </div>
+        </div>
+
+        <div class="header-center">
+          <div class="system-status-pill" id="system-status-pill">
+            <span class="status-dot pulse"></span>
+            <span class="status-label">System Healthy</span>
+          </div>
+          <div class="mounted-volumes-badge" id="mounted-summary">
+            <span class="badge-icon">💾</span>
+            <span class="badge-text">4 Volumes Online</span>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button class="btn btn-outline" id="btn-toggle-console">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="4 17 10 11 4 5"></polyline>
+              <line x1="12" y1="19" x2="20" y2="19"></line>
+            </svg>
+            Live Console
+            <span class="running-count" id="active-task-badge" style="display:none;">1</span>
+          </button>
+          <button class="btn btn-primary" id="btn-refresh-all">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+            </svg>
+            Sync
+          </button>
+        </div>
+      </header>
+
+      <!-- Primary Tabs Bar -->
+      <nav class="nav-tabs" id="nav-tabs">
+        <button class="nav-tab active" data-tab="overview">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+          Command Deck
+        </button>
+        <button class="nav-tab" data-tab="media">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+          Media Organizer
+        </button>
+        <button class="nav-tab" data-tab="storage">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+          Drive & Storage Master
+        </button>
+        <button class="nav-tab" data-tab="idrive">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
+          IDrive Reconciliation
+        </button>
+        <button class="nav-tab" data-tab="gmail">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>
+          Gmail Planner
+        </button>
+        <button class="nav-tab" data-tab="reports">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+          Reports & Docs
+        </button>
+      </nav>
+
+      <!-- Main Tab Content Container -->
+      <main class="main-content">
+        <!-- 1. Command Deck Overview -->
+        <section id="tab-overview" class="tab-panel active">
+          <!-- Banner Alerts -->
+          <div id="alerts-container" class="alerts-stream"></div>
+
+          <!-- Topology Flowchart Card -->
+          <div class="card card-glow mb-4">
+            <div class="card-header">
+              <div class="card-title-group">
+                <h3>Interconnected Ecosystem Architecture</h3>
+                <p class="card-subtitle">End-to-end data lifecycle from remote ingestion to curated archival</p>
+              </div>
+              <span class="badge badge-purple">4 Pillars Active</span>
+            </div>
+            <div class="topology-grid">
+              <div class="topo-pillar">
+                <div class="topo-icon icon-cyan">☁️</div>
+                <h4>IDrive Cloud</h4>
+                <p>EVS Web API, Remote Catalogs, Selective Restores</p>
+                <div class="topo-db-stat" id="topo-idrive-stat">device_registry.db: 4 devices</div>
+              </div>
+              <div class="topo-arrow">➔</div>
+              <div class="topo-pillar">
+                <div class="topo-icon icon-blue">🗄️</div>
+                <h4>Storage Master</h4>
+                <p>Drive Audit, Priority 1–4 Tags, Dedup Heuristics</p>
+                <div class="topo-db-stat" id="topo-storage-stat">159,929 files · 107 GB</div>
+              </div>
+              <div class="topo-arrow">➔</div>
+              <div class="topo-pillar">
+                <div class="topo-icon icon-purple">📸</div>
+                <h4>Media Pipeline</h4>
+                <p>Triage Depot, Apple Photos, AI Aesthetic Ranking</p>
+                <div class="topo-db-stat" id="topo-media-stat">212,874 assets · 150 moments</div>
+              </div>
+              <div class="topo-arrow">➔</div>
+              <div class="topo-pillar">
+                <div class="topo-icon icon-green">✉️</div>
+                <h4>Gmail Hygiene</h4>
+                <p>Sender Clusters, Rule Families, Mailbox Triage</p>
+                <div class="topo-db-stat" id="topo-gmail-stat">4 Rule Families</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Storage Volumes & Quick Stats Grid -->
+          <div class="grid-2-col mb-4">
+            <!-- Physical Storage Gauges -->
+            <div class="card">
+              <div class="card-header">
+                <h3>Connected Storage Volumes</h3>
+                <span class="badge badge-blue">Local & External</span>
+              </div>
+              <div class="mounts-list" id="mounts-list-container">
+                <div class="loading-spinner">Loading volume metrics...</div>
+              </div>
+            </div>
+
+            <!-- Submodules Version & Health -->
+            <div class="card">
+              <div class="card-header">
+                <h3>Submodule Repositories</h3>
+                <span class="badge badge-outline">Git Ecosystem</span>
+              </div>
+              <div class="submodules-list" id="submodules-list-container">
+                <div class="loading-spinner">Reading submodule revisions...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quick Action Launcher Deck -->
+          <div class="card">
+            <div class="card-header">
+              <h3>Direct Pipeline Launchpad</h3>
+              <p class="card-subtitle">Trigger operations across any pillar directly from the dashboard</p>
+            </div>
+            <div class="quick-actions-grid">
+              <div class="action-card" data-action="media_triage">
+                <div class="action-icon icon-purple">📥</div>
+                <h4>Pre-Intake Triage</h4>
+                <p>Triage raw media into New vs Duplicates</p>
+                <button class="btn btn-sm btn-purple">Run Triage</button>
+              </div>
+              <div class="action-card" data-action="drive_audit">
+                <div class="action-icon icon-blue">🔍</div>
+                <h4>Drive Audit Scan</h4>
+                <p>Scan and tag Priority 1–4 folders</p>
+                <button class="btn btn-sm btn-blue">Run Audit</button>
+              </div>
+              <div class="action-card" data-action="media_verify">
+                <div class="action-icon icon-green">✅</div>
+                <h4>Verify Media Batch</h4>
+                <p>Check asset readiness in Apple Photos</p>
+                <button class="btn btn-sm btn-green">Verify</button>
+              </div>
+              <div class="action-card" data-action="idrive_wizard">
+                <div class="action-icon icon-cyan">🧙‍♂️</div>
+                <h4>Device Backup Wizard</h4>
+                <p>Audit devices and reconcile backup policies</p>
+                <button class="btn btn-sm btn-cyan">Launch Wizard</button>
+              </div>
+              <div class="action-card" data-action="gmail_planner">
+                <div class="action-icon icon-amber">📬</div>
+                <h4>Gmail Cleaner Report</h4>
+                <p>Analyze mailbox senders and suggest rules</p>
+                <button class="btn btn-sm btn-amber">Generate Report</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. Media Organizer Panel -->
+        <section id="tab-media" class="tab-panel">
+          <div class="section-title-bar">
+            <div>
+              <h2>Media Organizer Pipeline</h2>
+              <p class="subtitle">Two-Track Family Photo Ingestion, AI Aesthetic Scoring, and Moments Publishing</p>
+            </div>
+            <button class="btn btn-primary" id="btn-open-triage-modal">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+              Launch Triage Gateway
+            </button>
+          </div>
+
+          <!-- Media Stats Tiles -->
+          <div class="stat-tiles-row mb-4">
+            <div class="stat-tile">
+              <span class="stat-label">Total Library Assets</span>
+              <span class="stat-value text-purple" id="stat-media-assets">212,874</span>
+              <span class="stat-detail">In master catalog</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Curated Moments</span>
+              <span class="stat-value text-green" id="stat-media-moments">150</span>
+              <span class="stat-detail">Feature memory collections</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Month Batches</span>
+              <span class="stat-value text-blue" id="stat-media-batches">285</span>
+              <span class="stat-detail">Ingested monthly folders</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Triage Duplicate Savings</span>
+              <span class="stat-value text-amber" id="stat-media-triage-saved">132 sessions</span>
+              <span class="stat-detail">Saved to DELL1TB02</span>
+            </div>
+          </div>
+
+          <!-- Two-Track Architecture Overview -->
+          <div class="grid-2-col mb-4">
+            <!-- Track 1: Batch Ingest -->
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h3>Track 1: Monthly Batch Ingest (Mode [B])</h3>
+                  <p class="card-subtitle">Systematic ingestion from camera/phone imports to cloud archive</p>
+                </div>
+                <span class="badge badge-purple">Monthly Lifecycle</span>
+              </div>
+              <div class="pipeline-steps-list">
+                <div class="step-item">
+                  <span class="step-num">100</span>
+                  <div class="step-info">
+                    <strong>Verify Export Album</strong>
+                    <p>Asset readiness check in Media Organizer DB</p>
+                  </div>
+                  <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_verify')">Run</button>
+                </div>
+                <div class="step-item">
+                  <span class="step-num">200</span>
+                  <div class="step-info">
+                    <strong>Export Wrapper</strong>
+                    <p>Fast O(1) originals export + Live Photo pairs</p>
+                  </div>
+                  <span class="badge badge-sm badge-outline">Step</span>
+                </div>
+                <div class="step-item">
+                  <span class="step-num">210</span>
+                  <div class="step-info">
+                    <strong>Deduplicate Assets</strong>
+                    <p>Deduplicate temporary staging files</p>
+                  </div>
+                  <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_dedupe')">Run</button>
+                </div>
+                <div class="step-item">
+                  <span class="step-num">400</span>
+                  <div class="step-info">
+                    <strong>Upload to Google Photos</strong>
+                    <p>Sync to 5TB Google Photos archive & clean staging</p>
+                  </div>
+                  <span class="badge badge-sm badge-outline">Step</span>
+                </div>
+                <div class="step-item">
+                  <span class="step-num">600</span>
+                  <div class="step-info">
+                    <strong>AI Aesthetic Ranking</strong>
+                    <p>Curate top scoring assets with CLIP model</p>
+                  </div>
+                  <span class="badge badge-sm badge-outline">Step</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Track 2: Featured Moments -->
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h3>Track 2: Memory Feature & Publishing (Mode [M])</h3>
+                  <p class="card-subtitle">Aesthetic ranking and physical album publishing</p>
+                </div>
+                <span class="badge badge-green">Curated Memories</span>
+              </div>
+              <div class="moments-container" id="featured-moments-list">
+                <div class="loading-spinner">Loading featured moments...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recent Pipeline Executions Table -->
+          <div class="card">
+            <div class="card-header">
+              <h3>Recent Pipeline Executions</h3>
+              <span class="badge badge-outline">Live Execution Logs</span>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Session ID</th>
+                    <th>Label</th>
+                    <th>Status</th>
+                    <th>Executed At (UTC)</th>
+                  </tr>
+                </thead>
+                <tbody id="pipeline-executions-tbody">
+                  <tr><td colspan="5" class="text-center">Loading execution history...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. Drive & Storage Master Panel -->
+        <section id="tab-storage" class="tab-panel">
+          <div class="section-title-bar">
+            <div>
+              <h2>Drive Audit & Storage Master</h2>
+              <p class="subtitle">Semantics Before Movement: Priority 1–4 Finder Tag Governance on /Volumes/LaCie</p>
+            </div>
+            <button class="btn btn-primary" onclick="window.triggerTask('drive_audit')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              Execute Drive Audit Scan
+            </button>
+          </div>
+
+          <!-- Storage Stats Tiles -->
+          <div class="stat-tiles-row mb-4">
+            <div class="stat-tile">
+              <span class="stat-label">Cataloged Files</span>
+              <span class="stat-value text-blue" id="stat-storage-files">159,929</span>
+              <span class="stat-detail">In drive_audit.db</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Total Volume Indexed</span>
+              <span class="stat-value text-green" id="stat-storage-size">107.27 GB</span>
+              <span class="stat-detail">Deduplication evaluated</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Directories Indexed</span>
+              <span class="stat-value text-purple" id="stat-storage-dirs">12,559</span>
+              <span class="stat-detail">Across attached volumes</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Target Master</span>
+              <span class="stat-value text-amber">/Volumes/LaCie</span>
+              <span class="stat-detail">Canonical storage root</span>
+            </div>
+          </div>
+
+          <!-- Priority 1-4 Taxonomy Visual Ledger -->
+          <div class="card mb-4">
+            <div class="card-header">
+              <div>
+                <h3>macOS Finder Tag Living Ledger</h3>
+                <p class="card-subtitle">Visual classification synchronized to the desktop Finder colors</p>
+              </div>
+              <span class="badge badge-blue">Human-in-the-Loop</span>
+            </div>
+            <div class="priority-tiers-grid" id="priority-tiers-container"></div>
+          </div>
+
+          <!-- Storage Rules & Large Files Grid -->
+          <div class="grid-2-col">
+            <div class="card">
+              <div class="card-header">
+                <h3>Shared Storage Rules</h3>
+                <span class="badge badge-purple">shared_storage_rules.db</span>
+              </div>
+              <div class="rules-list" id="storage-rules-container">
+                <div class="loading-spinner">Loading storage rules...</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h3>Top Cataloged Documents & Assets</h3>
+                <span class="badge badge-outline">drive_audit.db</span>
+              </div>
+              <div class="files-list" id="large-files-container">
+                <div class="loading-spinner">Loading file entries...</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. IDrive Reconciliation Panel -->
+        <section id="tab-idrive" class="tab-panel">
+          <div class="section-title-bar">
+            <div>
+              <h2>IDrive Cloud Storage Audit</h2>
+              <p class="subtitle">EVS Web API Explorer, Remote File Trees, and Backup Policy Reconciliation</p>
+            </div>
+            <div class="btn-group">
+              <button class="btn btn-outline" onclick="window.triggerTask('idrive_wizard')">Device Backup Wizard</button>
+              <button class="btn btn-primary" onclick="window.triggerTask('idrive_audit')">Run EVS Cloud Audit</button>
+            </div>
+          </div>
+
+          <!-- Auth Status Alert Card -->
+          <div class="card mb-4" id="idrive-cookie-alert-card">
+            <div class="auth-banner">
+              <div class="auth-icon">🔑</div>
+              <div class="auth-info">
+                <h4>IDrive Session Cookie (.idrive_cookie)</h4>
+                <p id="idrive-cookie-status-text">Checking cookie status...</p>
+              </div>
+              <button class="btn btn-sm btn-outline" id="btn-cookie-help">How to Refresh Cookie</button>
+            </div>
+          </div>
+
+          <!-- Registered Devices Grid -->
+          <div class="card mb-4">
+            <div class="card-header">
+              <div>
+                <h3>Cataloged Backup Devices</h3>
+                <p class="card-subtitle">Tracked in device_registry.db</p>
+              </div>
+              <span class="badge badge-cyan" id="badge-device-count">4 Devices</span>
+            </div>
+            <div class="devices-grid" id="idrive-devices-container">
+              <div class="loading-spinner">Loading device registry...</div>
+            </div>
+          </div>
+
+          <!-- Policies and API Stats -->
+          <div class="grid-2-col">
+            <div class="card">
+              <div class="card-header">
+                <h3>Backup Policies & Folder Priorities</h3>
+                <span class="badge badge-outline">Policy Registry</span>
+              </div>
+              <div id="idrive-policies-container">
+                <div class="loading-spinner">Loading policies...</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h3>Cloud Discovery Operations</h3>
+                <span class="badge badge-cyan">idrive_audit.db</span>
+              </div>
+              <div class="evs-stat-box">
+                <div class="evs-stat-num" id="stat-evs-api-calls">859</div>
+                <div class="evs-stat-label">Logged EVS Web API Queries</div>
+                <p class="evs-stat-desc">Direct cloud browsing calls to reconstruct remote machine file trees without multi-gigabyte disk downloads.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5. Gmail Cleanup Planner Panel -->
+        <section id="tab-gmail" class="tab-panel">
+          <div class="section-title-bar">
+            <div>
+              <h2>Gmail Cleanup Planner</h2>
+              <p class="subtitle">Sender Volume Clustering, Rule Families, and Mailbox Hygiene Reporting</p>
+            </div>
+            <button class="btn btn-primary" onclick="window.triggerTask('gmail_planner')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              Run Planner Report
+            </button>
+          </div>
+
+          <!-- Auth Status Banner -->
+          <div class="card mb-4">
+            <div class="auth-banner">
+              <div class="auth-icon">📬</div>
+              <div class="auth-info">
+                <h4>Gmail API OAuth & Credentials Status</h4>
+                <p id="gmail-auth-status-text">Checking credentials and token...</p>
+              </div>
+              <span class="badge badge-green" id="badge-gmail-status">Checking</span>
+            </div>
+          </div>
+
+          <!-- Rule Families Grid -->
+          <div class="card mb-4">
+            <div class="card-header">
+              <div>
+                <h3>Rule Families & Sender Domains</h3>
+                <p class="card-subtitle">Configured sender taxonomy for automated suggestion</p>
+              </div>
+              <span class="badge badge-purple">5 Categories</span>
+            </div>
+            <div class="rule-families-grid" id="rule-families-container"></div>
+          </div>
+
+          <!-- Existing Rules & Thresholds Grid -->
+          <div class="grid-2-col">
+            <div class="card">
+              <div class="card-header">
+                <h3>Active Governance Rules</h3>
+                <span class="badge badge-outline">rules.yaml</span>
+              </div>
+              <div class="rules-list" id="gmail-rules-container"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h3>Suggestion Thresholds</h3>
+                <span class="badge badge-amber">Heuristics</span>
+              </div>
+              <div class="thresholds-list">
+                <div class="threshold-item">
+                  <span class="th-label">Volume Suggestion Threshold</span>
+                  <span class="th-val">≥ 50 messages</span>
+                </div>
+                <div class="threshold-item">
+                  <span class="th-label">Storage Suggestion Threshold</span>
+                  <span class="th-val">≥ 50 MB total</span>
+                </div>
+                <div class="threshold-item">
+                  <span class="th-label">Fetch Batch Size</span>
+                  <span class="th-val">100 messages / batch</span>
+                </div>
+                <div class="threshold-item">
+                  <span class="th-label">Target Scopes</span>
+                  <span class="th-val">gmail.readonly</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 6. Reports & Docs Panel -->
+        <section id="tab-reports" class="tab-panel">
+          <div class="section-title-bar">
+            <div>
+              <h2>Reports & Documentation Inspector</h2>
+              <p class="subtitle">Live preview of audit logs, curation reports, and markdown documentation</p>
+            </div>
+            <button class="btn btn-outline" id="btn-refresh-reports">Refresh List</button>
+          </div>
+
+          <div class="reports-layout">
+            <div class="reports-sidebar card">
+              <div class="card-header">
+                <h4>Available Documents</h4>
+                <span class="badge badge-sm badge-outline" id="reports-count-badge">0</span>
+              </div>
+              <div class="reports-nav-list" id="reports-nav-list">
+                <div class="loading-spinner">Loading reports list...</div>
+              </div>
+            </div>
+
+            <div class="reports-viewer card">
+              <div class="card-header">
+                <div class="report-meta">
+                  <h3 id="report-viewer-title">Select a report to preview</h3>
+                  <span class="text-muted" id="report-viewer-filename">No file selected</span>
+                </div>
+              </div>
+              <div class="report-body" id="report-viewer-body">
+                <div class="empty-state">
+                  <div class="empty-icon">📄</div>
+                  <p>Choose any markdown report, txt audit log, or CSV triage file from the left sidebar to inspect its content.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- Docked / Floating Live Console Drawer -->
+      <div class="console-drawer" id="console-drawer">
+        <div class="console-header">
+          <div class="console-title">
+            <span class="status-dot green"></span>
+            <h4>Real-Time Execution Console</h4>
+            <span class="badge badge-sm badge-outline" id="console-task-label">Idle</span>
+          </div>
+          <div class="console-actions">
+            <button class="btn btn-xs btn-outline" id="btn-clear-console">Clear</button>
+            <button class="btn btn-xs btn-danger" id="btn-kill-task" style="display:none;">Kill Process</button>
+            <button class="btn btn-xs btn-icon" id="btn-close-console">✕</button>
+          </div>
+        </div>
+        <div class="console-body" id="console-output">
+          <div class="console-welcome">[SYSTEM] Live Execution Console Ready. Launch tasks from any pillar to monitor streaming outputs.</div>
+        </div>
+      </div>
+
+      <!-- Triage Gateway Modal -->
+      <div class="modal-backdrop" id="modal-triage">
+        <div class="modal-dialog">
+          <div class="modal-header">
+            <h3>Launch Pre-Intake Triage Gateway</h3>
+            <button class="btn btn-xs btn-icon btn-close-modal">✕</button>
+          </div>
+          <div class="modal-body">
+            <p>The Triage Gateway compares raw intake assets against the 212,000+ catalog in <code>media_organizer.db</code>, pairs Live Photos, and partitions files across physical drives.</p>
+            <div class="form-group mb-3">
+              <label for="triage-input-path">Source Intake Directory:</label>
+              <input type="text" id="triage-input-path" class="form-control" value="/Volumes/LaCie/Storage/Priority 4/Media Preprocessing" />
+              <small class="form-hint">Default: /Volumes/LaCie/Storage/Priority 4/Media Preprocessing</small>
+            </div>
+            <div class="triage-partition-preview">
+              <div class="partition-tier orange">
+                <strong>Duplicates</strong> ➔ DELL1TB02 (Non-backed up)
+              </div>
+              <div class="partition-tier red">
+                <strong>Review-Similar</strong> ➔ LaCie (Pruned/Burst review)
+              </div>
+              <div class="partition-tier green">
+                <strong>New Media</strong> ➔ LaCie (Ready for Apple Photos)
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline btn-close-modal">Cancel</button>
+            <button class="btn btn-primary" id="btn-confirm-triage">Start Triage Execution</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
