@@ -1,0 +1,9 @@
+[submodule "submodules/drive-audit-cli"]
+	path = submodules/drive-audit-cli
+	url = https://github.com/nickolaycohen/drive-audit-cli.git
+[submodule "submodules/idrive-audit"]
+	path = submodules/idrive-audit
+	url = https://github.com/nickolaycohen/idrive-audit.git
+[submodule "submodules/media-organizer-pipeline"]
+	path = submodules/media-organizer-pipeline
+	url = https://github.com/nickolaycohen/media-organizer-pipeline.git
