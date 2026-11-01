@@ -170,25 +170,36 @@ def get_executor_monitor():
     for lp in log_candidates:
         if lp.exists():
             try:
-                lines = lp.read_text(encoding="utf-8", errors="replace").splitlines()[-50:]
+                lines = lp.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
                 log_lines = [l for l in lines[-8:] if l.strip()]
+                live_asset_ratio = None
                 for line in reversed(lines):
                     if "⏱️ Heartbeat:" in line and current_step == "—":
                         current_step = line.strip().split("⏱️ Heartbeat:")[-1].strip()
+                        current_step = current_step.replace(
+                            "2.4 Partial upload to Google Photos due to insufficient space",
+                            "2.4 Upload to Google Account from Staging Folder"
+                        )
                     if "[upload_to_google_photos:" in line and "Uploading:" in line and not upload_progress:
-                        m = re.search(r'\[(\d+/\d+)\] Uploading: ([^ ]+) \(([^)]+)\) - Est\. Completion: ([^ ]+) \(([^)]+)\)', line)
+                        m = re.search(r'\[(\d+)/(\d+)\] Uploading: (.+?) \(([\d.]+\s*MB)\) - Est\. Completion: ([^ ]+) \(([^)]+)\)', line)
                         if m:
-                            upload_progress = f"Asset {m.group(1)}: {m.group(2)} ({m.group(3)}) | ETA: {m.group(4)} ({m.group(5)})"
-                            curr_part, tot_part = m.group(1).split('/')
+                            idx_num = int(m.group(1))
+                            tot_num = int(m.group(2))
+                            done_num = max(0, idx_num - 1)
+                            pct_val = round((done_num / tot_num) * 100, 1) if tot_num > 0 else 0.0
+                            live_asset_ratio = f"{done_num}/{tot_num} ({pct_val:.1f}%)"
+                            upload_progress = f"Asset {idx_num}/{tot_num}: {m.group(3)} ({m.group(4)}) | ETA: {m.group(5)} ({m.group(6)})"
                             upload_details = {
-                                "current": int(curr_part),
-                                "total": int(tot_part),
-                                "pct": round((int(curr_part) / int(tot_part)) * 100, 1),
-                                "filename": m.group(2),
-                                "size": m.group(3),
-                                "eta": m.group(4),
-                                "speed": m.group(5)
+                                "current": idx_num,
+                                "total": tot_num,
+                                "pct": pct_val,
+                                "filename": m.group(3),
+                                "size": m.group(4),
+                                "eta": m.group(5),
+                                "speed": m.group(6)
                             }
+                if current_step != "—" and live_asset_ratio:
+                    current_step = re.sub(r'Assets:\s*0/\d+', f'Assets: {live_asset_ratio}', current_step)
                 break
             except Exception:
                 pass
