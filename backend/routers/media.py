@@ -1,5 +1,10 @@
+import os
+import re
+import errno
+from pathlib import Path
+from datetime import datetime
 from fastapi import APIRouter
-from backend.config import MEDIA_DB_PATH, get_db_connection
+from backend.config import MEDIA_DB_PATH, REPOS, get_db_connection
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -91,3 +96,129 @@ def get_media_metrics():
         }
     finally:
         conn.close()
+
+@router.get("/executor-monitor")
+def get_executor_monitor():
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pipe_repo = REPOS["media-organizer-pipeline"]
+    sibling_repo = Path("/Users/nickolaycohen/dev/media-organizer-pipeline")
+
+    # 1. Check Executor Status via lock files
+    lock_paths = [pipe_repo / "db" / "executor.lock", sibling_repo / "db" / "executor.lock"]
+    is_running = False
+    pid = None
+    status = "IDLE"
+    for lp in lock_paths:
+        if lp.exists():
+            try:
+                pid = int(lp.read_text().strip())
+                os.kill(pid, 0)
+                is_running = True
+                status = "ACTIVE"
+                break
+            except OSError as e:
+                if e.errno == errno.ESRCH:
+                    status = "STALE"
+                else:
+                    is_running = True
+                    status = "ACTIVE"
+                break
+            except Exception:
+                pass
+
+    # 2. Check Backup Safety
+    backup_paths = [pipe_repo / "db" / "backup.lock", sibling_repo / "db" / "backup.lock"]
+    backup_active = any(bp.exists() for bp in backup_paths)
+
+    # 3. Query Execution Queue from database
+    queue = []
+    conn = get_db_connection(MEDIA_DB_PATH)
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT pe.id, pe.planned_month, pe.set_at_utc, pe.active,
+                       mb.status_code, mb.updated_at_utc,
+                       bs.short_label as status_label
+                FROM planned_execution pe
+                LEFT JOIN month_batches mb ON pe.planned_month = mb.month
+                LEFT JOIN batch_status bs ON mb.status_code = bs.code
+                WHERE pe.active = 1
+                ORDER BY pe.id ASC
+            """)
+            for idx, r in enumerate(cur.fetchall()):
+                queue.append({
+                    "id": r["id"],
+                    "month": r["planned_month"],
+                    "set_at_utc": r["set_at_utc"],
+                    "status_code": r["status_code"] or "Unknown",
+                    "status_label": r["status_label"] or "",
+                    "updated_at_utc": r["updated_at_utc"],
+                    "is_in_progress": (idx == 0 and is_running)
+                })
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    # 4. Tail Log & parse progress
+    log_candidates = [sibling_repo / "logs" / "media_organizer.log", pipe_repo / "logs" / "media_organizer.log"]
+    current_step = "—"
+    upload_progress = None
+    upload_details = None
+    log_lines = []
+    for lp in log_candidates:
+        if lp.exists():
+            try:
+                lines = lp.read_text(encoding="utf-8", errors="replace").splitlines()[-50:]
+                log_lines = [l for l in lines[-8:] if l.strip()]
+                for line in reversed(lines):
+                    if "⏱️ Heartbeat:" in line and current_step == "—":
+                        current_step = line.strip().split("⏱️ Heartbeat:")[-1].strip()
+                    if "[upload_to_google_photos:" in line and "Uploading:" in line and not upload_progress:
+                        m = re.search(r'\[(\d+/\d+)\] Uploading: ([^ ]+) \(([^)]+)\) - Est\. Completion: ([^ ]+) \(([^)]+)\)', line)
+                        if m:
+                            upload_progress = f"Asset {m.group(1)}: {m.group(2)} ({m.group(3)}) | ETA: {m.group(4)} ({m.group(5)})"
+                            curr_part, tot_part = m.group(1).split('/')
+                            upload_details = {
+                                "current": int(curr_part),
+                                "total": int(tot_part),
+                                "pct": round((int(curr_part) / int(tot_part)) * 100, 1),
+                                "filename": m.group(2),
+                                "size": m.group(3),
+                                "eta": m.group(4),
+                                "speed": m.group(5)
+                            }
+                break
+            except Exception:
+                pass
+
+    schedule_items = [
+        {"time": "03:00 AM", "title": "macOS Time Machine Backup", "command": "tmutil startbackup", "target": "Local & External Disks"},
+        {"time": "05:30 AM", "title": "Apple Photos Albums Backup", "command": "reconstruct_apple_albums.py --backup", "target": "Album Manifest DB"},
+        {"time": "06:00 AM", "title": "SQLite Master Hot Backup", "command": "backup_database.py", "target": "media_organizer.db.gz"}
+    ]
+
+    return {
+        "timestamp": now_str,
+        "executor": {
+            "is_running": is_running,
+            "pid": pid,
+            "status": status,
+            "status_banner": f"ACTIVE (PID: {pid})" if is_running else ("STALE (PID: {pid})" if status == "STALE" else "IDLE")
+        },
+        "backup_safety": {
+            "is_locked": backup_active,
+            "status": "ACTIVE_BACKUP" if backup_active else "CLEAR",
+            "message": "ACTIVE BACKUP IN PROGRESS" if backup_active else "CLEAR (No backup collision)",
+            "schedule": schedule_items
+        },
+        "queue": queue,
+        "queue_count": len(queue),
+        "activity": {
+            "current_step": current_step,
+            "upload_progress": upload_progress,
+            "upload_details": upload_details,
+            "log_tail": log_lines
+        }
+    }

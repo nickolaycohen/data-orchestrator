@@ -1056,3 +1056,180 @@ body {
   padding: 1rem 0;
   text-align: center;
 }
+
+/* ==========================================================================
+   Media Manager Scheduler & Executor Monitor
+   ========================================================================== */
+
+.monitor-telemetry-banner {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  background: rgba(17, 22, 34, 0.7);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+}
+
+@media (max-width: 900px) {
+  .monitor-telemetry-banner {
+    grid-template-columns: 1fr;
+  }
+}
+
+.monitor-tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.monitor-tile-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.3rem;
+}
+
+.monitor-tile-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.monitor-tile-pct {
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.monitor-tile-subtext {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  margin-top: 0.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.monitor-subpanel {
+  background: rgba(17, 22, 34, 0.5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.monitor-subpanel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.monitor-queue-list,
+.monitor-schedule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.queue-item,
+.schedule-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: var(--transition);
+}
+
+.queue-item:hover,
+.schedule-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.queue-item.in-progress {
+  border-left: 3px solid var(--accent-green);
+  background: rgba(16, 185, 129, 0.06);
+}
+
+.queue-main {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.queue-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.schedule-time {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--accent-blue);
+  min-width: 65px;
+}
+
+.schedule-desc {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin: 0 0.5rem;
+  font-size: 0.8rem;
+}
+
+.schedule-desc code {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.monitor-log-section {
+  margin-top: 0.5rem;
+}
+
+.monitor-log-box {
+  background: #06090e;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.65rem 0.85rem;
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  line-height: 1.45;
+  color: #94a3b8;
+  max-height: 130px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.badge-xs {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.68rem;
+  border-radius: 4px;
+}
+
+.badge.pulse {
+  animation: pulse-badge-glow 2s infinite;
+}
+
+@keyframes pulse-badge-glow {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
+  70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+.fill-purple {
+  background: linear-gradient(90deg, #8b5cf6, #c084fc);
+}

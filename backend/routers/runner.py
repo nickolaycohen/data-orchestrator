@@ -21,6 +21,13 @@ ACTIVE_WEBSOCKETS: Dict[str, list[WebSocket]] = {}
 RUN_HISTORY: list[Dict[str, Any]] = []
 
 TASK_DEFINITIONS = {
+    "media_monitor_executor": {
+        "name": "Media Scheduler & Executor Monitor",
+        "pillar": "media-organizer-pipeline",
+        "description": "Monitors active pipeline executor, batch execution queue, upload progress, and nightly backup coordination.",
+        "cwd_repo": "media-organizer-pipeline",
+        "cmd": ["python3", "scripts/monitor_executor.py"]
+    },
     "media_triage": {
         "name": "Pre-Intake Triage Gateway",
         "pillar": "media-organizer-pipeline",

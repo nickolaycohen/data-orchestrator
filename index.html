@@ -163,6 +163,12 @@
               <p class="card-subtitle">Trigger operations across any pillar directly from the dashboard</p>
             </div>
             <div class="quick-actions-grid">
+              <div class="action-card" data-action="media_monitor_executor">
+                <div class="action-icon icon-purple">⏱️</div>
+                <h4>Scheduler Monitor</h4>
+                <p>Live executor queue & upload telemetry</p>
+                <button class="btn btn-sm btn-purple">Monitor</button>
+              </div>
               <div class="action-card" data-action="media_triage">
                 <div class="action-icon icon-purple">📥</div>
                 <h4>Pre-Intake Triage</h4>
@@ -204,10 +210,16 @@
               <h2>Media Organizer Pipeline</h2>
               <p class="subtitle">Two-Track Family Photo Ingestion, AI Aesthetic Scoring, and Moments Publishing</p>
             </div>
-            <button class="btn btn-primary" id="btn-open-triage-modal">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
-              Launch Triage Gateway
-            </button>
+            <div style="display: flex; gap: 0.75rem; align-items: center;">
+              <button class="btn btn-outline" id="btn-run-monitor-task" onclick="window.triggerTask('media_monitor_executor')" title="Run python3 scripts/monitor_executor.py in Live Console">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                Launch CLI Monitor
+              </button>
+              <button class="btn btn-primary" id="btn-open-triage-modal">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+                Launch Triage Gateway
+              </button>
+            </div>
           </div>
 
           <!-- Media Stats Tiles -->
@@ -231,6 +243,112 @@
               <span class="stat-label">Triage Duplicate Savings</span>
               <span class="stat-value text-amber" id="stat-media-triage-saved">132 sessions</span>
               <span class="stat-detail">Saved to DELL1TB02</span>
+            </div>
+          </div>
+
+          <!-- Media Manager Scheduler & Executor Monitor -->
+          <div class="card mb-4" id="media-scheduler-monitor-card">
+            <div class="card-header">
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div class="action-icon icon-purple" style="width: 36px; height: 36px; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; border-radius: 8px;">⏱️</div>
+                <div>
+                  <h3 style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                    Media Scheduler & Executor Monitor
+                    <span class="badge badge-sm" id="monitor-executor-badge">Checking...</span>
+                    <span class="badge badge-sm badge-blue" id="monitor-backup-badge">🛡️ Backup Lock: Checking</span>
+                  </h3>
+                  <p class="card-subtitle">Real-time batch execution queue, live Google Photos upload telemetry, and nightly backup coordination</p>
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <span style="font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono);" id="monitor-last-updated">Updating...</span>
+                <button class="btn btn-xs btn-outline" id="btn-refresh-monitor" title="Refresh Monitor Status">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                  Refresh
+                </button>
+                <button class="btn btn-xs btn-purple" onclick="window.triggerTask('media_monitor_executor')" title="Run python3 scripts/monitor_executor.py in Live Console">
+                  ▶ Run CLI (monitor_executor.py)
+                </button>
+              </div>
+            </div>
+
+            <!-- Live Telemetry Banner (Active Step & Upload Progress) -->
+            <div class="monitor-telemetry-banner mb-3" id="monitor-telemetry-row">
+              <div class="monitor-tile">
+                <span class="monitor-tile-label">Current Pipeline Activity</span>
+                <span class="monitor-tile-value" id="monitor-current-step">—</span>
+              </div>
+              <div class="monitor-tile">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                  <span class="monitor-tile-label">Google Photos Upload Telemetry</span>
+                  <span class="monitor-tile-pct font-mono text-purple" id="monitor-upload-pct">0%</span>
+                </div>
+                <div class="gauge-bar-bg" style="margin-bottom: 0.35rem;">
+                  <div class="gauge-bar-fill fill-purple" id="monitor-upload-bar" style="width: 0%;"></div>
+                </div>
+                <span class="monitor-tile-subtext" id="monitor-upload-subtext">No active upload stream detected</span>
+              </div>
+            </div>
+
+            <!-- Two-Column Queue & Nightly Schedule -->
+            <div class="grid-2-col mb-3">
+              <!-- Execution Queue Column -->
+              <div class="monitor-subpanel">
+                <div class="monitor-subpanel-header">
+                  <strong>📋 Active Execution Queue</strong>
+                  <span class="badge badge-sm badge-purple" id="monitor-queue-badge">0 queued</span>
+                </div>
+                <div class="monitor-queue-list" id="monitor-queue-list">
+                  <div class="text-muted" style="font-size: 0.8rem; padding: 0.5rem 0;">(Queue is currently empty)</div>
+                </div>
+              </div>
+
+              <!-- Nightly Backup & Safety Column -->
+              <div class="monitor-subpanel">
+                <div class="monitor-subpanel-header">
+                  <strong>🛡️ Nightly Backup Schedule & Concurrency Safety</strong>
+                  <span class="badge badge-sm badge-green" id="monitor-backup-safety-tag">Safe</span>
+                </div>
+                <div class="monitor-schedule-list" id="monitor-schedule-list">
+                  <div class="schedule-item">
+                    <span class="schedule-time font-mono">03:00 AM</span>
+                    <div class="schedule-desc">
+                      <strong>macOS Time Machine Backup</strong>
+                      <code>tmutil startbackup</code>
+                    </div>
+                    <span class="badge badge-xs badge-outline">Local/Ext</span>
+                  </div>
+                  <div class="schedule-item">
+                    <span class="schedule-time font-mono">05:30 AM</span>
+                    <div class="schedule-desc">
+                      <strong>Apple Photos Albums Backup</strong>
+                      <code>reconstruct_apple_albums.py --backup</code>
+                    </div>
+                    <span class="badge badge-xs badge-outline">Manifest DB</span>
+                  </div>
+                  <div class="schedule-item">
+                    <span class="schedule-time font-mono">06:00 AM</span>
+                    <div class="schedule-desc">
+                      <strong>Database Master Hot Backup</strong>
+                      <code>backup_database.py</code>
+                    </div>
+                    <span class="badge badge-xs badge-outline">SQLite Hot</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Live Tail Log Stream -->
+            <div class="monitor-log-section">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+                <span style="font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">
+                  📊 Recent Executor Activity Log (<code>logs/media_organizer.log</code>)
+                </span>
+                <span class="badge badge-xs badge-outline font-mono">Tail -8</span>
+              </div>
+              <div class="monitor-log-box" id="monitor-log-box">
+                Waiting for executor log output...
+              </div>
             </div>
           </div>
 

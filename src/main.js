@@ -4,6 +4,7 @@
 
 let activeExecutionId = null;
 let activeWebSocket = null;
+let mediaMonitorInterval = null;
 
 // Initialize on DOM load
 document.addEventListener('DOMContentLoaded', () => {
@@ -32,6 +33,18 @@ function setupTabs() {
         targetPanel.classList.add('active');
       }
 
+      if (tab.dataset.tab === 'media') {
+        fetchExecutorMonitor();
+        if (!mediaMonitorInterval) {
+          mediaMonitorInterval = setInterval(fetchExecutorMonitor, 4000);
+        }
+      } else {
+        if (mediaMonitorInterval) {
+          clearInterval(mediaMonitorInterval);
+          mediaMonitorInterval = null;
+        }
+      }
+
       if (tab.dataset.tab === 'reports') {
         fetchReportsList();
       }
@@ -44,6 +57,9 @@ function setupRefresh() {
   document.getElementById('btn-refresh-all')?.addEventListener('click', () => {
     fetchAllMetrics();
   });
+  document.getElementById('btn-refresh-monitor')?.addEventListener('click', () => {
+    fetchExecutorMonitor();
+  });
 }
 
 async function fetchAllMetrics() {
@@ -51,6 +67,7 @@ async function fetchAllMetrics() {
     await Promise.all([
       fetchSystemStatus(),
       fetchMediaMetrics(),
+      fetchExecutorMonitor(),
       fetchStorageMetrics(),
       fetchIDriveMetrics(),
       fetchGmailMetrics()
@@ -208,6 +225,143 @@ async function fetchMediaMetrics() {
 
   } catch (err) {
     console.error('Media metrics error:', err);
+  }
+}
+
+// 2b. Media Scheduler & Executor Monitor
+async function fetchExecutorMonitor() {
+  try {
+    const res = await fetch('/api/media/executor-monitor');
+    const data = await res.json();
+
+    // 1. Executor status badge
+    const execBadge = document.getElementById('monitor-executor-badge');
+    if (execBadge && data.executor) {
+      if (data.executor.is_running) {
+        execBadge.className = 'badge badge-sm badge-green pulse';
+        execBadge.textContent = `🟢 ACTIVE (PID: ${data.executor.pid})`;
+      } else if (data.executor.status === 'STALE') {
+        execBadge.className = 'badge badge-sm badge-amber';
+        execBadge.textContent = `🟡 STALE (PID: ${data.executor.pid})`;
+      } else {
+        execBadge.className = 'badge badge-sm badge-outline';
+        execBadge.textContent = '⚪ IDLE (Not Executing)';
+      }
+    }
+
+    // 2. Backup safety badge & tag
+    const backupBadge = document.getElementById('monitor-backup-badge');
+    const backupSafetyTag = document.getElementById('monitor-backup-safety-tag');
+    if (data.backup_safety) {
+      if (data.backup_safety.is_locked) {
+        if (backupBadge) {
+          backupBadge.className = 'badge badge-sm badge-amber pulse';
+          backupBadge.textContent = '🔒 Backup: ACTIVE IN PROGRESS';
+        }
+        if (backupSafetyTag) {
+          backupSafetyTag.className = 'badge badge-sm badge-amber pulse';
+          backupSafetyTag.textContent = 'Backup In Progress';
+        }
+      } else {
+        if (backupBadge) {
+          backupBadge.className = 'badge badge-sm badge-blue';
+          backupBadge.textContent = '🛡️ Backup Lock: CLEAR';
+        }
+        if (backupSafetyTag) {
+          backupSafetyTag.className = 'badge badge-sm badge-green';
+          backupSafetyTag.textContent = 'Safe (No Collision)';
+        }
+      }
+    }
+
+    // 3. Last updated timestamp
+    const updatedEl = document.getElementById('monitor-last-updated');
+    if (updatedEl && data.timestamp) {
+      const parts = data.timestamp.split(' ');
+      updatedEl.textContent = `Updated: ${parts[1] || data.timestamp}`;
+    }
+
+    // 4. Current Pipeline Activity / Step
+    const currentStepEl = document.getElementById('monitor-current-step');
+    if (currentStepEl) {
+      currentStepEl.textContent = data.activity?.current_step || '—';
+    }
+
+    // 5. Upload Telemetry & Progress Bar
+    const uploadPctEl = document.getElementById('monitor-upload-pct');
+    const uploadBarEl = document.getElementById('monitor-upload-bar');
+    const uploadSubtextEl = document.getElementById('monitor-upload-subtext');
+
+    if (data.activity?.upload_details) {
+      const u = data.activity.upload_details;
+      if (uploadPctEl) uploadPctEl.textContent = `${u.pct}%`;
+      if (uploadBarEl) uploadBarEl.style.width = `${u.pct}%`;
+      if (uploadSubtextEl) {
+        uploadSubtextEl.textContent = `Asset ${u.current}/${u.total}: ${u.filename} (${u.size}) · ETA: ${u.eta} (${u.speed})`;
+      }
+    } else if (data.activity?.upload_progress) {
+      if (uploadPctEl) uploadPctEl.textContent = 'Syncing';
+      if (uploadBarEl) uploadBarEl.style.width = '100%';
+      if (uploadSubtextEl) uploadSubtextEl.textContent = data.activity.upload_progress;
+    } else {
+      if (uploadPctEl) uploadPctEl.textContent = 'Idle';
+      if (uploadBarEl) uploadBarEl.style.width = '0%';
+      if (uploadSubtextEl) uploadSubtextEl.textContent = 'No active upload stream detected · Executor is waiting or processing metadata';
+    }
+
+    // 6. Active Execution Queue
+    const queueListEl = document.getElementById('monitor-queue-list');
+    const queueBadgeEl = document.getElementById('monitor-queue-badge');
+    if (queueBadgeEl) {
+      queueBadgeEl.textContent = `${data.queue_count || 0} batches`;
+    }
+
+    if (queueListEl) {
+      if (!data.queue || data.queue.length === 0) {
+        queueListEl.innerHTML = '<div class="text-muted" style="font-size: 0.8rem; padding: 0.5rem 0;">(Queue is currently empty)</div>';
+      } else {
+        queueListEl.innerHTML = data.queue.map(b => {
+          const markerBadge = b.is_in_progress
+            ? '<span class="badge badge-xs badge-green pulse">▶ IN PROGRESS</span>'
+            : '<span class="badge badge-xs badge-outline">⏳ QUEUED</span>';
+          
+          let statusBadgeClass = 'badge-purple';
+          if (b.status_code === '400') statusBadgeClass = 'badge-green';
+          else if (b.status_code && b.status_code.includes('E')) statusBadgeClass = 'badge-red';
+          else if (b.status_code === '000') statusBadgeClass = 'badge-outline';
+
+          return `
+            <div class="queue-item ${b.is_in_progress ? 'in-progress' : ''}">
+              <div class="queue-main">
+                ${markerBadge}
+                <div class="queue-details">
+                  <div style="display: flex; align-items: center; gap: 0.4rem;">
+                    <strong>${b.month}</strong>
+                    <span class="badge badge-xs ${statusBadgeClass}">${b.status_code} (${b.status_label || 'Status'})</span>
+                  </div>
+                  <span class="font-mono text-muted" style="font-size: 0.7rem;">Q-ID: #${b.id} · Scheduled: ${b.set_at_utc || '-'}</span>
+                </div>
+              </div>
+              <span class="font-mono text-muted" style="font-size: 0.72rem;">${b.updated_at_utc ? 'Updated: ' + (b.updated_at_utc.split(' ')[1] || b.updated_at_utc) : ''}</span>
+            </div>
+          `;
+        }).join('');
+      }
+    }
+
+    // 7. Recent Log Activity Tail
+    const logBoxEl = document.getElementById('monitor-log-box');
+    if (logBoxEl && data.activity?.log_tail) {
+      if (data.activity.log_tail.length === 0) {
+        logBoxEl.textContent = '(No recent log activity in logs/media_organizer.log)';
+      } else {
+        logBoxEl.textContent = data.activity.log_tail.join('\n');
+        logBoxEl.scrollTop = logBoxEl.scrollHeight;
+      }
+    }
+
+  } catch (err) {
+    console.error('Executor monitor error:', err);
   }
 }
 
