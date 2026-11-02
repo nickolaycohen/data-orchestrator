@@ -28,6 +28,13 @@ TASK_DEFINITIONS = {
         "cwd_repo": "media-organizer-pipeline",
         "cmd": ["python3", "scripts/monitor_executor.py"]
     },
+    "media_bg_service": {
+        "name": "Background DB Copy & Sync Service",
+        "pillar": "media-organizer-pipeline",
+        "description": "Continuously monitors Apple Photos library for changes, copies the SQLite DB, and syncs raw/derived metadata.",
+        "cwd_repo": "media-organizer-pipeline",
+        "cmd": ["python3", "scripts/bg_copy_db_service.py"]
+    },
     "media_triage": {
         "name": "Pre-Intake Triage Gateway",
         "pillar": "media-organizer-pipeline",

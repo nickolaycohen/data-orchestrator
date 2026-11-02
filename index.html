@@ -255,9 +255,11 @@
                   <h3 style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
                     Media Scheduler & Executor Monitor
                     <span class="badge badge-sm" id="monitor-executor-badge">Checking...</span>
+                    <span class="badge badge-sm badge-outline" id="monitor-bg-service-badge">🔄 BG Sync: Checking...</span>
+                    <span class="badge badge-sm badge-outline" id="monitor-db-lock-badge">🔓 DB Lock: Checking</span>
                     <span class="badge badge-sm badge-blue" id="monitor-backup-badge">🛡️ Backup Lock: Checking</span>
                   </h3>
-                  <p class="card-subtitle">Real-time batch execution queue, live Google Photos upload telemetry, and nightly backup coordination</p>
+                  <p class="card-subtitle">Real-time batch execution queue, background database sync service, live Google Photos upload telemetry, and nightly backup coordination</p>
                 </div>
               </div>
               <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
@@ -287,6 +289,109 @@
                   <div class="gauge-bar-fill fill-purple" id="monitor-upload-bar" style="width: 0%;"></div>
                 </div>
                 <span class="monitor-tile-subtext" id="monitor-upload-subtext">No active upload stream detected</span>
+              </div>
+            </div>
+
+            <!-- Google Photos Upload Throughput Timeline Graph (upload_to_google_photos.py) -->
+            <div class="throughput-panel mb-3" id="upload-throughput-panel">
+              <div class="throughput-header">
+                <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                  <strong>📈 Upload Throughput Timeline</strong>
+                  <code style="font-size: 0.72rem; color: var(--text-muted);">scripts/upload_to_google_photos.py</code>
+                  <div class="throughput-legend">
+                    <span class="legend-item"><span class="legend-dot dot-cyan"></span> Photo (MB/s)</span>
+                    <span class="legend-item"><span class="legend-dot dot-purple"></span> Video (MB/s)</span>
+                    <span class="legend-item"><span class="legend-line line-amber"></span> Rolling Avg</span>
+                  </div>
+                </div>
+                <div class="throughput-kpis">
+                  <span class="tp-kpi-pill">Rolling: <strong class="text-amber font-mono" id="tp-rolling-mbps">—</strong></span>
+                  <span class="tp-kpi-pill">Latest: <strong class="text-blue font-mono" id="tp-latest-mbps">—</strong></span>
+                  <span class="tp-kpi-pill">Peak: <strong class="text-green font-mono" id="tp-peak-mbps">—</strong></span>
+                  <span class="tp-kpi-pill">Avg: <strong class="text-purple font-mono" id="tp-avg-mbps">—</strong></span>
+                  <span class="tp-kpi-pill">Window: <strong class="font-mono" id="tp-window-vol">—</strong></span>
+                </div>
+              </div>
+              <div class="throughput-controls">
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                  <div class="tp-scale-group" title="Horizontal Window Scale (Number of Uploaded Assets)">
+                    <span class="tp-scale-label">X-Window:</span>
+                    <button class="tp-scale-btn" data-tp-win="25">25</button>
+                    <button class="tp-scale-btn" data-tp-win="50">50</button>
+                    <button class="tp-scale-btn active" data-tp-win="100">100</button>
+                    <button class="tp-scale-btn" data-tp-win="250">250</button>
+                    <button class="tp-scale-btn" data-tp-win="0">All</button>
+                  </div>
+                  <div class="tp-scale-group" title="Vertical Throughput Axis Scale (MB/s)">
+                    <span class="tp-scale-label">Y-Scale:</span>
+                    <button class="tp-scale-btn active" data-tp-yscale="auto">Auto</button>
+                    <button class="tp-scale-btn" data-tp-yscale="p95" title="Clamp Y-axis to 95th percentile so outliers don't flatten the curve">P95</button>
+                    <button class="tp-scale-btn" data-tp-yscale="2">2 MB/s</button>
+                    <button class="tp-scale-btn" data-tp-yscale="5">5 MB/s</button>
+                    <button class="tp-scale-btn" data-tp-yscale="log" title="Logarithmic throughput scale">Log</button>
+                  </div>
+                  <div class="tp-scale-group" title="Chart Vertical Height Preset (or drag bottom edge)">
+                    <span class="tp-scale-label">Height:</span>
+                    <button class="tp-scale-btn active" data-tp-height="185">1x</button>
+                    <button class="tp-scale-btn" data-tp-height="280">1.5x</button>
+                    <button class="tp-scale-btn" data-tp-height="380">2x</button>
+                  </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <span class="tp-range-info font-mono" id="tp-range-label" title="Scroll wheel on chart to zoom, drag horizontally to pan">Scroll to zoom · Drag to pan</span>
+                  <button class="btn btn-xs btn-outline" id="tp-reset-zoom" style="display: none; padding: 0.15rem 0.5rem; font-size: 0.68rem;">Reset View</button>
+                </div>
+              </div>
+              <div class="throughput-chart-wrap" id="throughput-chart-wrap">
+                <div class="throughput-empty" id="throughput-empty-msg">Loading upload throughput timeline from logs/media_organizer.log...</div>
+                <svg id="throughput-svg" class="throughput-svg" viewBox="0 0 860 185" style="display: none;"></svg>
+                <div id="throughput-tooltip" class="throughput-tooltip" style="display: none;"></div>
+              </div>
+            </div>
+
+            <!-- Background Database Copy & Sync Service Status Panel -->
+            <div class="bg-service-panel mb-3" id="bg-service-status-panel">
+              <div class="bg-service-header">
+                <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                  <strong>🔄 Background Database Copy & Sync Service</strong>
+                  <code style="font-size: 0.72rem; color: var(--text-muted);">scripts/bg_copy_db_service.py</code>
+                  <span class="badge badge-xs badge-outline" id="bg-service-state-pill">Checking...</span>
+                  <span class="badge badge-xs badge-green" id="bg-service-sync-pill">Replica Up to Date</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.45rem;">
+                  <button class="btn btn-xs btn-green" id="btn-toggle-bg-service" title="Start or Stop Background DB Sync Service">
+                    ▶ Start Service
+                  </button>
+                  <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_bg_service')" title="Stream bg_copy_db_service.py in Live Console">
+                    &gt;_ Console
+                  </button>
+                </div>
+              </div>
+              <div class="bg-service-metrics-grid">
+                <div class="bg-metric-card">
+                  <span class="bg-metric-label">Service Daemon</span>
+                  <span class="bg-metric-val" id="bg-metric-process">—</span>
+                  <span class="bg-metric-sub" id="bg-metric-process-sub">60s check loop</span>
+                </div>
+                <div class="bg-metric-card">
+                  <span class="bg-metric-label">Photos DB Copy Lock</span>
+                  <span class="bg-metric-val" id="bg-metric-lock">—</span>
+                  <span class="bg-metric-sub" id="bg-metric-lock-sub">Photos.sqlite.lock</span>
+                </div>
+                <div class="bg-metric-card">
+                  <span class="bg-metric-label">Last Replica Refresh</span>
+                  <span class="bg-metric-val font-mono" id="bg-metric-last-sync">—</span>
+                  <span class="bg-metric-sub" id="bg-metric-last-summary">—</span>
+                </div>
+                <div class="bg-metric-card">
+                  <span class="bg-metric-label">Apple Photos Source DB</span>
+                  <span class="bg-metric-val font-mono" id="bg-metric-source-mod">—</span>
+                  <span class="bg-metric-sub" id="bg-metric-sync-reason">—</span>
+                </div>
+              </div>
+              <div class="bg-service-log-strip">
+                <span class="badge badge-xs badge-outline font-mono">BG LOG</span>
+                <span class="font-mono" id="bg-service-latest-log">Reading logs/bg_copy_db_service.log...</span>
               </div>
             </div>
 
@@ -388,13 +493,13 @@
                   </div>
                   <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_dedupe')">Run</button>
                 </div>
-                <div class="step-item">
+                <div class="step-item" style="cursor: pointer;" onclick="document.getElementById('upload-throughput-panel')?.scrollIntoView({behavior: 'smooth'})" title="Click to view Upload Throughput Timeline">
                   <span class="step-num">400</span>
                   <div class="step-info">
-                    <strong>Upload to Google Photos</strong>
-                    <p>Sync to 5TB Google Photos archive & clean staging</p>
+                    <strong>Upload to Google Photos <code style="font-size: 0.7rem; color: var(--text-muted); font-weight: 400;">upload_to_google_photos.py</code></strong>
+                    <p>Sync to 5TB Google Photos archive &amp; clean staging · Live throughput graphed above</p>
                   </div>
-                  <span class="badge badge-sm badge-outline">Step</span>
+                  <span class="badge badge-sm badge-outline" id="step-400-badge">Step</span>
                 </div>
                 <div class="step-item">
                   <span class="step-num">600</span>
@@ -407,17 +512,40 @@
               </div>
             </div>
 
-            <!-- Track 2: Featured Moments -->
+            <!-- Track 2: Featured Moments & Published History -->
             <div class="card">
-              <div class="card-header">
+              <div class="card-header" style="margin-bottom: 0.65rem;">
                 <div>
-                  <h3>Track 2: Memory Feature & Publishing (Mode [M])</h3>
-                  <p class="card-subtitle">Aesthetic ranking and physical album publishing</p>
+                  <h3>Track 2: Memory Feature &amp; Publishing (Mode [M])</h3>
+                  <p class="card-subtitle">
+                    Published history to
+                    <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-shutterfly">Shutterfly ↗</a> (Photos) &amp;
+                    <a href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-youtube">YouTube ↗</a> (Videos) with normalized scoring
+                  </p>
                 </div>
-                <span class="badge badge-green">Curated Memories</span>
+                <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                  <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="badge badge-sm badge-amber font-mono pub-badge-link" id="pub-shutterfly-badge" title="Open Shutterfly Photos (photos.shutterfly.com)">📷 Shutterfly: — ↗</a>
+                  <a href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer" class="badge badge-sm badge-purple font-mono pub-badge-link" id="pub-youtube-badge" title="Open YouTube (youtube.com)">🎥 YouTube: — ↗</a>
+                  <span class="badge badge-sm badge-green font-mono" id="pub-moments-badge">Published Memories</span>
+                </div>
               </div>
-              <div class="moments-container" id="featured-moments-list">
-                <div class="loading-spinner">Loading featured moments...</div>
+              <div class="pub-history-controls">
+                <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                  <div class="tp-scale-group" title="Sort Published Moments">
+                    <span class="tp-scale-label">Order By:</span>
+                    <button class="tp-scale-btn active" data-pub-sort="score">★ Normalized Score</button>
+                    <button class="tp-scale-btn" data-pub-sort="date">🕒 Date Published</button>
+                  </div>
+                  <div class="tp-scale-group" title="Filter by Platform">
+                    <button class="tp-scale-btn active" data-pub-filter="all">All</button>
+                    <button class="tp-scale-btn" data-pub-filter="shutterfly">📷 Shutterfly</button>
+                    <button class="tp-scale-btn" data-pub-filter="youtube">🎥 YouTube</button>
+                  </div>
+                </div>
+                <input type="text" id="pub-history-search" class="pub-search-input" placeholder="Search moment..." />
+              </div>
+              <div class="moments-container pub-moments-scroll" id="featured-moments-list">
+                <div class="loading-spinner">Loading published moments history...</div>
               </div>
             </div>
           </div>

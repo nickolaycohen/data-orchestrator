@@ -60,6 +60,24 @@ function setupRefresh() {
   document.getElementById('btn-refresh-monitor')?.addEventListener('click', () => {
     fetchExecutorMonitor();
   });
+  document.getElementById('btn-toggle-bg-service')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const action = btn.dataset.action || 'start';
+    btn.disabled = true;
+    btn.textContent = action === 'stop' ? 'Stopping...' : 'Starting...';
+    try {
+      await fetch('/api/media/bg-service/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      });
+      await fetchExecutorMonitor();
+    } catch (err) {
+      console.error('BG Service control error:', err);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 async function fetchAllMetrics() {
@@ -192,21 +210,27 @@ async function fetchMediaMetrics() {
       document.getElementById('topo-media-stat').textContent = `${(stats.total_assets || 0).toLocaleString()} assets · ${(stats.curated_moments || 0)} moments`;
     }
 
-    // Featured moments list
-    const momentsContainer = document.getElementById('featured-moments-list');
-    if (momentsContainer && data.featured_moments) {
-      momentsContainer.innerHTML = data.featured_moments.slice(0, 5).map(m => `
-        <div class="moment-card">
-          <div>
-            <div class="moment-name">${m.moment_name}</div>
-            <div style="font-size: 0.75rem; color: #94a3b8;">Stage: ${m.memory_stage || 'Candidate'}</div>
+    // Published Moments History (Shutterfly & YouTube)
+    if (data.published_moments) {
+      publishedMomentsCache = data.published_moments;
+      publishedSummaryCache = data.published_summary || {};
+      renderPublishedMomentsHistory();
+    } else if (data.featured_moments) {
+      const momentsContainer = document.getElementById('featured-moments-list');
+      if (momentsContainer) {
+        momentsContainer.innerHTML = data.featured_moments.slice(0, 5).map(m => `
+          <div class="moment-card">
+            <div>
+              <div class="moment-name">${m.moment_name}</div>
+              <div style="font-size: 0.75rem; color: #94a3b8;">Stage: ${m.memory_stage || 'Candidate'}</div>
+            </div>
+            <div class="moment-counts">
+              <span class="badge badge-sm badge-green">${m.curated_count || 0} curated</span>
+              <span class="badge badge-sm badge-outline">${m.to_be_curated_count || 0} proposed</span>
+            </div>
           </div>
-          <div class="moment-counts">
-            <span class="badge badge-sm badge-green">${m.curated_count || 0} curated</span>
-            <span class="badge badge-sm badge-outline">${m.to_be_curated_count || 0} proposed</span>
-          </div>
-        </div>
-      `).join('');
+        `).join('');
+      }
     }
 
     // Pipeline executions table
@@ -228,6 +252,255 @@ async function fetchMediaMetrics() {
   }
 }
 
+let publishedMomentsCache = [];
+let publishedSummaryCache = {};
+let pubControlsAttached = false;
+const pubHistoryState = {
+  sortBy: 'score', // 'score' | 'date'
+  sortDir: 'desc', // 'desc' | 'asc'
+  platformFilter: 'all', // 'all' | 'shutterfly' | 'youtube'
+  searchQuery: ''
+};
+
+function renderPublishedMomentsHistory() {
+  const momentsContainer = document.getElementById('featured-moments-list');
+  if (!momentsContainer) return;
+
+  const sfBadge = document.getElementById('pub-shutterfly-badge');
+  const ytBadge = document.getElementById('pub-youtube-badge');
+  const totBadge = document.getElementById('pub-moments-badge');
+
+  if (sfBadge) {
+    sfBadge.textContent = `📷 Shutterfly: ${(publishedSummaryCache.shutterfly_assets || 0).toLocaleString()} ↗`;
+  }
+  if (ytBadge) {
+    ytBadge.textContent = `🎥 YouTube: ${(publishedSummaryCache.youtube_assets || 0).toLocaleString()} ↗`;
+  }
+  if (totBadge) {
+    const mCount = publishedSummaryCache.total_moments || publishedMomentsCache.length || 0;
+    const aCount = publishedSummaryCache.total_assets || 0;
+    totBadge.textContent = `${mCount} Moments · ${aCount} Published`;
+  }
+
+  if (!pubControlsAttached) {
+    pubControlsAttached = true;
+    document.querySelectorAll('[data-pub-sort]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.getAttribute('data-pub-sort');
+        if (pubHistoryState.sortBy === key) {
+          pubHistoryState.sortDir = pubHistoryState.sortDir === 'desc' ? 'asc' : 'desc';
+        } else {
+          pubHistoryState.sortBy = key;
+          pubHistoryState.sortDir = 'desc';
+        }
+        renderPublishedMomentsHistory();
+      });
+    });
+
+    document.querySelectorAll('[data-pub-filter]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        pubHistoryState.platformFilter = btn.getAttribute('data-pub-filter');
+        document.querySelectorAll('[data-pub-filter]').forEach(b => b.classList.toggle('active', b === btn));
+        renderPublishedMomentsHistory();
+      });
+    });
+
+    const searchInput = document.getElementById('pub-history-search');
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        pubHistoryState.searchQuery = (e.target.value || '').trim().toLowerCase();
+        renderPublishedMomentsHistory();
+      });
+    }
+  }
+
+  // Update sort button labels with direction arrows
+  document.querySelectorAll('[data-pub-sort]').forEach(btn => {
+    const key = btn.getAttribute('data-pub-sort');
+    const isAct = key === pubHistoryState.sortBy;
+    btn.classList.toggle('active', isAct);
+    const arrow = isAct ? (pubHistoryState.sortDir === 'desc' ? ' ↓' : ' ↑') : '';
+    if (key === 'score') {
+      btn.textContent = `★ Normalized Score${arrow}`;
+    } else if (key === 'date') {
+      btn.textContent = `🕒 Date Published${arrow}`;
+    }
+  });
+
+  let filtered = [...publishedMomentsCache];
+  if (pubHistoryState.platformFilter === 'shutterfly') {
+    filtered = filtered.filter(m => (m.shutterfly_count || 0) > 0);
+  } else if (pubHistoryState.platformFilter === 'youtube') {
+    filtered = filtered.filter(m => (m.youtube_count || 0) > 0);
+  }
+
+  if (pubHistoryState.searchQuery) {
+    const q = pubHistoryState.searchQuery;
+    filtered = filtered.filter(m =>
+      (m.moment_name || '').toLowerCase().includes(q) ||
+      (m.published_at_local || '').toLowerCase().includes(q) ||
+      (m.capture_range || '').toLowerCase().includes(q)
+    );
+  }
+
+  const dirMul = pubHistoryState.sortDir === 'desc' ? -1 : 1;
+  filtered.sort((a, b) => {
+    if (pubHistoryState.sortBy === 'date') {
+      const da = a.published_at_utc || '';
+      const db = b.published_at_utc || '';
+      if (da !== db) return da < db ? -1 * dirMul : 1 * dirMul;
+      return ((a.avg_score || 0) - (b.avg_score || 0)) * dirMul;
+    } else {
+      const sa = a.avg_score || 0;
+      const sb = b.avg_score || 0;
+      if (sa !== sb) return (sa - sb) * dirMul;
+      const da = a.published_at_utc || '';
+      const db = b.published_at_utc || '';
+      return da < db ? 1 : -1;
+    }
+  });
+
+  if (filtered.length === 0) {
+    momentsContainer.innerHTML = `<div style="padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.8rem;">No published moments match the active filter.</div>`;
+    return;
+  }
+
+  momentsContainer.innerHTML = filtered.map((m, idx) => {
+    const hasSfUrl = Boolean(m.shutterfly_url);
+    const hasYtUrl = Boolean(m.youtube_url);
+    const isEditing = pubHistoryState.editingMoment === m.moment_name;
+    const escapedMoment = (m.moment_name || '').replace(/"/g, '&quot;');
+
+    let sfPill = '';
+    if (m.shutterfly_count > 0) {
+      if (hasSfUrl) {
+        sfPill = `<a href="${m.shutterfly_url}" target="_blank" rel="noopener noreferrer" class="badge badge-xs badge-amber font-mono pub-badge-link" title="Open Shutterfly Album: ${m.shutterfly_url}">📷 Shutterfly: ${m.shutterfly_count} ↗</a>`;
+      } else {
+        sfPill = `<button type="button" class="badge badge-xs badge-amber font-mono pub-badge-link pub-badge-unset" data-edit-moment="${escapedMoment}" title="No Shutterfly Album URL saved yet — click to enter album link">📷 Shutterfly: ${m.shutterfly_count} +Link</button>`;
+      }
+    }
+
+    let ytPill = '';
+    if (m.youtube_count > 0) {
+      if (hasYtUrl) {
+        ytPill = `<a href="${m.youtube_url}" target="_blank" rel="noopener noreferrer" class="badge badge-xs badge-purple font-mono pub-badge-link" title="Open YouTube Video: ${m.youtube_url}">🎥 YouTube: ${m.youtube_count} ↗</a>`;
+      } else {
+        ytPill = `<button type="button" class="badge badge-xs badge-purple font-mono pub-badge-link pub-badge-unset" data-edit-moment="${escapedMoment}" title="No YouTube Video URL saved yet — click to enter video link">🎥 YouTube: ${m.youtube_count} +Link</button>`;
+      }
+    }
+
+    const fallbackPill = (!sfPill && !ytPill)
+      ? `<span class="badge badge-xs badge-outline font-mono">${m.published_count} published</span>`
+      : '';
+    const acctTitle = (m.accounts && m.accounts.length) ? `Account: ${m.accounts.join(', ')}` : 'Published Moment';
+
+    const editorHtml = isEditing ? `
+      <div class="pub-url-editor" data-editor-for="${escapedMoment}">
+        <div class="pub-url-row">
+          <span class="pub-url-label">📷 Shutterfly:</span>
+          <input type="url" class="pub-url-input" data-sf-input="${escapedMoment}" placeholder="https://photos.shutterfly.com/album/..." value="${(m.shutterfly_url || '').replace(/"/g, '&quot;')}" />
+          <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-outline" title="Open Shutterfly to copy album link">Open ↗</a>
+        </div>
+        <div class="pub-url-row">
+          <span class="pub-url-label">🎥 YouTube:</span>
+          <input type="url" class="pub-url-input" data-yt-input="${escapedMoment}" placeholder="https://youtu.be/... or https://www.youtube.com/watch?v=..." value="${(m.youtube_url || '').replace(/"/g, '&quot;')}" />
+          <a href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-outline" title="Open YouTube Studio to copy video link">Studio ↗</a>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.15rem;">
+          <button type="button" class="btn btn-xs btn-outline" data-cancel-url="${escapedMoment}">Cancel</button>
+          <button type="button" class="btn btn-xs btn-green" data-save-url="${escapedMoment}">Save Links</button>
+        </div>
+      </div>
+    ` : '';
+
+    return `
+      <div class="moment-card" style="flex-direction: column; align-items: stretch;" title="${acctTitle}">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;">
+          <div style="min-width: 0; flex: 1;">
+            <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+              <span class="pub-rank-num">#${idx + 1}</span>
+              <span class="moment-name">${m.moment_name}</span>
+              <span class="badge badge-xs badge-outline font-mono">${m.memory_stage || 'M500'}</span>
+            </div>
+            <div class="pub-meta-line">
+              <span title="Published Timestamp (Local)">🕒 ${m.published_at_local}</span>
+              <span title="Capture Date Range">📸 ${m.capture_range}</span>
+            </div>
+          </div>
+          <div class="moment-counts">
+            ${sfPill}
+            ${ytPill}
+            ${fallbackPill}
+            <button type="button" class="pub-edit-url-btn" data-edit-moment="${escapedMoment}" title="Set or Edit Shutterfly Album / YouTube Video URLs">🔗</button>
+            <div class="pub-score-badge" title="Normalized Aesthetic + Favorites Score (Range: ${m.score_range})">
+              <span class="pub-score-val">★ ${m.avg_score.toFixed(4)}</span>
+              <span class="pub-score-rng">${m.score_range}</span>
+            </div>
+          </div>
+        </div>
+        ${editorHtml}
+      </div>
+    `;
+  }).join('');
+
+  // Attach inline URL editor handlers
+  momentsContainer.querySelectorAll('[data-edit-moment]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mName = btn.getAttribute('data-edit-moment');
+      pubHistoryState.editingMoment = pubHistoryState.editingMoment === mName ? null : mName;
+      renderPublishedMomentsHistory();
+    });
+  });
+
+  momentsContainer.querySelectorAll('[data-cancel-url]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      pubHistoryState.editingMoment = null;
+      renderPublishedMomentsHistory();
+    });
+  });
+
+  momentsContainer.querySelectorAll('[data-save-url]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const mName = btn.getAttribute('data-save-url');
+      const sfInput = momentsContainer.querySelector(`[data-sf-input="${CSS.escape(mName)}"]`);
+      const ytInput = momentsContainer.querySelector(`[data-yt-input="${CSS.escape(mName)}"]`);
+      const sfVal = sfInput ? sfInput.value.trim() : '';
+      const ytVal = ytInput ? ytInput.value.trim() : '';
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      try {
+        const res = await fetch('/api/media/published-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            moment_name: mName,
+            shutterfly_url: sfVal,
+            youtube_url: ytVal
+          })
+        });
+        const out = await res.json();
+        if (out.ok) {
+          const item = publishedMomentsCache.find(x => x.moment_name === mName);
+          if (item) {
+            item.shutterfly_url = sfVal;
+            item.youtube_url = ytVal;
+          }
+          pubHistoryState.editingMoment = null;
+          renderPublishedMomentsHistory();
+        } else {
+          alert(`Failed to save URL: ${out.error || 'Unknown error'}`);
+          btn.disabled = false;
+          btn.textContent = 'Save Links';
+        }
+      } catch (err) {
+        alert(`Error saving URL: ${err.message}`);
+        btn.disabled = false;
+        btn.textContent = 'Save Links';
+      }
+    });
+  });
+}
+
 // 2b. Media Scheduler & Executor Monitor
 async function fetchExecutorMonitor() {
   try {
@@ -239,13 +512,160 @@ async function fetchExecutorMonitor() {
     if (execBadge && data.executor) {
       if (data.executor.is_running) {
         execBadge.className = 'badge badge-sm badge-green pulse';
-        execBadge.textContent = `🟢 ACTIVE (PID: ${data.executor.pid})`;
+        execBadge.textContent = `🟢 Executor: ACTIVE (PID: ${data.executor.pid})`;
       } else if (data.executor.status === 'STALE') {
         execBadge.className = 'badge badge-sm badge-amber';
-        execBadge.textContent = `🟡 STALE (PID: ${data.executor.pid})`;
+        execBadge.textContent = `🟡 Executor: STALE (PID: ${data.executor.pid})`;
       } else {
         execBadge.className = 'badge badge-sm badge-outline';
-        execBadge.textContent = '⚪ IDLE (Not Executing)';
+        execBadge.textContent = '⚪ Executor: IDLE';
+      }
+    }
+
+    // 1b. Background Database Copy & Sync Service badges & panel
+    const bgBadge = document.getElementById('monitor-bg-service-badge');
+    const dbLockBadge = document.getElementById('monitor-db-lock-badge');
+    const bgStatePill = document.getElementById('bg-service-state-pill');
+    const bgSyncPill = document.getElementById('bg-service-sync-pill');
+    const btnToggleBg = document.getElementById('btn-toggle-bg-service');
+
+    if (data.bg_service) {
+      const bg = data.bg_service;
+
+      // Top Header BG Service Badge & Panel State Pill
+      if (bg.status === 'REFRESHING') {
+        if (bgBadge) {
+          bgBadge.className = 'badge badge-sm badge-purple pulse';
+          bgBadge.textContent = `🔄 BG Sync: REFRESHING (PID: ${bg.pid || bg.lock_pid})`;
+        }
+        if (bgStatePill) {
+          bgStatePill.className = 'badge badge-xs badge-purple pulse';
+          bgStatePill.textContent = `🔄 Refreshing (PID: ${bg.pid || bg.lock_pid})`;
+        }
+      } else if (bg.is_running) {
+        if (bgBadge) {
+          bgBadge.className = 'badge badge-sm badge-green';
+          bgBadge.textContent = `🟢 BG Sync: RUNNING (PID: ${bg.pid})`;
+        }
+        if (bgStatePill) {
+          bgStatePill.className = 'badge badge-xs badge-green';
+          bgStatePill.textContent = `🟢 Running (PID: ${bg.pid})`;
+        }
+      } else {
+        if (bgBadge) {
+          bgBadge.className = 'badge badge-sm badge-outline';
+          bgBadge.textContent = '⚪ BG Sync: STOPPED';
+        }
+        if (bgStatePill) {
+          bgStatePill.className = 'badge badge-xs badge-outline';
+          bgStatePill.textContent = '⚪ Stopped';
+        }
+      }
+
+      // Toggle Button state
+      if (btnToggleBg) {
+        if (bg.is_running) {
+          btnToggleBg.dataset.action = 'stop';
+          btnToggleBg.className = 'btn btn-xs btn-outline';
+          btnToggleBg.textContent = '⏹ Stop Service';
+        } else {
+          btnToggleBg.dataset.action = 'start';
+          btnToggleBg.className = 'btn btn-xs btn-green';
+          btnToggleBg.textContent = '▶ Start Service';
+        }
+      }
+
+      // Top Header DB Copy Lock Badge
+      if (dbLockBadge) {
+        if (bg.lock_status === 'available' || !bg.lock_status) {
+          dbLockBadge.className = 'badge badge-sm badge-outline';
+          dbLockBadge.textContent = '🔓 DB Lock: AVAILABLE';
+        } else if (bg.lock_pid && !bg.lock_pid_alive) {
+          dbLockBadge.className = 'badge badge-sm badge-red';
+          dbLockBadge.textContent = `⚠️ DB Lock: STALE (${bg.lock_status} · PID ${bg.lock_pid})`;
+        } else if (bg.lock_status === 'planner_active') {
+          dbLockBadge.className = 'badge badge-sm badge-amber';
+          dbLockBadge.textContent = `🔐 DB Lock: PLANNER (PID: ${bg.lock_pid})`;
+        } else if (bg.lock_status === 'executor_active') {
+          dbLockBadge.className = 'badge badge-sm badge-purple';
+          dbLockBadge.textContent = `🔐 DB Lock: EXECUTOR (PID: ${bg.lock_pid})`;
+        } else if (bg.lock_status === 'refreshing') {
+          dbLockBadge.className = 'badge badge-sm badge-purple pulse';
+          dbLockBadge.textContent = `🔄 DB Lock: REFRESHING (PID: ${bg.lock_pid})`;
+        } else {
+          dbLockBadge.className = 'badge badge-sm badge-blue';
+          dbLockBadge.textContent = `🔐 DB Lock: ${bg.lock_status}`;
+        }
+      }
+
+      // Sync Freshness Pill
+      if (bgSyncPill) {
+        if (bg.sync_state === 'REFRESHING') {
+          bgSyncPill.className = 'badge badge-xs badge-purple pulse';
+          bgSyncPill.textContent = '🔄 Syncing Metadata...';
+        } else if (bg.sync_state === 'UP_TO_DATE') {
+          bgSyncPill.className = 'badge badge-xs badge-green';
+          bgSyncPill.textContent = '✅ Replica Up to Date';
+        } else if (bg.sync_state === 'SYNC_PENDING') {
+          bgSyncPill.className = 'badge badge-xs badge-amber';
+          bgSyncPill.textContent = '⚠️ Sync Pending';
+        } else {
+          bgSyncPill.className = 'badge badge-xs badge-outline';
+          bgSyncPill.textContent = '⚠️ Source Drive Offline';
+        }
+      }
+
+      // 4 Metric Cards
+      const procEl = document.getElementById('bg-metric-process');
+      const procSubEl = document.getElementById('bg-metric-process-sub');
+      if (procEl) {
+        procEl.textContent = bg.is_running ? `🟢 Active (PID: ${bg.pid})` : '⚪ Stopped (Idle)';
+      }
+      if (procSubEl) {
+        procSubEl.textContent = bg.is_running ? 'Polling every 60s · Auto-sync enabled' : 'Auto-starts with Planner or via Start button';
+      }
+
+      const lockEl = document.getElementById('bg-metric-lock');
+      const lockSubEl = document.getElementById('bg-metric-lock-sub');
+      if (lockEl) {
+        if (bg.lock_status === 'available' || !bg.lock_status) {
+          lockEl.textContent = '🔓 Available';
+        } else if (bg.lock_pid && !bg.lock_pid_alive) {
+          lockEl.textContent = `⚠️ Stale (${bg.lock_status} · PID ${bg.lock_pid})`;
+        } else {
+          lockEl.textContent = `🔐 ${bg.lock_status} (PID: ${bg.lock_pid || '—'})`;
+        }
+      }
+      if (lockSubEl) {
+        lockSubEl.textContent = bg.lock_started_utc ? `Acquired: ${bg.lock_started_utc}` : 'No active lock contention';
+      }
+
+      const lastSyncEl = document.getElementById('bg-metric-last-sync');
+      const lastSumEl = document.getElementById('bg-metric-last-summary');
+      if (lastSyncEl) {
+        lastSyncEl.textContent = bg.latest_refresh_utc && bg.latest_refresh_utc !== '—'
+          ? (bg.latest_refresh_utc.endsWith('UTC') ? bg.latest_refresh_utc : `${bg.latest_refresh_utc} UTC`)
+          : '—';
+      }
+      if (lastSumEl) {
+        lastSumEl.textContent = bg.last_summary || '—';
+        lastSumEl.title = bg.last_summary || '';
+      }
+
+      const srcModEl = document.getElementById('bg-metric-source-mod');
+      const syncReasonEl = document.getElementById('bg-metric-sync-reason');
+      if (srcModEl) {
+        srcModEl.textContent = bg.source_online && bg.source_mod_utc !== '—' ? `${bg.source_mod_utc} UTC` : 'Offline';
+      }
+      if (syncReasonEl) {
+        syncReasonEl.textContent = bg.sync_reason || '—';
+        syncReasonEl.title = bg.sync_reason || '';
+      }
+
+      const bgLatestLogEl = document.getElementById('bg-service-latest-log');
+      if (bgLatestLogEl) {
+        bgLatestLogEl.textContent = bg.latest_event || 'No recent events in logs/bg_copy_db_service.log';
+        bgLatestLogEl.title = bg.latest_event || '';
       }
     }
 
@@ -360,8 +780,424 @@ async function fetchExecutorMonitor() {
       }
     }
 
+    // 8. Upload Throughput Timeline Graph (upload_to_google_photos.py)
+    if (data.throughput) {
+      renderThroughputTimeline(data.throughput, data.executor?.is_running);
+    }
+
   } catch (err) {
     console.error('Executor monitor error:', err);
+  }
+}
+
+let allThroughputPoints = [];
+let visibleThroughputPoints = [];
+let lastThroughputPayload = null;
+let lastExecutorRunning = false;
+let throughputInteractionsAttached = false;
+
+const tpState = {
+  windowSize: 100,   // 0 = All points, otherwise number of visible points
+  panOffset: 0,      // 0 = pinned to latest point, >0 = panned back by N points
+  yScaleMode: 'auto', // 'auto' | 'p95' | '2' | '5' | 'log'
+  chartW: 860,
+  chartH: 185,
+  isPanning: false,
+  panStartX: 0,
+  panStartOffset: 0
+};
+
+function computeTpYMapper(points, mode, padT, plotH) {
+  const vals = points.flatMap(p => [p.instant_mbps || 0, p.rolling_mbps || 0]).filter(v => v > 0);
+  const rawMax = vals.length ? Math.max(...vals) : 1.5;
+
+  if (mode === 'log') {
+    const minLogVal = 0.05; // 50 KB/s floor
+    const maxLogVal = Math.max(5.0, Math.ceil(rawMax * 1.25));
+    const logMin = Math.log10(minLogVal);
+    const logMax = Math.log10(maxLogVal);
+    const getY = (val) => {
+      const clamped = Math.max(minLogVal, Math.min(maxLogVal, val || minLogVal));
+      const ratio = (Math.log10(clamped) - logMin) / (logMax - logMin);
+      return padT + plotH - ratio * plotH;
+    };
+    const ticks = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0].filter(t => t >= minLogVal && t <= maxLogVal);
+    return { getY, maxY: maxLogVal, ticks, isLog: true };
+  }
+
+  let maxY = 2.0;
+  if (mode === '2') {
+    maxY = 2.0;
+  } else if (mode === '5') {
+    maxY = 5.0;
+  } else if (mode === 'p95' && vals.length >= 4) {
+    const sorted = [...vals].sort((a, b) => a - b);
+    const p95 = sorted[Math.floor(sorted.length * 0.95)];
+    maxY = Math.max(1.0, Math.ceil(p95 * 1.25 * 10) / 10);
+  } else {
+    maxY = Math.max(1.5, Math.ceil(rawMax * 1.15 * 10) / 10);
+  }
+
+  const getY = (val) => padT + plotH - (Math.min(maxY, Math.max(0, val || 0)) / maxY) * plotH;
+  const ticks = [0, 0.33, 0.66, 1.0].map(s => Number((maxY * s).toFixed(1)));
+  return { getY, maxY, ticks, isLog: false };
+}
+
+function updateTpControlButtons() {
+  const total = allThroughputPoints.length;
+  document.querySelectorAll('[data-tp-win]').forEach(btn => {
+    const v = Number(btn.getAttribute('data-tp-win'));
+    btn.classList.toggle('active', v === tpState.windowSize);
+  });
+  document.querySelectorAll('[data-tp-yscale]').forEach(btn => {
+    const m = btn.getAttribute('data-tp-yscale');
+    btn.classList.toggle('active', m === tpState.yScaleMode);
+  });
+  const resetBtn = document.getElementById('tp-reset-zoom');
+  if (resetBtn) {
+    const isCustom = tpState.panOffset > 0 || ![0, 25, 50, 100, 250].includes(tpState.windowSize) || tpState.yScaleMode !== 'auto';
+    resetBtn.style.display = isCustom ? 'inline-block' : 'none';
+  }
+  const rangeLabel = document.getElementById('tp-range-label');
+  if (rangeLabel && total > 0) {
+    const winCount = tpState.windowSize === 0 ? total : Math.min(total, tpState.windowSize);
+    const endIdx = Math.max(winCount, total - tpState.panOffset);
+    const startIdx = Math.max(0, endIdx - winCount);
+    if (tpState.panOffset > 0 || winCount < total) {
+      rangeLabel.textContent = `Showing ${startIdx + 1}–${endIdx} of ${total} (${winCount} pts)`;
+    } else {
+      rangeLabel.textContent = `Showing all ${total} pts · Scroll to zoom`;
+    }
+  }
+}
+
+function renderThroughputTimeline(throughput, isRunning) {
+  if (throughput) {
+    lastThroughputPayload = throughput;
+    lastExecutorRunning = Boolean(isRunning);
+  } else if (lastThroughputPayload) {
+    throughput = lastThroughputPayload;
+    isRunning = lastExecutorRunning;
+  } else {
+    return;
+  }
+
+  const summary = throughput.summary || {};
+  allThroughputPoints = throughput.points || [];
+  const total = allThroughputPoints.length;
+
+  // Compute visible slice according to windowSize + panOffset
+  const winCount = tpState.windowSize === 0 ? total : Math.min(total, Math.max(8, tpState.windowSize));
+  const maxPan = Math.max(0, total - winCount);
+  tpState.panOffset = Math.max(0, Math.min(maxPan, tpState.panOffset));
+  const endIdx = total - tpState.panOffset;
+  const startIdx = Math.max(0, endIdx - winCount);
+  const points = allThroughputPoints.slice(startIdx, endIdx);
+  visibleThroughputPoints = points;
+
+  updateTpControlButtons();
+
+  const rollingEl = document.getElementById('tp-rolling-mbps');
+  const latestEl = document.getElementById('tp-latest-mbps');
+  const peakEl = document.getElementById('tp-peak-mbps');
+  const avgEl = document.getElementById('tp-avg-mbps');
+  const volEl = document.getElementById('tp-window-vol');
+  const step400Badge = document.getElementById('step-400-badge');
+
+  // Recompute KPIs for the currently visible window so zooming/scaling updates stats dynamically
+  const winPeak = points.length ? Math.max(...points.map(p => p.instant_mbps || 0)) : (summary.peak_mbps || 0);
+  const winMb = points.reduce((acc, p) => acc + (p.size_mb || 0), 0);
+  const winDur = points.reduce((acc, p) => acc + (p.duration_s || 0), 0);
+  const winAvg = winDur > 0 ? (winMb / winDur) : (summary.avg_mbps || 0);
+  const winVideos = points.filter(p => p.is_video).length;
+  const winPhotos = points.length - winVideos;
+
+  if (rollingEl) rollingEl.textContent = summary.current_rolling_mbps ? `${summary.current_rolling_mbps.toFixed(2)} MB/s` : '—';
+  if (latestEl) latestEl.textContent = summary.latest_instant_mbps ? `${summary.latest_instant_mbps.toFixed(2)} MB/s` : '—';
+  if (peakEl) peakEl.textContent = winPeak ? `${winPeak.toFixed(2)} MB/s` : '—';
+  if (avgEl) avgEl.textContent = winAvg ? `${winAvg.toFixed(2)} MB/s` : '—';
+  if (volEl) {
+    volEl.textContent = points.length
+      ? `${winMb.toFixed(1)} MB (${points.length} files · ${winPhotos}P/${winVideos}V)`
+      : '0 MB';
+  }
+
+  if (step400Badge) {
+    if (isRunning && summary.current_rolling_mbps > 0) {
+      step400Badge.className = 'badge badge-sm badge-green pulse font-mono';
+      step400Badge.textContent = `⚡ ${summary.current_rolling_mbps.toFixed(2)} MB/s`;
+    } else if (summary.avg_mbps > 0) {
+      step400Badge.className = 'badge badge-sm badge-purple font-mono';
+      step400Badge.textContent = `Avg ${summary.avg_mbps.toFixed(2)} MB/s`;
+    } else {
+      step400Badge.className = 'badge badge-sm badge-outline';
+      step400Badge.textContent = 'Step';
+    }
+  }
+
+  const svg = document.getElementById('throughput-svg');
+  const emptyMsg = document.getElementById('throughput-empty-msg');
+  const wrap = document.getElementById('throughput-chart-wrap');
+  if (!svg || !emptyMsg || !wrap) return;
+
+  if (points.length === 0) {
+    svg.style.display = 'none';
+    emptyMsg.style.display = 'flex';
+    emptyMsg.textContent = 'No completed upload_to_google_photos events found in recent log window';
+    return;
+  }
+
+  emptyMsg.style.display = 'none';
+  svg.style.display = 'block';
+
+  const W = Math.max(420, wrap.clientWidth || 860);
+  const H = Math.max(145, wrap.clientHeight || 185);
+  tpState.chartW = W;
+  tpState.chartH = H;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  const padL = 52;
+  const padR = 16;
+  const padT = 14;
+  const padB = 24;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const { getY, ticks } = computeTpYMapper(points, tpState.yScaleMode, padT, plotH);
+
+  const n = points.length;
+  const getX = (i) => padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+
+  // Gridlines
+  const gridHtml = ticks.map(tickVal => {
+    const y = getY(tickVal).toFixed(1);
+    const label = tickVal < 0.1 && tickVal > 0 ? tickVal.toFixed(2) : tickVal.toFixed(1);
+    return `
+      <line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="rgba(255,255,255,0.06)" stroke-width="1" />
+      <text x="${padL - 6}" y="${Number(y) + 3.5}" fill="#64748b" font-size="9.5" font-family="monospace" text-anchor="end">${label}</text>
+    `;
+  }).join('');
+
+  // X-axis time labels
+  const labelIndices = n <= 5
+    ? points.map((_, idx) => idx)
+    : [0, Math.floor((n - 1) * 0.25), Math.floor((n - 1) * 0.5), Math.floor((n - 1) * 0.75), n - 1];
+  const xLabelsHtml = [...new Set(labelIndices)].map(idx => {
+    const x = getX(idx).toFixed(1);
+    const t = points[idx].time;
+    const anchor = idx === 0 ? 'start' : (idx === n - 1 ? 'end' : 'middle');
+    return `<text x="${x}" y="${H - 6}" fill="#64748b" font-size="9.5" font-family="monospace" text-anchor="${anchor}">${t}</text>`;
+  }).join('');
+
+  // Coordinates for Instantaneous & Rolling polylines
+  const instCoords = points.map((p, i) => `${getX(i).toFixed(1)},${getY(p.instant_mbps).toFixed(1)}`);
+  const rollCoords = points.map((p, i) => `${getX(i).toFixed(1)},${getY(p.rolling_mbps).toFixed(1)}`);
+
+  const baseY = (padT + plotH).toFixed(1);
+  const areaPoints = `${getX(0).toFixed(1)},${baseY} ${instCoords.join(' ')} ${getX(n - 1).toFixed(1)},${baseY}`;
+
+  // Circles for each uploaded asset (purple for video, cyan for photo)
+  const dotRadiusPhoto = n > 180 ? '1.6' : (n < 40 ? '3.0' : '2.2');
+  const dotRadiusVideo = n > 180 ? '2.4' : (n < 40 ? '4.0' : '3.1');
+  const dotsHtml = points.map((p, i) => {
+    const cx = getX(i).toFixed(1);
+    const cy = getY(p.instant_mbps).toFixed(1);
+    const color = p.is_video ? '#c084fc' : '#38bdf8';
+    const r = p.is_video ? dotRadiusVideo : dotRadiusPhoto;
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${color}" />`;
+  }).join('');
+
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="tp-area-grad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.32" />
+        <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.0" />
+      </linearGradient>
+    </defs>
+    ${gridHtml}
+    ${xLabelsHtml}
+    <polygon points="${areaPoints}" fill="url(#tp-area-grad)" />
+    <polyline points="${instCoords.join(' ')}" fill="none" stroke="#38bdf8" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" />
+    <polyline points="${rollCoords.join(' ')}" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,3" stroke-linejoin="round" />
+    ${dotsHtml}
+    <line id="tp-hover-line" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="rgba(255,255,255,0.35)" stroke-width="1" stroke-dasharray="2,2" style="display:none;" />
+    <circle id="tp-hover-dot" cx="0" cy="0" r="5" fill="none" stroke="#fff" stroke-width="1.8" style="display:none;" />
+  `;
+
+  if (!throughputInteractionsAttached) {
+    throughputInteractionsAttached = true;
+    const tooltip = document.getElementById('throughput-tooltip');
+
+    // Toolbar X-Window scale buttons
+    document.querySelectorAll('[data-tp-win]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        tpState.windowSize = Number(btn.getAttribute('data-tp-win'));
+        tpState.panOffset = 0;
+        renderThroughputTimeline();
+      });
+    });
+
+    // Toolbar Y-Scale buttons
+    document.querySelectorAll('[data-tp-yscale]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        tpState.yScaleMode = btn.getAttribute('data-tp-yscale');
+        renderThroughputTimeline();
+      });
+    });
+
+    // Toolbar Height preset buttons
+    document.querySelectorAll('[data-tp-height]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const h = Number(btn.getAttribute('data-tp-height'));
+        document.querySelectorAll('[data-tp-height]').forEach(b => b.classList.toggle('active', b === btn));
+        wrap.style.height = `${h}px`;
+        renderThroughputTimeline();
+      });
+    });
+
+    // Reset Zoom / View button
+    const resetBtn = document.getElementById('tp-reset-zoom');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        tpState.windowSize = 100;
+        tpState.panOffset = 0;
+        tpState.yScaleMode = 'auto';
+        renderThroughputTimeline();
+      });
+    }
+
+    // ResizeObserver for crisp 1:1 SVG re-scaling on container resize or vertical drag
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => {
+        const nw = wrap.clientWidth;
+        const nh = wrap.clientHeight;
+        if (nw > 0 && nh > 0 && (Math.abs(nw - tpState.chartW) > 2 || Math.abs(nh - tpState.chartH) > 2)) {
+          renderThroughputTimeline();
+        }
+      });
+      ro.observe(wrap);
+    }
+
+    // Mouse-wheel zoom on X-axis around cursor position
+    wrap.addEventListener('wheel', (e) => {
+      if (allThroughputPoints.length <= 10) return;
+      e.preventDefault();
+      const totalPts = allThroughputPoints.length;
+      const curWin = tpState.windowSize === 0 ? totalPts : Math.min(totalPts, tpState.windowSize);
+      const zoomFactor = e.deltaY < 0 ? 0.8 : 1.25;
+      const nextWin = Math.max(10, Math.min(totalPts, Math.round(curWin * zoomFactor)));
+      if (nextWin === curWin) return;
+
+      const rect = wrap.getBoundingClientRect();
+      const cursorRatio = Math.max(0, Math.min(1, (e.clientX - rect.left - 52) / Math.max(1, rect.width - 68)));
+      const oldEnd = totalPts - tpState.panOffset;
+      const oldStart = Math.max(0, oldEnd - curWin);
+      const anchorIdx = oldStart + cursorRatio * curWin;
+      const newStart = Math.round(anchorIdx - cursorRatio * nextWin);
+      const newEnd = Math.min(totalPts, Math.max(nextWin, newStart + nextWin));
+
+      tpState.windowSize = nextWin === totalPts ? 0 : nextWin;
+      tpState.panOffset = Math.max(0, totalPts - newEnd);
+      renderThroughputTimeline();
+    }, { passive: false });
+
+    // Drag-to-pan horizontally across upload history
+    wrap.addEventListener('mousedown', (e) => {
+      // Allow native CSS bottom-right resize handle to work unimpeded
+      const rect = wrap.getBoundingClientRect();
+      if (rect.bottom - e.clientY < 16 && rect.right - e.clientX < 24) return;
+      tpState.isPanning = true;
+      tpState.panStartX = e.clientX;
+      tpState.panStartOffset = tpState.panOffset;
+      wrap.classList.add('is-panning');
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (tpState.isPanning) {
+        tpState.isPanning = false;
+        wrap.classList.remove('is-panning');
+      }
+    });
+
+    // Hover crosshair + Drag-pan movement
+    wrap.addEventListener('mousemove', (e) => {
+      const rect = wrap.getBoundingClientRect();
+      const curW = tpState.chartW;
+      const curH = tpState.chartH;
+      const curPlotW = curW - 52 - 16;
+      const curPlotH = curH - 14 - 24;
+
+      if (tpState.isPanning && allThroughputPoints.length > 1) {
+        const totalPts = allThroughputPoints.length;
+        const curWin = tpState.windowSize === 0 ? totalPts : Math.min(totalPts, tpState.windowSize);
+        if (curWin < totalPts) {
+          const dx = e.clientX - tpState.panStartX;
+          const ptsDelta = Math.round((dx / Math.max(1, rect.width - 68)) * curWin);
+          tpState.panOffset = Math.max(0, Math.min(totalPts - curWin, tpState.panStartOffset + ptsDelta));
+          renderThroughputTimeline();
+        }
+        return;
+      }
+
+      if (!visibleThroughputPoints.length) return;
+      const relX = ((e.clientX - rect.left) / rect.width) * curW;
+      const clampedX = Math.max(52, Math.min(curW - 16, relX));
+      const count = visibleThroughputPoints.length;
+      const idx = count === 1 ? 0 : Math.round(((clampedX - 52) / curPlotW) * (count - 1));
+      const pt = visibleThroughputPoints[Math.max(0, Math.min(count - 1, idx))];
+      if (!pt) return;
+
+      const { getY: curGetY } = computeTpYMapper(visibleThroughputPoints, tpState.yScaleMode, 14, curPlotH);
+      const px = 52 + (count === 1 ? curPlotW / 2 : (idx / (count - 1)) * curPlotW);
+      const py = curGetY(pt.instant_mbps);
+
+      const hLine = document.getElementById('tp-hover-line');
+      const hDot = document.getElementById('tp-hover-dot');
+      if (hLine) {
+        hLine.setAttribute('x1', px.toFixed(1));
+        hLine.setAttribute('x2', px.toFixed(1));
+        hLine.style.display = 'block';
+      }
+      if (hDot) {
+        hDot.setAttribute('cx', px.toFixed(1));
+        hDot.setAttribute('cy', py.toFixed(1));
+        hDot.style.display = 'block';
+      }
+      if (tooltip) {
+        const typeBadge = pt.is_video
+          ? '<span class="badge badge-xs badge-purple">VIDEO</span>'
+          : '<span class="badge badge-xs badge-blue">PHOTO</span>';
+        tooltip.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;margin-bottom:0.2rem;">
+            <strong class="font-mono">[${pt.asset_ref}] ${pt.filename}</strong>
+            ${typeBadge}
+          </div>
+          <div style="color:#94a3b8;font-family:var(--font-mono);font-size:0.68rem;margin-bottom:0.25rem;">
+            Batch ${pt.batch} · ${pt.time} · ${pt.size_mb} MB in ${pt.duration_s}s
+          </div>
+          <div style="display:flex;justify-content:space-between;gap:0.75rem;">
+            <span>Instant: <strong style="color:#38bdf8" class="font-mono">${pt.instant_mbps.toFixed(2)} MB/s</strong></span>
+            <span>Rolling: <strong style="color:#fbbf24" class="font-mono">${pt.rolling_mbps.toFixed(2)} MB/s</strong></span>
+          </div>
+        `;
+        tooltip.style.display = 'block';
+        const tipW = tooltip.offsetWidth || 220;
+        let leftPx = e.clientX - rect.left + 12;
+        if (leftPx + tipW > rect.width - 8) {
+          leftPx = Math.max(8, e.clientX - rect.left - tipW - 12);
+        }
+        tooltip.style.left = `${leftPx}px`;
+        tooltip.style.top = '10px';
+      }
+    });
+
+    wrap.addEventListener('mouseleave', () => {
+      const hLine = document.getElementById('tp-hover-line');
+      const hDot = document.getElementById('tp-hover-dot');
+      if (hLine) hLine.style.display = 'none';
+      if (hDot) hDot.style.display = 'none';
+      if (tooltip) tooltip.style.display = 'none';
+    });
   }
 }
 
