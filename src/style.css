@@ -335,6 +335,16 @@ body {
   gap: 1.5rem;
 }
 
+.grid-tracks-col {
+  grid-template-columns: minmax(300px, 0.7fr) minmax(520px, 1.5fr);
+}
+
+@media (max-width: 980px) {
+  .grid-tracks-col {
+    grid-template-columns: 1fr;
+  }
+}
+
 .mb-3 { margin-bottom: 1rem; }
 .mb-4 { margin-bottom: 1.5rem; }
 
@@ -1710,4 +1720,214 @@ body {
   z-index: 20;
   min-width: 210px;
   backdrop-filter: blur(8px);
+}
+
+/* ==========================================================================
+   Utilities Tab & Directory Merge Tool
+   ========================================================================== */
+
+.merge-form-grid {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+@media (max-width: 900px) {
+  .merge-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.merge-swap-col {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 1.85rem;
+}
+
+@media (max-width: 900px) {
+  .merge-swap-col {
+    padding-top: 0;
+  }
+}
+
+.input-with-action {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-with-action .form-control {
+  padding-right: 2.2rem;
+}
+
+.btn-clear-input {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0.15rem 0.4rem;
+  font-size: 0.65rem;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.btn-clear-input:hover {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.form-dir-status {
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  margin-top: 0.35rem;
+  min-height: 1.1rem;
+}
+
+.form-dir-status.status-ok {
+  color: #34d399;
+}
+
+.form-dir-status.status-warn {
+  color: #fbbf24;
+}
+
+.form-dir-status.status-err {
+  color: #f87171;
+}
+
+.merge-options-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.merge-option-block {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.option-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.radio-pills, .checkbox-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.radio-pill, .checkbox-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  background: rgba(7, 10, 17, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.55rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.radio-pill:hover, .checkbox-pill:hover {
+  border-color: rgba(99, 102, 241, 0.4);
+  color: var(--text-primary);
+}
+
+.radio-pill input, .checkbox-pill input {
+  accent-color: #6366f1;
+  cursor: pointer;
+}
+
+.form-select {
+  background: #090c12;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.75rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.form-select:focus {
+  border-color: rgba(99, 102, 241, 0.6);
+}
+
+.merge-actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding-top: 0.8rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.merge-cmd-preview {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  word-break: break-all;
+  flex: 1;
+}
+
+.merge-cmd-preview code {
+  color: #a5b4fc;
+}
+
+.merge-buttons-group {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.merge-log-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.merge-log-viewer-wrapper {
+  background: #05070b;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--radius-sm);
+  max-height: 480px;
+  min-height: 240px;
+  overflow: auto;
+  padding: 0.85rem 1.1rem;
+  position: relative;
+}
+
+.merge-log-pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  line-height: 1.55;
+  color: #cbd5e1;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.merge-log-pre code {
+  font-family: inherit;
+  font-size: inherit;
 }

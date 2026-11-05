@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from backend.routers import system, media, storage, idrive, gmail, runner, reports
+from backend.routers import system, media, storage, idrive, gmail, runner, reports, utilities
 
 app = FastAPI(
     title="Data Orchestrator API",
@@ -25,6 +25,11 @@ app.include_router(idrive.router)
 app.include_router(gmail.router)
 app.include_router(runner.router)
 app.include_router(reports.router)
+app.include_router(utilities.router)
+
+@app.websocket("/ws/{execution_id}")
+async def direct_ws_endpoint(websocket: WebSocket, execution_id: str):
+    await runner.websocket_logs(websocket, execution_id)
 
 @app.get("/")
 def root():

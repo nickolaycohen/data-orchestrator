@@ -7,7 +7,8 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8008',
-        changeOrigin: true
+        changeOrigin: true,
+        ws: true
       },
       '/ws': {
         target: 'ws://127.0.0.1:8008',

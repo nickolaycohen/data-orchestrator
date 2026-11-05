@@ -82,6 +82,10 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
           Reports & Docs
         </button>
+        <button class="nav-tab" data-tab="utilities">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>
+          Utilities
+        </button>
       </nav>
 
       <!-- Main Tab Content Container -->
@@ -458,7 +462,7 @@
           </div>
 
           <!-- Two-Track Architecture Overview -->
-          <div class="grid-2-col mb-4">
+          <div class="grid-2-col grid-tracks-col mb-4">
             <!-- Track 1: Batch Ingest -->
             <div class="card">
               <div class="card-header">
@@ -821,6 +825,167 @@
                   <p>Choose any markdown report, txt audit log, or CSV triage file from the left sidebar to inspect its content.</p>
                 </div>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 7. Utilities Panel -->
+        <section id="tab-utilities" class="tab-panel">
+          <div class="section-title-bar">
+            <div>
+              <h2>System &amp; Storage Utilities</h2>
+              <p class="subtitle">Operational file &amp; volume maintenance: Recursive directory merger, chunk-level deduplication, and lock auto-bypass</p>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <button class="btn btn-outline" id="btn-utilities-refresh-all">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                Refresh Log
+              </button>
+            </div>
+          </div>
+
+          <!-- Directory Merge Tool Card -->
+          <div class="card mb-4">
+            <div class="card-header">
+              <div>
+                <h3>📁 Directory Merge Tool</h3>
+                <p class="card-subtitle">
+                  <code>scripts/merge_directories.py</code> · Recursively merges all files from source into destination, preserving relative paths with byte-level chunk deduplication.
+                </p>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <span class="badge badge-purple font-mono">Move / Copy</span>
+                <span class="badge badge-blue font-mono">Byte Dedup</span>
+                <span class="badge badge-green font-mono" id="merge-tool-state-badge">Ready</span>
+              </div>
+            </div>
+
+            <form id="merge-directories-form" onsubmit="return false;">
+              <!-- Source & Destination Fields Grid -->
+              <div class="merge-form-grid mb-3">
+                <div class="form-group">
+                  <label for="merge-source-dir">
+                    <strong>Source Directory</strong>
+                    <span class="text-muted" style="font-size: 0.75rem;">(Folder containing files to merge)</span>
+                  </label>
+                  <div class="input-with-action">
+                    <input type="text" id="merge-source-dir" class="form-control font-mono" placeholder="/path/to/source/folder" spellcheck="false" required />
+                    <button type="button" class="btn btn-xs btn-outline btn-clear-input" data-clear="merge-source-dir" title="Clear Source Path">✕</button>
+                  </div>
+                  <div class="form-dir-status" id="merge-source-status"></div>
+                </div>
+
+                <div class="merge-swap-col">
+                  <button type="button" class="btn btn-xs btn-outline" id="btn-merge-swap-dirs" title="Swap Source and Destination Directories">
+                    ⇄ Swap
+                  </button>
+                </div>
+
+                <div class="form-group">
+                  <label for="merge-dest-dir">
+                    <strong>Destination Directory</strong>
+                    <span class="text-muted" style="font-size: 0.75rem;">(Target folder to merge files into)</span>
+                  </label>
+                  <div class="input-with-action">
+                    <input type="text" id="merge-dest-dir" class="form-control font-mono" placeholder="/path/to/destination/folder" spellcheck="false" required />
+                    <button type="button" class="btn btn-xs btn-outline btn-clear-input" data-clear="merge-dest-dir" title="Clear Destination Path">✕</button>
+                  </div>
+                  <div class="form-dir-status" id="merge-dest-status"></div>
+                </div>
+              </div>
+
+              <!-- Merge Options Configuration Strip -->
+              <div class="merge-options-bar mb-3">
+                <div class="merge-option-block">
+                  <span class="option-title">Transfer Mode:</span>
+                  <div class="radio-pills">
+                    <label class="radio-pill">
+                      <input type="radio" name="merge-mode" value="move" checked />
+                      <span>Move (Default · dedupes source &amp; cleans empty dirs)</span>
+                    </label>
+                    <label class="radio-pill">
+                      <input type="radio" name="merge-mode" value="copy" />
+                      <span>Copy (Preserves source folder intact)</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="merge-option-block">
+                  <span class="option-title">Collision Resolution:</span>
+                  <select id="merge-collision-strategy" class="form-select font-mono">
+                    <option value="rename" selected>rename — Append _dupX (Safest, preserves both)</option>
+                    <option value="overwrite">overwrite — Replace existing destination file</option>
+                    <option value="skip">skip — Do not transfer non-identical collisions</option>
+                    <option value="newer">newer — Overwrite only if source timestamp is newer</option>
+                  </select>
+                </div>
+
+                <div class="merge-option-block">
+                  <span class="option-title">Flags:</span>
+                  <div class="checkbox-pills">
+                    <label class="checkbox-pill" title="Simulates the entire merge without writing files or deleting folders">
+                      <input type="checkbox" id="merge-flag-dry-run" />
+                      <span>Dry Run (--dry-run)</span>
+                    </label>
+                    <label class="checkbox-pill" title="Do not remove empty directories from source after moving">
+                      <input type="checkbox" id="merge-flag-no-clean" />
+                      <span>Preserve empty folders (--no-clean)</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Command Preview and Execution Action Buttons -->
+              <div class="merge-actions-bar">
+                <div class="merge-cmd-preview font-mono" id="merge-cmd-preview">
+                  Command: <code>python3 scripts/merge_directories.py [source] [destination]</code>
+                </div>
+                <div class="merge-buttons-group">
+                  <button type="button" class="btn btn-outline" id="btn-merge-dry-run">
+                    🔍 Dry Run Preview
+                  </button>
+                  <button type="button" class="btn btn-primary" id="btn-merge-execute">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                    Start Directory Merge
+                  </button>
+                  <button type="button" class="btn btn-danger" id="btn-merge-cancel" style="display: none;">
+                    🛑 Stop Merge
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <!-- Merge Audit Log View Card (merge_directories.log) -->
+          <div class="card" id="card-merge-directories-log">
+            <div class="card-header" style="flex-wrap: wrap; gap: 0.75rem;">
+              <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                <h3>📜 Merge Audit Log</h3>
+                <code style="font-size: 0.72rem; color: var(--text-muted);">logs/merge_directories.log</code>
+                <span class="badge badge-sm badge-outline font-mono" id="merge-log-size-badge">— KB</span>
+                <span class="badge badge-sm badge-green font-mono" id="merge-log-mod-badge">—</span>
+                <span class="badge badge-sm badge-purple font-mono" id="merge-log-lines-badge">— lines</span>
+              </div>
+              <div class="merge-log-controls">
+                <div class="tp-scale-group" title="Number of tail lines to load">
+                  <span class="tp-scale-label">Tail:</span>
+                  <button class="tp-scale-btn" data-log-tail="100">100</button>
+                  <button class="tp-scale-btn active" data-log-tail="250">250</button>
+                  <button class="tp-scale-btn" data-log-tail="500">500</button>
+                  <button class="tp-scale-btn" data-log-tail="1000">1000</button>
+                </div>
+                <label class="checkbox-pill" style="font-size: 0.7rem;" title="Automatically poll for new log entries every 4 seconds">
+                  <input type="checkbox" id="merge-log-autorefresh-toggle" checked />
+                  <span>Auto-Refresh (4s)</span>
+                </label>
+                <input type="text" id="merge-log-filter-input" class="pub-search-input" placeholder="Filter log text..." style="width: 150px;" />
+                <button class="btn btn-xs btn-outline" id="btn-merge-log-refresh" title="Refresh log from disk">↻ Refresh</button>
+                <button class="btn btn-xs btn-outline" id="btn-merge-log-scroll-bottom" title="Scroll to latest entry">↓ Bottom</button>
+              </div>
+            </div>
+
+            <div class="merge-log-viewer-wrapper" id="merge-log-wrapper">
+              <pre class="merge-log-pre" id="merge-log-pre"><code>Loading merge_directories.log...</code></pre>
             </div>
           </div>
         </section>

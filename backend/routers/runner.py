@@ -90,6 +90,13 @@ TASK_DEFINITIONS = {
         "description": "Analyzes Gmail mailbox, groups senders into rule families, and proposes actions.",
         "cwd_repo": "gmail-cleanup-planner",
         "cmd": ["python3", "planner-report.py"]
+    },
+    "media_merge_directories": {
+        "name": "Directory Merge Tool",
+        "pillar": "media-organizer-pipeline",
+        "description": "Recursively merges all files from a source directory into a destination directory with chunk-level deduplication.",
+        "cwd_repo": "media-organizer-pipeline",
+        "cmd": ["python3", "scripts/merge_directories.py"]
     }
 }
 
@@ -117,12 +124,27 @@ async def start_task(req: RunRequest):
     execution_id = str(uuid.uuid4())[:8]
     full_cmd = list(defn["cmd"])
     if req.args:
-        full_cmd.extend(req.args)
+        sanitized_args = []
+        for arg in req.args:
+            if isinstance(arg, str):
+                s = arg.strip()
+                while (s.startswith("'") and s.endswith("'")) or (s.startswith('"') and s.endswith('"')):
+                    s = s[1:-1].strip()
+                sanitized_args.append(s)
+            else:
+                sanitized_args.append(arg)
+        full_cmd.extend(sanitized_args)
 
     # Virtualenv python check
     venv_python = cwd / ".venv" / "bin" / "python3"
+    sibling_venv = BASE_DIR.parent / defn["cwd_repo"] / ".venv" / "bin" / "python3"
+    root_venv = BASE_DIR / ".venv" / "bin" / "python3"
     if venv_python.exists():
         full_cmd[0] = str(venv_python)
+    elif sibling_venv.exists():
+        full_cmd[0] = str(sibling_venv)
+    elif root_venv.exists():
+        full_cmd[0] = str(root_venv)
 
     history_entry = {
         "id": execution_id,
@@ -177,6 +199,9 @@ async def _run_process(execution_id: str, cmd: list[str], cwd: str, entry: Dict[
         final_msg = f"\n[COMPLETED] Process exited with code {proc.returncode}\n"
         PROCESS_OUTPUTS[execution_id].append(final_msg)
         
+        # Give websockets a brief moment to connect if racing fast execution
+        await asyncio.sleep(0.05)
+
         if execution_id in ACTIVE_WEBSOCKETS:
             for ws in list(ACTIVE_WEBSOCKETS[execution_id]):
                 try:
@@ -188,14 +213,34 @@ async def _run_process(execution_id: str, cmd: list[str], cwd: str, entry: Dict[
         entry["status"] = "error"
         err_msg = f"\n[ERROR] Failed to run process: {e}\n"
         PROCESS_OUTPUTS[execution_id].append(err_msg)
+        if execution_id in ACTIVE_WEBSOCKETS:
+            for ws in list(ACTIVE_WEBSOCKETS[execution_id]):
+                try:
+                    await ws.send_json({"type": "done", "exit_code": -1})
+                except Exception:
+                    pass
     finally:
         RUNNING_PROCESSES.pop(execution_id, None)
+
+@router.get("/status/{execution_id}")
+def get_task_status(execution_id: str):
+    entry = next((e for e in RUN_HISTORY if e["id"] == execution_id), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    is_running = execution_id in RUNNING_PROCESSES
+    return {
+        "id": execution_id,
+        "task_id": entry["task_id"],
+        "status": entry["status"],
+        "running": is_running,
+        "exit_code": entry["exit_code"]
+    }
 
 @router.post("/kill/{execution_id}")
 def kill_task(execution_id: str):
     proc = RUNNING_PROCESSES.get(execution_id)
     if not proc:
-        raise HTTPException(status_code=404, detail="Process not running")
+        return {"status": "not_running", "message": "Process already terminated"}
     try:
         proc.terminate()
         return {"status": "terminated"}
@@ -218,9 +263,15 @@ async def websocket_logs(websocket: WebSocket, execution_id: str):
     for log in PROCESS_OUTPUTS.get(execution_id, []):
         await websocket.send_json({"type": "log", "text": log})
 
+    # If the process has already completed, send "done" immediately!
+    task_entry = next((e for e in RUN_HISTORY if e["id"] == execution_id), None)
+    if task_entry and task_entry.get("exit_code") is not None:
+        await websocket.send_json({"type": "done", "exit_code": task_entry["exit_code"]})
+
     try:
         while True:
             # Keep socket alive
             await websocket.receive_text()
     except WebSocketDisconnect:
-        ACTIVE_WEBSOCKETS[execution_id].remove(websocket)
+        if execution_id in ACTIVE_WEBSOCKETS and websocket in ACTIVE_WEBSOCKETS[execution_id]:
+            ACTIVE_WEBSOCKETS[execution_id].remove(websocket)

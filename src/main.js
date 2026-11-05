@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupConsoleControls();
   setupModals();
   setupRefresh();
+  setupUtilities();
   
   // Initial data loading
   fetchAllMetrics();
@@ -47,6 +48,13 @@ function setupTabs() {
 
       if (tab.dataset.tab === 'reports') {
         fetchReportsList();
+      }
+
+      if (tab.dataset.tab === 'utilities') {
+        fetchMergeLog();
+        startMergeLogPolling();
+      } else {
+        stopMergeLogPolling();
       }
     });
   });
@@ -1483,19 +1491,39 @@ function setupConsoleControls() {
   });
 }
 
-window.triggerTask = async function(taskId, args = null) {
-  const drawer = document.getElementById('console-drawer');
-  drawer?.classList.add('open');
+let activeTaskCallbacks = {
+  taskId: null,
+  executionId: null,
+  openConsole: true,
+  onLog: null,
+  onDone: null
+};
+let isMergeRunning = false;
+let activeMergeExecutionId = null;
 
-  const label = document.getElementById('console-task-label');
-  const btnKill = document.getElementById('btn-kill-task');
-  const badgeActive = document.getElementById('active-task-badge');
+window.triggerTask = async function(taskId, args = null, openConsole = true, onLog = null, onDone = null) {
+  if (openConsole) {
+    const drawer = document.getElementById('console-drawer');
+    drawer?.classList.add('open');
 
-  if (label) label.textContent = `Running: ${taskId}`;
-  if (btnKill) btnKill.style.display = 'inline-flex';
-  if (badgeActive) badgeActive.style.display = 'inline-block';
+    const label = document.getElementById('console-task-label');
+    const btnKill = document.getElementById('btn-kill-task');
+    const badgeActive = document.getElementById('active-task-badge');
 
-  appendConsoleLog(`\n[DISPATCH] Requesting execution: ${taskId}...\n`);
+    if (label) label.textContent = `Running: ${taskId}`;
+    if (btnKill) btnKill.style.display = 'inline-flex';
+    if (badgeActive) badgeActive.style.display = 'inline-block';
+
+    appendConsoleLog(`\n[DISPATCH] Requesting execution: ${taskId}...\n`);
+  }
+
+  activeTaskCallbacks = {
+    taskId,
+    executionId: null,
+    openConsole,
+    onLog,
+    onDone
+  };
 
   try {
     const res = await fetch('/api/runner/start', {
@@ -1505,19 +1533,34 @@ window.triggerTask = async function(taskId, args = null) {
     });
     const data = await res.json();
     if (!res.ok) {
-      appendConsoleLog(`[ERROR] ${data.detail || 'Failed to dispatch task'}\n`);
-      if (btnKill) btnKill.style.display = 'none';
-      if (badgeActive) badgeActive.style.display = 'none';
-      return;
+      const errMsg = `[ERROR] ${data.detail || 'Failed to dispatch task'}\n`;
+      if (openConsole) {
+        appendConsoleLog(errMsg);
+        const btnKill = document.getElementById('btn-kill-task');
+        const badgeActive = document.getElementById('active-task-badge');
+        if (btnKill) btnKill.style.display = 'none';
+        if (badgeActive) badgeActive.style.display = 'none';
+      }
+      if (onDone) onDone(-1, data.detail);
+      return null;
     }
 
     activeExecutionId = data.execution_id;
+    activeTaskCallbacks.executionId = activeExecutionId;
     connectWebSocket(activeExecutionId);
+    return activeExecutionId;
 
   } catch (err) {
-    appendConsoleLog(`[ERROR] Network error starting task: ${err}\n`);
-    if (btnKill) btnKill.style.display = 'none';
-    if (badgeActive) badgeActive.style.display = 'none';
+    const errMsg = `[ERROR] Network error starting task: ${err}\n`;
+    if (openConsole) {
+      appendConsoleLog(errMsg);
+      const btnKill = document.getElementById('btn-kill-task');
+      const badgeActive = document.getElementById('active-task-badge');
+      if (btnKill) btnKill.style.display = 'none';
+      if (badgeActive) badgeActive.style.display = 'none';
+    }
+    if (onDone) onDone(-1, err.message);
+    return null;
   }
 };
 
@@ -1535,17 +1578,47 @@ function connectWebSocket(executionId) {
     try {
       const data = JSON.parse(event.data);
       if (data.type === 'log') {
-        appendConsoleLog(data.text);
+        if (activeTaskCallbacks.openConsole) {
+          appendConsoleLog(data.text);
+        }
+        if (activeTaskCallbacks.onLog) {
+          activeTaskCallbacks.onLog(data.text);
+        }
+        // Fallback detection in case done frame was dropped:
+        const match = data.text && data.text.match(/\[COMPLETED\] Process exited with code (\d+)/);
+        if (match) {
+          const code = parseInt(match[1], 10);
+          if (activeTaskCallbacks.openConsole) {
+            document.getElementById('btn-kill-task').style.display = 'none';
+            document.getElementById('active-task-badge').style.display = 'none';
+            const label = document.getElementById('console-task-label');
+            if (label) label.textContent = 'Completed';
+          }
+          if (activeTaskCallbacks.onDone) {
+            activeTaskCallbacks.onDone(code);
+          }
+        }
       } else if (data.type === 'done') {
-        appendConsoleLog(`\n[COMPLETE] Task finished with exit code ${data.exit_code}\n`);
-        document.getElementById('btn-kill-task').style.display = 'none';
-        document.getElementById('active-task-badge').style.display = 'none';
-        document.getElementById('console-task-label').textContent = 'Completed';
+        if (activeTaskCallbacks.openConsole) {
+          appendConsoleLog(`\n[COMPLETE] Task finished with exit code ${data.exit_code}\n`);
+          document.getElementById('btn-kill-task').style.display = 'none';
+          document.getElementById('active-task-badge').style.display = 'none';
+          const label = document.getElementById('console-task-label');
+          if (label) label.textContent = 'Completed';
+        }
+        if (activeTaskCallbacks.onDone) {
+          activeTaskCallbacks.onDone(data.exit_code);
+        }
         // Refresh metrics upon completion
         fetchAllMetrics();
       }
     } catch {
-      appendConsoleLog(event.data);
+      if (activeTaskCallbacks.openConsole) {
+        appendConsoleLog(event.data);
+      }
+      if (activeTaskCallbacks.onLog) {
+        activeTaskCallbacks.onLog(event.data);
+      }
     }
   };
 
@@ -1580,8 +1653,12 @@ function setupModals() {
     });
   });
 
+  const triageInput = document.getElementById('triage-input-path');
+  attachPathSanitizer(triageInput);
+
   btnConfirmTriage?.addEventListener('click', () => {
-    const intakePath = document.getElementById('triage-input-path')?.value;
+    const rawPath = document.getElementById('triage-input-path')?.value;
+    const intakePath = cleanPath(rawPath);
     modalTriage?.classList.remove('open');
     window.triggerTask('media_triage', intakePath ? ['--intake-dir', intakePath] : null);
   });
@@ -1597,4 +1674,586 @@ function setupModals() {
       "   EVSID=...; JSESSIONID=..."
     );
   });
+}
+
+// ==========================================================================
+// 9. Utilities Tab: Directory Merge Tool & merge_directories.log Viewer
+// ==========================================================================
+
+// Helper: Trim surrounding single or double quotes (e.g. from Finder "Copy ... as Pathname")
+function cleanPath(p) {
+  if (!p) return '';
+  let str = p.trim();
+  // Strip outer quotes repeatedly if nested
+  while ((str.startsWith("'") && str.endsWith("'")) || (str.startsWith('"') && str.endsWith('"'))) {
+    str = str.slice(1, -1).trim();
+  }
+  // Strip any remaining lone quotes at start or end
+  str = str.replace(/^['"]+|['"]+$/g, '').trim();
+  return str;
+}
+
+// Attach paste and blur sanitizers to text inputs to automatically strip Finder quotes
+function attachPathSanitizer(inputEl, onSanitized = null) {
+  if (!inputEl) return;
+
+  const sanitize = () => {
+    const raw = inputEl.value;
+    const cleaned = cleanPath(raw);
+    if (raw !== cleaned) {
+      inputEl.value = cleaned;
+      if (onSanitized) onSanitized();
+    }
+  };
+
+  inputEl.addEventListener('paste', (e) => {
+    const pasteText = (e.clipboardData || window.clipboardData)?.getData('text');
+    if (pasteText && (pasteText.includes("'") || pasteText.includes('"'))) {
+      e.preventDefault();
+      const cleaned = cleanPath(pasteText);
+      const start = inputEl.selectionStart ?? 0;
+      const end = inputEl.selectionEnd ?? inputEl.value.length;
+      const currentVal = inputEl.value;
+      inputEl.value = currentVal.substring(0, start) + cleaned + currentVal.substring(end);
+      inputEl.selectionStart = inputEl.selectionEnd = start + cleaned.length;
+      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+
+  inputEl.addEventListener('input', () => {
+    const val = inputEl.value.trim();
+    if ((val.startsWith("'") && val.endsWith("'") && val.length > 1) ||
+        (val.startsWith('"') && val.endsWith('"') && val.length > 1)) {
+      inputEl.value = cleanPath(val);
+    }
+  });
+
+  inputEl.addEventListener('blur', sanitize);
+}
+
+let mergeLogTail = 250;
+let mergeLogAutoRefresh = true;
+let mergeLogFilter = '';
+let mergeLogPollingInterval = null;
+let cachedMergeLogLines = [];
+let dirValidationTimer = null;
+
+function setupUtilities() {
+  const srcInput = document.getElementById('merge-source-dir');
+  const dstInput = document.getElementById('merge-dest-dir');
+  const swapBtn = document.getElementById('btn-merge-swap-dirs');
+  const modeRadios = document.querySelectorAll('input[name="merge-mode"]');
+  const collisionSelect = document.getElementById('merge-collision-strategy');
+  const dryRunCheck = document.getElementById('merge-flag-dry-run');
+  const noCleanCheck = document.getElementById('merge-flag-no-clean');
+  const executeBtn = document.getElementById('btn-merge-execute');
+  const dryRunBtn = document.getElementById('btn-merge-dry-run');
+  const cancelBtn = document.getElementById('btn-merge-cancel');
+  const refreshLogBtn = document.getElementById('btn-merge-log-refresh');
+  const refreshAllBtn = document.getElementById('btn-utilities-refresh-all');
+  const scrollBottomBtn = document.getElementById('btn-merge-log-scroll-bottom');
+  const filterInput = document.getElementById('merge-log-filter-input');
+  const autoRefreshCheck = document.getElementById('merge-log-autorefresh-toggle');
+
+  // Clear path buttons
+  document.querySelectorAll('.btn-clear-input[data-clear]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetId = btn.getAttribute('data-clear');
+      const targetEl = document.getElementById(targetId);
+      if (targetEl) {
+        targetEl.value = '';
+        updateMergeCommandPreview();
+        triggerDirectoryValidation();
+      }
+    });
+  });
+
+  // Swap Source and Destination paths
+  swapBtn?.addEventListener('click', () => {
+    if (!srcInput || !dstInput) return;
+    const temp = srcInput.value;
+    srcInput.value = dstInput.value;
+    dstInput.value = temp;
+    updateMergeCommandPreview();
+    triggerDirectoryValidation();
+  });
+
+  // Input changes trigger preview & debounced validation
+  [srcInput, dstInput].forEach(el => {
+    el?.addEventListener('input', () => {
+      updateMergeCommandPreview();
+      triggerDirectoryValidation();
+    });
+  });
+
+  // Automatically sanitize Finder copied paths on paste, input, and blur
+  attachPathSanitizer(srcInput, () => {
+    updateMergeCommandPreview();
+    triggerDirectoryValidation();
+  });
+  attachPathSanitizer(dstInput, () => {
+    updateMergeCommandPreview();
+    triggerDirectoryValidation();
+  });
+
+  modeRadios.forEach(r => r.addEventListener('change', updateMergeCommandPreview));
+  collisionSelect?.addEventListener('change', updateMergeCommandPreview);
+  dryRunCheck?.addEventListener('change', updateMergeCommandPreview);
+  noCleanCheck?.addEventListener('change', updateMergeCommandPreview);
+
+  // Execute Merge
+  executeBtn?.addEventListener('click', () => {
+    runDirectoryMerge(false);
+  });
+
+  // Dry Run Preview
+  dryRunBtn?.addEventListener('click', () => {
+    runDirectoryMerge(true);
+  });
+
+  // Cancel / Stop Merge
+  cancelBtn?.addEventListener('click', async () => {
+    if (activeMergeExecutionId) {
+      try {
+        await fetch(`/api/runner/kill/${activeMergeExecutionId}`, { method: 'POST' });
+      } catch (err) {
+        console.warn('Kill task request error:', err);
+      }
+    }
+    const cancelMsg = `${new Date().toISOString().replace('T', ' ').substring(0, 19)} [merge_directories] - 🛑 Directory Merge stopped by user.`;
+    cachedMergeLogLines.push(cancelMsg);
+    appendLiveMergeLogLine(cancelMsg);
+    handleMergeDone(-2);
+  });
+
+  // Log Tail buttons
+  document.querySelectorAll('[data-log-tail]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      mergeLogTail = Number(btn.getAttribute('data-log-tail')) || 250;
+      document.querySelectorAll('[data-log-tail]').forEach(b => b.classList.toggle('active', b === btn));
+      fetchMergeLog();
+    });
+  });
+
+  // Log filter input
+  filterInput?.addEventListener('input', (e) => {
+    mergeLogFilter = (e.target.value || '').trim().toLowerCase();
+    renderFilteredMergeLog();
+  });
+
+  // Auto-refresh toggle
+  autoRefreshCheck?.addEventListener('change', (e) => {
+    mergeLogAutoRefresh = e.target.checked;
+    if (mergeLogAutoRefresh) {
+      startMergeLogPolling();
+    } else {
+      stopMergeLogPolling();
+    }
+  });
+
+  // Refresh buttons
+  refreshLogBtn?.addEventListener('click', () => fetchMergeLog());
+  refreshAllBtn?.addEventListener('click', () => fetchMergeLog());
+
+  // Scroll to bottom
+  scrollBottomBtn?.addEventListener('click', scrollMergeLogToBottom);
+
+  // Initial preview
+  updateMergeCommandPreview();
+}
+
+function updateMergeCommandPreview() {
+  const srcInput = document.getElementById('merge-source-dir');
+  const dstInput = document.getElementById('merge-dest-dir');
+  const modeVal = document.querySelector('input[name="merge-mode"]:checked')?.value || 'move';
+  const collisionVal = document.getElementById('merge-collision-strategy')?.value || 'rename';
+  const dryRunChecked = document.getElementById('merge-flag-dry-run')?.checked || false;
+  const noCleanChecked = document.getElementById('merge-flag-no-clean')?.checked || false;
+  const previewEl = document.getElementById('merge-cmd-preview');
+
+  const src = cleanPath(srcInput?.value || '') || '[source]';
+  const dst = cleanPath(dstInput?.value || '') || '[destination]';
+
+  const parts = ['python3', 'scripts/merge_directories.py', `"${src}"`, `"${dst}"`];
+  if (modeVal === 'copy') parts.push('--copy');
+  if (collisionVal !== 'rename') parts.push(`--on-collision ${collisionVal}`);
+  if (dryRunChecked) parts.push('--dry-run');
+  if (noCleanChecked) parts.push('--no-clean');
+
+  if (previewEl) {
+    previewEl.innerHTML = `Command: <code>${parts.join(' ')}</code>`;
+  }
+}
+
+function triggerDirectoryValidation() {
+  clearTimeout(dirValidationTimer);
+  dirValidationTimer = setTimeout(async () => {
+    const src = cleanPath(document.getElementById('merge-source-dir')?.value || '');
+    const dst = cleanPath(document.getElementById('merge-dest-dir')?.value || '');
+    const srcStatus = document.getElementById('merge-source-status');
+    const dstStatus = document.getElementById('merge-dest-status');
+
+    if (!src && !dst) {
+      if (srcStatus) srcStatus.innerHTML = '';
+      if (dstStatus) dstStatus.innerHTML = '';
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/utilities/validate-directories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: src, destination: dst })
+      });
+      const data = await res.json();
+
+      if (srcStatus) {
+        if (!src) {
+          srcStatus.innerHTML = '';
+        } else if (data.source.exists && data.source.is_dir) {
+          srcStatus.className = 'form-dir-status status-ok';
+          srcStatus.innerHTML = '✓ Valid directory' + (data.source.readable ? ' (Readable)' : '');
+        } else if (data.source.exists && !data.source.is_dir) {
+          srcStatus.className = 'form-dir-status status-err';
+          srcStatus.innerHTML = '⚠️ Path is a file, not a directory';
+        } else {
+          srcStatus.className = 'form-dir-status status-warn';
+          srcStatus.innerHTML = '⚠️ Directory not found or volume not mounted';
+        }
+      }
+
+      if (dstStatus) {
+        if (!dst) {
+          dstStatus.innerHTML = '';
+        } else if (data.same_directory) {
+          dstStatus.className = 'form-dir-status status-err';
+          dstStatus.innerHTML = '❌ Destination cannot be identical to Source directory';
+        } else if (data.destination.exists && data.destination.is_dir) {
+          dstStatus.className = 'form-dir-status status-ok';
+          dstStatus.innerHTML = '✓ Existing directory' + (data.destination.writable ? ' (Writable)' : '');
+        } else if (data.destination.parent_exists) {
+          dstStatus.className = 'form-dir-status status-warn';
+          dstStatus.innerHTML = 'ℹ️ Directory will be automatically created upon merge';
+        } else {
+          dstStatus.className = 'form-dir-status status-warn';
+          dstStatus.innerHTML = '⚠️ Parent path not found or volume unmounted';
+        }
+      }
+    } catch (err) {
+      console.warn('Directory validation error:', err);
+    }
+  }, 400);
+}
+
+function formatLogLine(line) {
+  const escaped = escapeHtml(line);
+  if (line.includes('🚀 Starting Directory Merge:') || line.includes('🚀 Dispatching Directory Merge:')) {
+    return `<span style="color: #38bdf8; font-weight: 600;">${escaped}</span>`;
+  }
+  if (line.includes('✅ Merge Finished') || line.includes('✅ Removed')) {
+    return `<span style="color: #34d399; font-weight: 600;">${escaped}</span>`;
+  }
+  if (line.includes('❌') || line.includes('ERROR') || line.includes('Permission denied')) {
+    return `<span style="color: #f87171; font-weight: 600;">${escaped}</span>`;
+  }
+  if (line.includes('Progress:')) {
+    return `<span style="color: #c084fc;">${escaped}</span>`;
+  }
+  if (line.includes('🧹 Cleaning') || line.includes('🛑 Directory Merge')) {
+    return `<span style="color: #fbbf24;">${escaped}</span>`;
+  }
+  if (line.includes('📂 Found')) {
+    return `<span style="color: #60a5fa;">${escaped}</span>`;
+  }
+  return `<span>${escaped}</span>`;
+}
+
+function appendLiveMergeLogLine(line) {
+  const preEl = document.getElementById('merge-log-pre');
+  if (!preEl) return;
+
+  if (preEl.innerHTML.includes('Loading merge_directories.log...')) {
+    preEl.innerHTML = '';
+  }
+
+  const spanHtml = formatLogLine(line);
+  if (!preEl.innerHTML.trim()) {
+    preEl.innerHTML = spanHtml;
+  } else {
+    preEl.innerHTML += '\n' + spanHtml;
+  }
+  scrollMergeLogToBottom();
+
+  const linesBadge = document.getElementById('merge-log-lines-badge');
+  if (linesBadge) {
+    linesBadge.textContent = `${cachedMergeLogLines.length} lines shown`;
+  }
+}
+
+let activeMergePollInterval = null;
+
+function handleMergeDone(exitCode) {
+  if (!isMergeRunning) return;
+  isMergeRunning = false;
+  if (activeMergePollInterval) {
+    clearInterval(activeMergePollInterval);
+    activeMergePollInterval = null;
+  }
+
+  const executeBtn = document.getElementById('btn-merge-execute');
+  const dryRunBtn = document.getElementById('btn-merge-dry-run');
+  const cancelBtn = document.getElementById('btn-merge-cancel');
+  const stateBadge = document.getElementById('merge-tool-state-badge');
+
+  if (executeBtn) {
+    executeBtn.disabled = false;
+    executeBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Start Directory Merge`;
+  }
+  if (dryRunBtn) dryRunBtn.disabled = false;
+  if (cancelBtn) cancelBtn.style.display = 'none';
+
+  if (stateBadge) {
+    if (exitCode === 0) {
+      stateBadge.className = 'badge badge-green font-mono';
+      stateBadge.textContent = 'Completed';
+    } else if (exitCode === -2) {
+      stateBadge.className = 'badge badge-red font-mono';
+      stateBadge.textContent = 'Stopped';
+    } else {
+      stateBadge.className = 'badge badge-red font-mono';
+      stateBadge.textContent = `Failed (Exit ${exitCode})`;
+    }
+  }
+
+  setTimeout(() => {
+    fetchMergeLog(false);
+    scrollMergeLogToBottom();
+  }, 400);
+}
+
+function runDirectoryMerge(forceDryRun = false) {
+  if (isMergeRunning) {
+    return;
+  }
+
+  const srcInput = document.getElementById('merge-source-dir');
+  const dstInput = document.getElementById('merge-dest-dir');
+  const modeVal = document.querySelector('input[name="merge-mode"]:checked')?.value || 'move';
+  const collisionVal = document.getElementById('merge-collision-strategy')?.value || 'rename';
+  const dryRunChecked = forceDryRun || (document.getElementById('merge-flag-dry-run')?.checked || false);
+  const noCleanChecked = document.getElementById('merge-flag-no-clean')?.checked || false;
+  const stateBadge = document.getElementById('merge-tool-state-badge');
+  const executeBtn = document.getElementById('btn-merge-execute');
+  const dryRunBtn = document.getElementById('btn-merge-dry-run');
+  const cancelBtn = document.getElementById('btn-merge-cancel');
+
+  const src = cleanPath(srcInput?.value || '');
+  const dst = cleanPath(dstInput?.value || '');
+
+  // Reflect cleaned path back to inputs if quotes were present
+  if (srcInput && srcInput.value !== src) srcInput.value = src;
+  if (dstInput && dstInput.value !== dst) dstInput.value = dst;
+
+  if (!src) {
+    alert('Please specify a Source Directory to merge.');
+    srcInput?.focus();
+    return;
+  }
+  if (!dst) {
+    alert('Please specify a Destination Directory to merge into.');
+    dstInput?.focus();
+    return;
+  }
+  if (src === dst) {
+    alert('Source Directory and Destination Directory cannot be the same folder.');
+    return;
+  }
+
+  const args = [src, dst];
+  if (modeVal === 'copy') {
+    args.push('--copy');
+  } else {
+    args.push('--move');
+  }
+
+  if (collisionVal && collisionVal !== 'rename') {
+    args.push('--on-collision', collisionVal);
+  }
+
+  if (dryRunChecked) {
+    args.push('--dry-run');
+  }
+
+  if (noCleanChecked) {
+    args.push('--no-clean');
+  }
+
+  isMergeRunning = true;
+
+  if (stateBadge) {
+    stateBadge.className = 'badge badge-amber pulse font-mono';
+    stateBadge.textContent = dryRunChecked ? 'Simulating...' : 'Merging...';
+  }
+
+  if (executeBtn) {
+    executeBtn.disabled = true;
+    executeBtn.innerHTML = `<span style="display:inline-block;animation:spin 1s linear infinite;margin-right:6px;">⏳</span> ${dryRunChecked ? 'Simulating in progress...' : 'Merging in progress...'}`;
+  }
+  if (dryRunBtn) dryRunBtn.disabled = true;
+  if (cancelBtn) cancelBtn.style.display = 'inline-flex';
+
+  const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+  const startMsg = `${timestamp} [merge_directories] - 🚀 Dispatching Directory Merge: ${src} -> ${dst} [Mode: ${modeVal}, Collision: ${collisionVal}, DryRun: ${dryRunChecked}]`;
+  cachedMergeLogLines.push(startMsg);
+  appendLiveMergeLogLine(startMsg);
+
+  // Rapid polling during execution (every 1s) to pick up disk updates & verify process status
+  if (activeMergePollInterval) {
+    clearInterval(activeMergePollInterval);
+  }
+  activeMergePollInterval = setInterval(async () => {
+    fetchMergeLog(true);
+
+    if (isMergeRunning && activeMergeExecutionId) {
+      try {
+        const sRes = await fetch(`/api/runner/status/${activeMergeExecutionId}`);
+        if (sRes.ok) {
+          const sData = await sRes.json();
+          if (!sData.running && sData.exit_code !== null) {
+            handleMergeDone(sData.exit_code);
+          }
+        }
+      } catch (err) {
+        console.warn('Status poll error:', err);
+      }
+    }
+  }, 1000);
+
+  window.triggerTask(
+    'media_merge_directories',
+    args,
+    false, // Do not open console drawer!
+    (logText) => {
+      // Live output streamed from stdout
+      const lines = logText.split('\n').filter(l => l.trim().length > 0);
+      for (const line of lines) {
+        if (!cachedMergeLogLines.includes(line)) {
+          cachedMergeLogLines.push(line);
+          appendLiveMergeLogLine(line);
+        }
+      }
+    },
+    (exitCode) => {
+      handleMergeDone(exitCode);
+    }
+  ).then(execId => {
+    activeMergeExecutionId = execId;
+  });
+}
+
+async function fetchMergeLog(isBackgroundRefresh = false) {
+  try {
+    const res = await fetch(`/api/utilities/merge-log?tail_lines=${mergeLogTail}`);
+    const data = await res.json();
+
+    const sizeBadge = document.getElementById('merge-log-size-badge');
+    const modBadge = document.getElementById('merge-log-mod-badge');
+    const linesBadge = document.getElementById('merge-log-lines-badge');
+    const stateBadge = document.getElementById('merge-tool-state-badge');
+
+    if (sizeBadge) sizeBadge.textContent = data.size_formatted || '0 B';
+    if (modBadge) modBadge.textContent = data.modified ? `Updated: ${data.modified.split(' ')[1] || data.modified}` : '—';
+    if (linesBadge) linesBadge.textContent = `${(data.lines || []).length} lines shown`;
+
+    if (data.exists && stateBadge && !isMergeRunning && !stateBadge.classList.contains('pulse')) {
+      stateBadge.className = 'badge badge-green font-mono';
+      stateBadge.textContent = 'Ready';
+    }
+
+    const diskLines = data.lines || [];
+    if (diskLines.length > 0) {
+      if (!isMergeRunning || !isBackgroundRefresh) {
+        cachedMergeLogLines = diskLines;
+        renderFilteredMergeLog();
+        scrollMergeLogToBottom();
+      } else {
+        // While running, append any newly flushed disk lines not yet cached
+        let added = false;
+        for (const line of diskLines) {
+          if (!cachedMergeLogLines.includes(line)) {
+            cachedMergeLogLines.push(line);
+            appendLiveMergeLogLine(line);
+            added = true;
+          }
+        }
+        if (added) scrollMergeLogToBottom();
+
+        // Extra safety: If disk log has finished message, ensure running UI state finishes
+        const lastLine = diskLines[diskLines.length - 1] || '';
+        if (lastLine.includes('✅ Merge Finished in') || lastLine.includes('❌ Source directory does not exist')) {
+          handleMergeDone(lastLine.includes('❌') ? 1 : 0);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error fetching merge log:', err);
+  }
+}
+
+function renderFilteredMergeLog() {
+  const preEl = document.getElementById('merge-log-pre');
+  if (!preEl) return;
+
+  if (!cachedMergeLogLines.length) {
+    preEl.innerHTML = '<span style="color: var(--text-muted);">No log entries recorded yet in logs/merge_directories.log.</span>';
+    return;
+  }
+
+  let lines = cachedMergeLogLines;
+  if (mergeLogFilter) {
+    lines = lines.filter(l => l.toLowerCase().includes(mergeLogFilter));
+  }
+
+  if (!lines.length) {
+    preEl.innerHTML = `<span style="color: var(--text-muted);">No log lines matched filter: "${escapeHtml(mergeLogFilter)}"</span>`;
+    return;
+  }
+
+  preEl.innerHTML = lines.map(line => formatLogLine(line)).join('\n');
+}
+
+function escapeHtml(str) {
+  return str.replace(/[&<>'"]/g, tag => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    "'": '&#39;',
+    '"': '&quot;'
+  }[tag] || tag));
+}
+
+function scrollMergeLogToBottom() {
+  const wrap = document.getElementById('merge-log-wrapper');
+  if (wrap) {
+    wrap.scrollTop = wrap.scrollHeight;
+  }
+}
+
+function startMergeLogPolling() {
+  if (!mergeLogPollingInterval) {
+    mergeLogPollingInterval = setInterval(() => {
+      const utilPanel = document.getElementById('tab-utilities');
+      if (utilPanel?.classList.contains('active') && mergeLogAutoRefresh) {
+        fetchMergeLog(true);
+      }
+    }, 3000);
+  }
+}
+
+function stopMergeLogPolling() {
+  if (mergeLogPollingInterval) {
+    clearInterval(mergeLogPollingInterval);
+    mergeLogPollingInterval = null;
+  }
 }
