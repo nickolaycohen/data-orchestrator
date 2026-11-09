@@ -13,6 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setupModals();
   setupRefresh();
   setupUtilities();
+  setupMediaCleanup();
+  setupPlannerOverview();
   
   // Initial data loading
   fetchAllMetrics();
@@ -38,6 +40,10 @@ function setupTabs() {
         fetchExecutorMonitor();
         if (!mediaMonitorInterval) {
           mediaMonitorInterval = setInterval(fetchExecutorMonitor, 4000);
+        }
+        fetchPlannerOverview();
+        if (!cleanupDevicesData) {
+          fetchCleanupDevices();
         }
       } else {
         if (mediaMonitorInterval) {
@@ -1650,6 +1656,8 @@ function setupModals() {
   document.querySelectorAll('.btn-close-modal').forEach(btn => {
     btn.addEventListener('click', () => {
       modalTriage?.classList.remove('open');
+      document.getElementById('modal-cleanup-confirm')?.classList.remove('open');
+      closeCleanupPreviewModal();
     });
   });
 
@@ -2257,3 +2265,1359 @@ function stopMergeLogPolling() {
     mergeLogPollingInterval = null;
   }
 }
+
+// ==========================================================================
+// 12. Media Cleanup & Storage Reclaim (Mode [C] UI Organizer)
+// ==========================================================================
+
+let cleanupDevicesData = null;
+let selectedCleanupDevice = null;
+let activeDeviceScope = 'active'; // 'active' (default) | 'all'
+let activeOwnerFilter = 'all';
+let activeQuartileFilter = 'all';
+let activeTypeFilter = 'all';
+let cleanupPageLimit = 50;
+let cleanupPageOffset = 0;
+let currentCandidateList = [];
+let selectedCandidateAssetIds = new Set();
+let candidateAssetMeta = new Map(); // asset_id -> full candidate object
+let pendingRemovalAssetIds = [];
+let previewModalAssetId = null;
+let isFetchingCleanupDevices = false;
+let isFetchingCleanupCandidates = false;
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+}
+
+function formatDuration(seconds) {
+  const sec = Number(seconds);
+  if (!sec || sec <= 0) return '0:00';
+  const totalSec = Math.round(sec);
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const remSec = totalSec % 60;
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, '0')}:${String(remSec).padStart(2, '0')}`;
+  }
+  return `${mins}:${String(remSec).padStart(2, '0')}`;
+}
+
+function formatCaptureTimestampParts(tsStr) {
+  if (!tsStr || tsStr === '—') {
+    return { dateLine: '—', timeLine: '' };
+  }
+  const parts = tsStr.trim().split(' ');
+  const datePart = parts[0] || tsStr;
+  const timePart = parts[1] || '';
+
+  // Try to format readable date e.g. "2025-02-16" -> "Feb 16, 2025 (2025-02-16)"
+  let readableDate = datePart;
+  const m = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monIdx = parseInt(m[2], 10) - 1;
+    if (months[monIdx]) {
+      readableDate = `${months[monIdx]} ${parseInt(m[3], 10)}, ${m[1]}`;
+    }
+  }
+  return {
+    dateLine: readableDate,
+    isoDate: datePart,
+    timeLine: timePart ? `${timePart} (${datePart})` : datePart
+  };
+}
+
+function setupMediaCleanup() {
+  // 0. Active vs. All Devices Scope Toggle
+  document.querySelectorAll('.cleanup-scope-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const nextScope = btn.dataset.deviceScope || 'active';
+      if (activeDeviceScope === nextScope) return;
+      activeDeviceScope = nextScope;
+
+      document.querySelectorAll('.cleanup-scope-btn').forEach(b => {
+        b.classList.toggle('active', (b.dataset.deviceScope || 'active') === activeDeviceScope);
+      });
+
+      activeOwnerFilter = 'all';
+      updateCleanupScopeSummaryBadges();
+      renderCleanupOwnerChips();
+      renderCleanupDevicesList();
+
+      // Ensure a valid device in the current scope is selected
+      const visibleDevices = getDevicesInActiveScope();
+      const stillVisible = selectedCleanupDevice && visibleDevices.some(
+        d => d.camera_model === selectedCleanupDevice.camera_model && d.owner === selectedCleanupDevice.owner
+      );
+      if (!stillVisible && visibleDevices.length > 0) {
+        let topDev = visibleDevices[0];
+        visibleDevices.forEach(d => {
+          if ((d.low_gb || 0) > (topDev.low_gb || 0)) topDev = d;
+        });
+        selectCleanupDevice(topDev);
+      }
+    });
+  });
+
+  // 1. Device search filter
+  const searchInput = document.getElementById('cleanup-device-search');
+  searchInput?.addEventListener('input', () => {
+    renderCleanupDevicesList();
+  });
+
+  // 2. Refresh button
+  document.getElementById('btn-refresh-cleanup')?.addEventListener('click', () => {
+    fetchCleanupDevices(true);
+  });
+
+  // 3. Quartile filter buttons
+  document.querySelectorAll('.cleanup-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.cleanup-filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeQuartileFilter = btn.dataset.quartile || 'all';
+      cleanupPageOffset = 0;
+      fetchCleanupCandidates();
+    });
+  });
+
+  // 4. Media type filter buttons
+  document.querySelectorAll('.cleanup-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.cleanup-type-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeTypeFilter = btn.dataset.type || 'all';
+      cleanupPageOffset = 0;
+      fetchCleanupCandidates();
+    });
+  });
+
+  // 5. Select All Checkbox
+  const selectAllCb = document.getElementById('cleanup-select-all-checkbox');
+  selectAllCb?.addEventListener('change', (e) => {
+    const isChecked = e.target.checked;
+    currentCandidateList.forEach(c => {
+      if (isChecked) {
+        selectedCandidateAssetIds.add(c.asset_id);
+      } else {
+        selectedCandidateAssetIds.delete(c.asset_id);
+      }
+    });
+
+    // Update row states
+    document.querySelectorAll('.cleanup-asset-checkbox').forEach(cb => {
+      cb.checked = isChecked;
+      const tr = cb.closest('tr');
+      if (tr) {
+        if (isChecked) tr.classList.add('selected');
+        else tr.classList.remove('selected');
+      }
+    });
+
+    updateCleanupSelectionBar();
+  });
+
+  // 6. Bulk Action: Mark Selected as Removed
+  document.getElementById('btn-mark-selected-removed')?.addEventListener('click', () => {
+    if (!selectedCandidateAssetIds.size) return;
+    openCleanupConfirmModal(Array.from(selectedCandidateAssetIds));
+  });
+
+  // 7. Modal confirm button
+  document.getElementById('btn-execute-cleanup-removal')?.addEventListener('click', () => {
+    executeCleanupRemoval();
+  });
+
+  // 8. Preview Modal Mark as Removed button
+  document.getElementById('btn-preview-mark-removed')?.addEventListener('click', () => {
+    if (!previewModalAssetId) return;
+    const aid = previewModalAssetId;
+    closeCleanupPreviewModal();
+    openCleanupConfirmModal([aid]);
+  });
+
+  // Close preview modal when clicking backdrop
+  document.getElementById('modal-cleanup-preview')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modal-cleanup-preview') {
+      closeCleanupPreviewModal();
+    }
+  });
+
+  // 9. Pagination buttons
+  document.getElementById('btn-cleanup-prev-page')?.addEventListener('click', () => {
+    if (cleanupPageOffset <= 0) return;
+    cleanupPageOffset = Math.max(0, cleanupPageOffset - cleanupPageLimit);
+    fetchCleanupCandidates();
+  });
+
+  document.getElementById('btn-cleanup-next-page')?.addEventListener('click', () => {
+    cleanupPageOffset += cleanupPageLimit;
+    fetchCleanupCandidates();
+  });
+}
+
+function getDevicesInActiveScope() {
+  if (!cleanupDevicesData || !cleanupDevicesData.owners) return [];
+  const list = [];
+  cleanupDevicesData.owners.forEach(o => {
+    (o.devices || []).forEach(d => {
+      if (activeDeviceScope === 'active' && !d.is_active) return;
+      list.push(d);
+    });
+  });
+  return list;
+}
+
+function updateCleanupScopeSummaryBadges() {
+  if (!cleanupDevicesData) return;
+  const summary = cleanupDevicesData.summary || {};
+
+  const reclaimableBadge = document.getElementById('cleanup-badge-reclaimable');
+  const candidatesBadge = document.getElementById('cleanup-badge-candidates');
+  const devicesBadge = document.getElementById('cleanup-badge-devices');
+  const paneTitle = document.getElementById('cleanup-pane-scope-title');
+  const countPill = document.getElementById('cleanup-device-count-pill');
+  const scopeCountActive = document.getElementById('scope-count-active');
+  const scopeCountAll = document.getElementById('scope-count-all');
+
+  if (scopeCountActive) scopeCountActive.textContent = summary.active_devices ?? 0;
+  if (scopeCountAll) scopeCountAll.textContent = summary.total_devices ?? 0;
+
+  if (activeDeviceScope === 'active') {
+    const actGb = summary.active_low_gb ?? 0;
+    const actCnt = summary.active_low_count ?? 0;
+    const actDev = summary.active_devices ?? 0;
+    if (reclaimableBadge) reclaimableBadge.textContent = `${actGb} GB Reclaimable (Active)`;
+    if (candidatesBadge) candidatesBadge.textContent = `${actCnt.toLocaleString()} Active Low-Quality Files`;
+    if (devicesBadge) devicesBadge.textContent = `${actDev} Active Devices`;
+    if (paneTitle) paneTitle.textContent = '🟢 Active Devices by Owner';
+    if (countPill) countPill.textContent = `${actDev} Active`;
+  } else {
+    const allGb = summary.grand_low_gb ?? 0;
+    const allCnt = summary.grand_low_count ?? 0;
+    const allDev = summary.total_devices ?? 0;
+    if (reclaimableBadge) reclaimableBadge.textContent = `${allGb} GB Reclaimable (All)`;
+    if (candidatesBadge) candidatesBadge.textContent = `${allCnt.toLocaleString()} Low-Quality Files`;
+    if (devicesBadge) devicesBadge.textContent = `${allDev} Total Devices`;
+    if (paneTitle) paneTitle.textContent = '📚 All Devices by Owner';
+    if (countPill) countPill.textContent = `${allDev} Devices`;
+  }
+}
+
+async function fetchCleanupDevices(forceRefresh = false) {
+  if (isFetchingCleanupDevices) return;
+  isFetchingCleanupDevices = true;
+
+  const reclaimableBadge = document.getElementById('cleanup-badge-reclaimable');
+  const updatedLabel = document.getElementById('cleanup-last-updated');
+  const listEl = document.getElementById('cleanup-devices-list');
+
+  if (forceRefresh && reclaimableBadge) {
+    reclaimableBadge.textContent = 'Calculating...';
+  }
+
+  try {
+    const res = await fetch(`/api/media/cleanup/devices${forceRefresh ? '?refresh=true' : ''}`);
+    const data = await res.json();
+
+    if (!data.connected) {
+      if (listEl) {
+        listEl.innerHTML = `
+          <div class="text-muted text-center" style="padding: 2rem 1rem; font-size: 0.85rem;">
+            ⚠️ Media database unavailable. Check SQLite path.
+          </div>
+        `;
+      }
+      return;
+    }
+
+    cleanupDevicesData = data;
+    const summary = data.summary || {};
+
+    // If there are no active devices in DB, fallback to 'all'
+    if (activeDeviceScope === 'active' && (summary.active_devices || 0) === 0) {
+      activeDeviceScope = 'all';
+      document.querySelectorAll('.cleanup-scope-btn').forEach(b => {
+        b.classList.toggle('active', (b.dataset.deviceScope || 'active') === activeDeviceScope);
+      });
+    }
+
+    updateCleanupScopeSummaryBadges();
+
+    if (updatedLabel) {
+      updatedLabel.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+    }
+
+    renderCleanupOwnerChips();
+    renderCleanupDevicesList();
+
+    // If a device was previously selected, refresh its details if still in scope
+    const scopedDevices = getDevicesInActiveScope();
+    if (selectedCleanupDevice) {
+      const found = scopedDevices.find(
+        d => d.camera_model === selectedCleanupDevice.camera_model && d.owner === selectedCleanupDevice.owner
+      );
+      if (found) {
+        selectedCleanupDevice = found;
+        updateSelectedDeviceKPIs(found);
+      } else if (scopedDevices.length > 0) {
+        let topDevice = scopedDevices[0];
+        scopedDevices.forEach(d => {
+          if ((d.low_gb || 0) > (topDevice.low_gb || 0)) topDevice = d;
+        });
+        selectCleanupDevice(topDevice);
+      }
+    } else if (scopedDevices.length > 0) {
+      // Auto-select device with highest storage reclaim in current scope
+      let topDevice = scopedDevices[0];
+      scopedDevices.forEach(d => {
+        if ((d.low_gb || 0) > (topDevice.low_gb || 0)) topDevice = d;
+      });
+      selectCleanupDevice(topDevice);
+    }
+  } catch (err) {
+    console.error('Error fetching cleanup devices:', err);
+    if (listEl) {
+      listEl.innerHTML = `
+        <div class="text-muted text-center" style="padding: 2rem 1rem; font-size: 0.85rem;">
+          ❌ Failed to load devices: ${escapeHtml(err.message || 'Network error')}
+        </div>
+      `;
+    }
+  } finally {
+    isFetchingCleanupDevices = false;
+  }
+}
+
+function renderCleanupOwnerChips() {
+  const container = document.getElementById('cleanup-owner-chips');
+  if (!container || !cleanupDevicesData) return;
+
+  const summary = cleanupDevicesData.summary || {};
+  const totalScopedDev = activeDeviceScope === 'active'
+    ? (summary.active_devices || 0)
+    : (summary.total_devices || 0);
+
+  let html = `
+    <button class="cleanup-chip ${activeOwnerFilter === 'all' ? 'active' : ''}" data-owner="all">
+      All Owners (${totalScopedDev})
+    </button>
+  `;
+
+  (cleanupDevicesData.owners || []).forEach(o => {
+    const scopedDevs = (o.devices || []).filter(d => activeDeviceScope === 'all' || d.is_active);
+    if (!scopedDevs.length) return;
+    const isAct = activeOwnerFilter === o.owner_name;
+    html += `
+      <button class="cleanup-chip ${isAct ? 'active' : ''}" data-owner="${escapeHtml(o.owner_name)}">
+        ${escapeHtml(o.owner_name)} (${scopedDevs.length})
+      </button>
+    `;
+  });
+
+  container.innerHTML = html;
+
+  container.querySelectorAll('.cleanup-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      container.querySelectorAll('.cleanup-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      activeOwnerFilter = chip.dataset.owner || 'all';
+      renderCleanupDevicesList();
+    });
+  });
+}
+
+function renderCleanupDevicesList() {
+  const listEl = document.getElementById('cleanup-devices-list');
+  if (!listEl || !cleanupDevicesData) return;
+
+  const searchTerm = (document.getElementById('cleanup-device-search')?.value || '').trim().toLowerCase();
+  const owners = cleanupDevicesData.owners || [];
+
+  let filteredOwners = owners;
+  if (activeOwnerFilter !== 'all') {
+    filteredOwners = filteredOwners.filter(o => o.owner_name === activeOwnerFilter);
+  }
+
+  let html = '';
+  let totalVisibleDevices = 0;
+
+  filteredOwners.forEach(o => {
+    let devices = (o.devices || []).filter(d => activeDeviceScope === 'all' || d.is_active);
+    if (searchTerm) {
+      devices = devices.filter(d => 
+        d.camera_model.toLowerCase().includes(searchTerm) || 
+        o.owner_name.toLowerCase().includes(searchTerm)
+      );
+    }
+
+    if (!devices.length) return;
+    totalVisibleDevices += devices.length;
+
+    const ownerReclaimGb = devices.reduce((acc, d) => acc + (d.low_gb || 0), 0);
+
+    html += `
+      <div class="cleanup-owner-group">
+        <div class="cleanup-owner-header">
+          <span class="cleanup-owner-name">
+            <span>👤</span> ${escapeHtml(o.owner_name)}
+          </span>
+          <span class="badge badge-xs badge-amber font-mono">${ownerReclaimGb.toFixed(2)} GB reclaimable</span>
+        </div>
+        <div class="cleanup-owner-devices">
+    `;
+
+    devices.forEach(d => {
+      const isSelected = selectedCleanupDevice &&
+        selectedCleanupDevice.camera_model === d.camera_model &&
+        selectedCleanupDevice.owner === d.owner;
+      const pct = d.total_count > 0 ? Math.min(100, Math.round((d.low_count / d.total_count) * 100)) : 50;
+      const activeDot = d.is_active
+        ? `<span class="cleanup-device-active-dot" title="Active Device (since ${escapeHtml(d.start_date || 'current')})"></span>`
+        : '';
+
+      html += `
+        <div class="cleanup-device-item ${isSelected ? 'active' : ''}" data-model="${escapeHtml(d.camera_model)}" data-owner="${escapeHtml(d.owner)}">
+          <div class="cleanup-device-header-row">
+            <span class="cleanup-device-name" title="${escapeHtml(d.camera_model)}">
+              ${activeDot}
+              ${escapeHtml(d.camera_model)}
+            </span>
+            <span class="badge badge-xs badge-amber font-mono">${d.low_gb.toFixed(2)} GB</span>
+          </div>
+          <div class="cleanup-device-subrow">
+            <span>${d.low_count.toLocaleString()} / ${d.total_count.toLocaleString()} files (${pct}%)</span>
+            <span class="font-mono">Q2 ≤ ${d.q2_max_score.toFixed(4)}</span>
+          </div>
+          <div class="cleanup-device-progress-bg">
+            <div class="cleanup-device-progress-fill" style="width: ${pct}%;"></div>
+          </div>
+        </div>
+      `;
+    });
+
+    html += `
+        </div>
+      </div>
+    `;
+  });
+
+  if (!totalVisibleDevices) {
+    html = `
+      <div class="text-muted text-center" style="padding: 2.5rem 1rem; font-size: 0.85rem;">
+        No ${activeDeviceScope === 'active' ? 'active ' : ''}devices found${searchTerm ? ` matching "${escapeHtml(searchTerm)}"` : ''}.
+      </div>
+    `;
+  }
+
+  listEl.innerHTML = html;
+
+  // Add click handlers
+  listEl.querySelectorAll('.cleanup-device-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const model = item.dataset.model;
+      const owner = item.dataset.owner;
+      let matchedDev = null;
+      for (const o of (cleanupDevicesData.owners || [])) {
+        for (const d of (o.devices || [])) {
+          if (d.camera_model === model && d.owner === owner) {
+            matchedDev = d;
+            break;
+          }
+        }
+        if (matchedDev) break;
+      }
+      if (matchedDev) {
+        selectCleanupDevice(matchedDev);
+      }
+    });
+  });
+}
+
+function updateSelectedDeviceKPIs(device) {
+  const kpisContainer = document.getElementById('cleanup-detail-kpis');
+  const kpiGb = document.getElementById('cleanup-kpi-device-gb');
+  const kpiCount = document.getElementById('cleanup-kpi-device-count');
+  const kpiMaxScore = document.getElementById('cleanup-kpi-device-max-score');
+
+  if (kpisContainer) kpisContainer.style.display = 'flex';
+  if (kpiGb) kpiGb.textContent = `${device.low_gb.toFixed(2)} GB`;
+  if (kpiCount) kpiCount.textContent = `${device.low_count.toLocaleString()} files`;
+  if (kpiMaxScore) kpiMaxScore.textContent = `≤ ${device.q2_max_score.toFixed(4)}`;
+}
+
+function selectCleanupDevice(device) {
+  selectedCleanupDevice = device;
+
+  // Highlight in list
+  document.querySelectorAll('.cleanup-device-item').forEach(item => {
+    if (item.dataset.model === device.camera_model && item.dataset.owner === device.owner) {
+      item.classList.add('active');
+    } else {
+      item.classList.remove('active');
+    }
+  });
+
+  // Update detail view header
+  const titleName = document.getElementById('cleanup-detail-device-name');
+  const ownerBadge = document.getElementById('cleanup-detail-owner-badge');
+  const activeBadge = document.getElementById('cleanup-detail-active-badge');
+  const subtitle = document.getElementById('cleanup-detail-subtitle');
+  const toolbar = document.getElementById('cleanup-toolbar');
+  const placeholder = document.getElementById('cleanup-empty-placeholder');
+  const table = document.getElementById('cleanup-candidates-table');
+  const paginationBar = document.getElementById('cleanup-pagination-bar');
+
+  if (titleName) titleName.textContent = device.camera_model;
+  if (ownerBadge) {
+    ownerBadge.textContent = device.owner;
+    ownerBadge.style.display = 'inline-block';
+  }
+  if (activeBadge) {
+    activeBadge.style.display = device.is_active ? 'inline-block' : 'none';
+  }
+  if (subtitle) {
+    const dateSpan = device.start_date
+      ? ` (Active since ${device.start_date}${device.end_date ? ` to ${device.end_date}` : ''})`
+      : '';
+    subtitle.textContent = `Reviewing bottom 2 quartiles (Q1 & Q2) for ${device.owner}${dateSpan} — ordered largest-to-smallest.`;
+  }
+
+  updateSelectedDeviceKPIs(device);
+
+  if (toolbar) toolbar.style.display = 'flex';
+  if (placeholder) placeholder.style.display = 'none';
+  if (table) table.style.display = 'table';
+  if (paginationBar) paginationBar.style.display = 'flex';
+
+  cleanupPageOffset = 0;
+  selectedCandidateAssetIds.clear();
+  updateCleanupSelectionBar();
+
+  fetchCleanupCandidates();
+}
+
+async function fetchCleanupCandidates() {
+  if (!selectedCleanupDevice) return;
+  if (isFetchingCleanupCandidates) return;
+  isFetchingCleanupCandidates = true;
+
+  const tbody = document.getElementById('cleanup-candidates-tbody');
+  const paginationInfo = document.getElementById('cleanup-pagination-info');
+  const pageNumberLabel = document.getElementById('cleanup-page-number');
+  const prevBtn = document.getElementById('btn-cleanup-prev-page');
+  const nextBtn = document.getElementById('btn-cleanup-next-page');
+
+  if (tbody) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="11" class="text-center text-muted" style="padding: 3rem 1rem;">
+          <div class="spinner-sm mb-2" style="margin: 0 auto;"></div>
+          Scanning bottom 2 quartiles for <strong>${escapeHtml(selectedCleanupDevice.camera_model)}</strong>...
+        </td>
+      </tr>
+    `;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      camera_model: selectedCleanupDevice.camera_model,
+      owner: selectedCleanupDevice.owner || 'all',
+      quartile: activeQuartileFilter,
+      media_type: activeTypeFilter,
+      limit: cleanupPageLimit.toString(),
+      offset: cleanupPageOffset.toString()
+    });
+
+    const res = await fetch(`/api/media/cleanup/candidates?${params.toString()}`);
+    const data = await res.json();
+
+    if (!data.ok) {
+      if (tbody) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="11" class="text-center text-muted" style="padding: 2.5rem 1rem;">
+              ⚠️ Error loading candidates: ${escapeHtml(data.error || 'Unknown error')}
+            </td>
+          </tr>
+        `;
+      }
+      return;
+    }
+
+    currentCandidateList = data.candidates || [];
+    currentCandidateList.forEach(c => {
+      candidateAssetMeta.set(c.asset_id, {
+        ...c,
+        filename: c.original_filename,
+        bytes: c.file_size_bytes,
+        mb: c.file_size_mb,
+        model: c.camera_model
+      });
+    });
+
+    const totalCount = data.total_count || 0;
+    const totalGb = data.total_gb || 0;
+
+    if (!currentCandidateList.length) {
+      if (tbody) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="11" class="text-center text-muted" style="padding: 3.5rem 1rem;">
+              <span style="font-size: 1.5rem; display: block; margin-bottom: 0.4rem;">🎉</span>
+              No candidate assets found for <strong>${escapeHtml(selectedCleanupDevice.camera_model)}</strong> with current filters.
+            </td>
+          </tr>
+        `;
+      }
+    } else {
+      let rowsHtml = '';
+      currentCandidateList.forEach((c, idx) => {
+        const isChecked = selectedCandidateAssetIds.has(c.asset_id);
+        const rowNum = cleanupPageOffset + idx + 1;
+        const ext = (c.original_filename.split('.').pop() || '').toUpperCase();
+        const isVideo = c.media_type === 'video';
+
+        const thumbUrl = `/api/media/cleanup/thumbnail/${encodeURIComponent(c.asset_id)}`;
+        const thumbPlayIcon = isVideo ? `<span class="cleanup-thumb-play">▶</span>` : '';
+        const previewThumbHtml = `
+          <div class="cleanup-thumb-wrap" data-preview-asset-id="${c.asset_id}" title="Click to preview ${escapeHtml(c.original_filename)}">
+            <img class="cleanup-thumb-img" src="${thumbUrl}" alt="${escapeHtml(c.original_filename)}" loading="lazy" />
+            ${thumbPlayIcon}
+            <span class="cleanup-thumb-badge">${escapeHtml(ext)}</span>
+          </div>
+        `;
+
+        const resSub = (c.width && c.height)
+          ? `<div class="candidate-res-sub">${c.width}×${c.height}${c.fps > 0 ? ` · ${Math.round(c.fps)}fps` : ''}</div>`
+          : '';
+
+        const tsParts = formatCaptureTimestampParts(c.capture_timestamp || c.date_created_utc);
+        const captureTsHtml = `
+          <div class="candidate-capture-ts" title="Exact capture timestamp: ${escapeHtml(c.capture_timestamp || c.date_created_utc)}">
+            <span class="candidate-capture-date">${escapeHtml(tsParts.dateLine)}</span>
+            <span class="candidate-capture-time">🕒 ${escapeHtml(tsParts.timeLine || c.month || '—')}</span>
+          </div>
+        `;
+
+        const durationHtml = isVideo
+          ? `<span class="candidate-duration-pill" title="Video duration: ${c.duration_sec}s">⏱️ ${formatDuration(c.duration_sec)}</span>`
+          : `<span class="text-muted font-mono" style="font-size: 0.71rem;">Still</span>`;
+
+        const sizeFormatted = c.file_size_mb >= 1024
+          ? `${(c.file_size_mb / 1024).toFixed(2)} GB`
+          : `${c.file_size_mb.toFixed(1)} MB`;
+
+        const quartileBadge = c.score_quartile === 1
+          ? `<span class="badge badge-xs cleanup-badge-q1 font-mono">Q1 (Lowest)</span>`
+          : `<span class="badge badge-xs cleanup-badge-q2 font-mono">Q2 (Low)</span>`;
+
+        let momentHtml = '<span class="text-muted">—</span>';
+        if (c.last_asset_pub) {
+          momentHtml = `<span class="badge badge-xs badge-green" title="Published: ${escapeHtml(c.last_asset_pub)}">✅ ${escapeHtml(c.last_asset_pub.substring(0, 10))}</span>`;
+        } else if (c.assigned_moment && c.assigned_moment !== '—') {
+          const shortMom = c.assigned_moment.length > 20 ? c.assigned_moment.substring(0, 20) + '…' : c.assigned_moment;
+          momentHtml = `<span class="badge badge-xs badge-outline font-mono" title="${escapeHtml(c.assigned_moment)}">${escapeHtml(shortMom)}</span>`;
+        }
+
+        rowsHtml += `
+          <tr class="${isChecked ? 'selected' : ''}" data-asset-id="${c.asset_id}">
+            <td style="text-align: center;">
+              <input type="checkbox" class="cleanup-asset-checkbox" data-asset-id="${c.asset_id}" ${isChecked ? 'checked' : ''} />
+            </td>
+            <td style="text-align: center; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted);">${rowNum}</td>
+            <td>${previewThumbHtml}</td>
+            <td class="candidate-filename" title="${escapeHtml(c.original_filename)}">
+              <div>${escapeHtml(c.original_filename)}</div>
+              ${resSub}
+            </td>
+            <td>${captureTsHtml}</td>
+            <td style="text-align: right;">${durationHtml}</td>
+            <td style="text-align: right;">
+              <strong class="text-amber font-mono" style="font-size: 0.78rem;">${sizeFormatted}</strong>
+            </td>
+            <td style="text-align: center;">${quartileBadge}</td>
+            <td style="text-align: right; font-family: var(--font-mono); font-size: 0.73rem; color: var(--text-secondary);">
+              ${c.score_normalized.toFixed(4)}
+            </td>
+            <td>${momentHtml}</td>
+            <td style="text-align: center; white-space: nowrap;">
+              <button class="btn btn-xs btn-outline btn-cleanup-preview" data-asset-id="${c.asset_id}" title="Preview media & full device details">
+                👁️
+              </button>
+              <button class="btn btn-xs btn-outline btn-cleanup-single-remove" data-asset-id="${c.asset_id}" title="Mark this asset as removed from source">
+                🗑️ Remove
+              </button>
+            </td>
+          </tr>
+        `;
+      });
+
+      if (tbody) tbody.innerHTML = rowsHtml;
+    }
+
+    // Attach row checkbox handlers
+    tbody?.querySelectorAll('.cleanup-asset-checkbox').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const aid = cb.dataset.assetId;
+        const tr = cb.closest('tr');
+        if (e.target.checked) {
+          selectedCandidateAssetIds.add(aid);
+          tr?.classList.add('selected');
+        } else {
+          selectedCandidateAssetIds.delete(aid);
+          tr?.classList.remove('selected');
+        }
+        updateCleanupSelectionBar();
+      });
+    });
+
+    // Attach thumbnail and preview button handlers
+    tbody?.querySelectorAll('[data-preview-asset-id], .btn-cleanup-preview').forEach(el => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const aid = el.dataset.previewAssetId || el.dataset.assetId;
+        if (aid) openCleanupPreviewModal(aid);
+      });
+    });
+
+    // Attach row remove button handlers
+    tbody?.querySelectorAll('.btn-cleanup-single-remove').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const aid = btn.dataset.assetId;
+        openCleanupConfirmModal([aid]);
+      });
+    });
+
+    // Update pagination controls
+    const fromIdx = totalCount > 0 ? cleanupPageOffset + 1 : 0;
+    const toIdx = Math.min(cleanupPageOffset + cleanupPageLimit, totalCount);
+    if (paginationInfo) {
+      paginationInfo.textContent = `Showing ${fromIdx}–${toIdx} of ${totalCount.toLocaleString()} candidates (${totalGb.toFixed(2)} GB)`;
+    }
+
+    const curPage = Math.floor(cleanupPageOffset / cleanupPageLimit) + 1;
+    const totalPages = Math.ceil(totalCount / cleanupPageLimit) || 1;
+    if (pageNumberLabel) {
+      pageNumberLabel.textContent = `Page ${curPage} of ${totalPages}`;
+    }
+
+    if (prevBtn) prevBtn.disabled = cleanupPageOffset <= 0;
+    if (nextBtn) nextBtn.disabled = cleanupPageOffset + cleanupPageLimit >= totalCount;
+
+    updateCleanupSelectionBar();
+  } catch (err) {
+    console.error('Error fetching cleanup candidates:', err);
+    if (tbody) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="11" class="text-center text-muted" style="padding: 2.5rem 1rem;">
+            ❌ Network error loading candidates.
+          </td>
+        </tr>
+      `;
+    }
+  } finally {
+    isFetchingCleanupCandidates = false;
+  }
+}
+
+function openCleanupPreviewModal(assetId) {
+  const c = candidateAssetMeta.get(assetId);
+  if (!c) return;
+
+  previewModalAssetId = assetId;
+  const modal = document.getElementById('modal-cleanup-preview');
+  const stage = document.getElementById('cleanup-preview-stage');
+  if (!modal || !stage) return;
+
+  const isVideo = c.media_type === 'video';
+  const ext = (c.original_filename.split('.').pop() || '').toUpperCase();
+  const sizeStr = c.file_size_mb >= 1024
+    ? `${(c.file_size_mb / 1024).toFixed(2)} GB`
+    : `${c.file_size_mb.toFixed(1)} MB`;
+
+  const titleEl = document.getElementById('cleanup-preview-title');
+  const typeBadgeEl = document.getElementById('cleanup-preview-type-badge');
+  const sizeBadgeEl = document.getElementById('cleanup-preview-size-badge');
+
+  if (titleEl) titleEl.textContent = c.original_filename;
+  if (typeBadgeEl) typeBadgeEl.textContent = isVideo ? `🎥 VIDEO (${ext})` : `📷 PHOTO (${ext})`;
+  if (sizeBadgeEl) sizeBadgeEl.textContent = sizeStr;
+
+  const thumbUrl = `/api/media/cleanup/thumbnail/${encodeURIComponent(assetId)}`;
+  const previewUrl = `/api/media/cleanup/preview/${encodeURIComponent(assetId)}`;
+
+  if (isVideo) {
+    stage.innerHTML = `
+      <video controls autoplay preload="metadata" poster="${thumbUrl}" src="${previewUrl}">
+        Your browser does not support playback of this video format.
+      </video>
+    `;
+  } else {
+    stage.innerHTML = `
+      <img src="${previewUrl}" alt="${escapeHtml(c.original_filename)}" />
+    `;
+  }
+
+  const tsParts = formatCaptureTimestampParts(c.capture_timestamp || c.date_created_utc);
+  const tsEl = document.getElementById('cleanup-preview-timestamp');
+  const durEl = document.getElementById('cleanup-preview-duration');
+  const resEl = document.getElementById('cleanup-preview-resolution');
+  const devEl = document.getElementById('cleanup-preview-device');
+  const scoreEl = document.getElementById('cleanup-preview-score');
+  const momEl = document.getElementById('cleanup-preview-moment');
+  const uuidEl = document.getElementById('cleanup-preview-uuid');
+
+  if (tsEl) tsEl.textContent = `${tsParts.dateLine} · ${tsParts.timeLine || c.capture_timestamp}`;
+  if (durEl) {
+    durEl.textContent = isVideo
+      ? `${formatDuration(c.duration_sec)} (${c.duration_sec}s · ${ext})`
+      : `Still Photo (${ext})`;
+  }
+  if (resEl) {
+    resEl.textContent = (c.width && c.height)
+      ? `${c.width} × ${c.height} px${c.fps > 0 ? ` @ ${c.fps} fps` : ''}`
+      : '—';
+  }
+  if (devEl) devEl.textContent = `${c.camera_model} (${c.primary_owner})`;
+  if (scoreEl) scoreEl.textContent = `Q${c.score_quartile} · Score ${(c.score_normalized || 0).toFixed(4)}`;
+  if (momEl) momEl.textContent = c.assigned_moment || '—';
+  if (uuidEl) uuidEl.textContent = `Asset UUID: ${c.asset_id}`;
+
+  modal.classList.add('open');
+}
+
+function closeCleanupPreviewModal() {
+  const modal = document.getElementById('modal-cleanup-preview');
+  const stage = document.getElementById('cleanup-preview-stage');
+  if (stage) {
+    const vid = stage.querySelector('video');
+    if (vid) {
+      vid.pause();
+      vid.removeAttribute('src');
+      vid.load();
+    }
+    stage.innerHTML = '';
+  }
+  modal?.classList.remove('open');
+  previewModalAssetId = null;
+}
+
+function updateCleanupSelectionBar() {
+  const summaryEl = document.getElementById('cleanup-selection-summary');
+  const btnMark = document.getElementById('btn-mark-selected-removed');
+  const selectAllCb = document.getElementById('cleanup-select-all-checkbox');
+
+  const count = selectedCandidateAssetIds.size;
+  let totalBytes = 0;
+  selectedCandidateAssetIds.forEach(aid => {
+    const meta = candidateAssetMeta.get(aid);
+    if (meta && meta.bytes) {
+      totalBytes += meta.bytes;
+    }
+  });
+
+  if (summaryEl) {
+    summaryEl.textContent = `${count} selected (${formatBytes(totalBytes)})`;
+  }
+
+  if (btnMark) {
+    btnMark.disabled = count === 0;
+    btnMark.textContent = count > 0 
+      ? `🗑️ Mark (${count}) as Removed` 
+      : '🗑️ Mark Selected as Removed';
+  }
+
+  if (selectAllCb) {
+    const allChecked = currentCandidateList.length > 0 && currentCandidateList.every(c => selectedCandidateAssetIds.has(c.asset_id));
+    selectAllCb.checked = allChecked;
+  }
+}
+
+function openCleanupConfirmModal(assetIds) {
+  pendingRemovalAssetIds = assetIds;
+  const modal = document.getElementById('modal-cleanup-confirm');
+  if (!modal) return;
+
+  const devNameEl = document.getElementById('cleanup-confirm-device-name');
+  const countEl = document.getElementById('cleanup-confirm-count');
+  const sizeEl = document.getElementById('cleanup-confirm-size');
+  const previewEl = document.getElementById('cleanup-confirm-files-preview');
+
+  let totalBytes = 0;
+  const filenames = [];
+
+  assetIds.forEach(aid => {
+    const meta = candidateAssetMeta.get(aid);
+    if (meta) {
+      totalBytes += meta.bytes || 0;
+      filenames.push(meta.filename);
+    }
+  });
+
+  if (devNameEl) {
+    devNameEl.textContent = selectedCleanupDevice ? selectedCleanupDevice.camera_model : '—';
+  }
+  if (countEl) {
+    countEl.textContent = `${assetIds.length} asset${assetIds.length === 1 ? '' : 's'}`;
+  }
+  if (sizeEl) {
+    sizeEl.textContent = formatBytes(totalBytes);
+  }
+  if (previewEl) {
+    let previewHtml = '';
+    const slice = filenames.slice(0, 6);
+    slice.forEach(fn => {
+      previewHtml += `<div>• ${escapeHtml(fn)}</div>`;
+    });
+    if (filenames.length > 6) {
+      previewHtml += `<div class="text-muted" style="margin-top: 0.25rem;">... and ${filenames.length - 6} more file(s)</div>`;
+    }
+    previewEl.innerHTML = previewHtml || '<div>Asset UUID: ' + assetIds[0] + '</div>';
+  }
+
+  modal.classList.add('open');
+}
+
+async function executeCleanupRemoval() {
+  if (!pendingRemovalAssetIds.length) return;
+
+  const btnConfirm = document.getElementById('btn-execute-cleanup-removal');
+  const modal = document.getElementById('modal-cleanup-confirm');
+
+  if (btnConfirm) {
+    btnConfirm.disabled = true;
+    btnConfirm.textContent = 'Removing...';
+  }
+
+  try {
+    const res = await fetch('/api/media/cleanup/mark-removed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        asset_ids: pendingRemovalAssetIds,
+        action: 'remove'
+      })
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      alert(`Failed to mark assets as removed: ${data.error || 'Server error'}`);
+      return;
+    }
+
+    // Success! Remove the marked asset IDs from selection
+    pendingRemovalAssetIds.forEach(aid => {
+      selectedCandidateAssetIds.delete(aid);
+    });
+
+    modal?.classList.remove('open');
+
+    // Refresh candidate table and device summary
+    await fetchCleanupCandidates();
+    fetchCleanupDevices(true);
+  } catch (err) {
+    console.error('Error executing cleanup removal:', err);
+    alert(`Network error marking assets as removed: ${err.message || 'Unknown error'}`);
+  } finally {
+    if (btnConfirm) {
+      btnConfirm.disabled = false;
+      btnConfirm.textContent = 'Confirm & Mark Removed';
+    }
+    pendingRemovalAssetIds = [];
+  }
+}
+
+// ==========================================================================
+// 13. Planner Mode Overview: [B] Batch Management | [M] Memory & Publishing
+// ==========================================================================
+
+let plannerOverviewData = null;
+let isFetchingPlannerOverview = false;
+
+function setupPlannerOverview() {
+  // Mode view tabs (All | [B] | [M] | [C])
+  document.querySelectorAll('.planner-mode-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.planner-mode-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+
+      const view = tab.dataset.modeView || 'all';
+      const grid = document.getElementById('planner-modes-grid');
+      const cardB = document.getElementById('planner-mode-b-card');
+      const cardM = document.getElementById('planner-mode-m-card');
+      const cardC = document.getElementById('media-cleanup-card');
+
+      if (view === 'all') {
+        if (grid) {
+          grid.style.display = 'grid';
+          grid.classList.remove('single-col');
+        }
+        if (cardB) cardB.style.display = 'flex';
+        if (cardM) cardM.style.display = 'flex';
+        if (cardC) cardC.style.display = 'block';
+      } else if (view === 'b') {
+        if (grid) {
+          grid.style.display = 'grid';
+          grid.classList.add('single-col');
+        }
+        if (cardB) cardB.style.display = 'flex';
+        if (cardM) cardM.style.display = 'none';
+        if (cardC) cardC.style.display = 'none';
+      } else if (view === 'm') {
+        if (grid) {
+          grid.style.display = 'grid';
+          grid.classList.add('single-col');
+        }
+        if (cardB) cardB.style.display = 'none';
+        if (cardM) cardM.style.display = 'flex';
+        if (cardC) cardC.style.display = 'none';
+      } else if (view === 'c') {
+        if (grid) grid.style.display = 'none';
+        if (cardC) {
+          cardC.style.display = 'block';
+          cardC.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }
+    });
+  });
+
+  document.getElementById('btn-refresh-planner-overview')?.addEventListener('click', () => {
+    fetchPlannerOverview();
+  });
+
+  // Load initial planner overview data
+  fetchPlannerOverview();
+}
+
+async function fetchPlannerOverview() {
+  if (isFetchingPlannerOverview) return;
+  isFetchingPlannerOverview = true;
+
+  try {
+    const res = await fetch('/api/media/planner-overview');
+    const data = await res.json();
+
+    if (!data.connected) return;
+    plannerOverviewData = data;
+
+    const updatedEl = document.getElementById('planner-overview-updated');
+    if (updatedEl) {
+      updatedEl.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+    }
+
+    renderModeBOverview(data.mode_b || {});
+    renderModeMOverview(data.mode_m || {});
+  } catch (err) {
+    console.error('Error fetching planner overview:', err);
+  } finally {
+    isFetchingPlannerOverview = false;
+  }
+}
+
+function renderModeBOverview(modeB) {
+  const sb = modeB.status_breakdown || {};
+  const qList = modeB.active_queue || [];
+  const c400 = modeB.manual_400_candidates || [];
+  const c500 = modeB.pipeline_500_candidates || [];
+  const c000 = modeB.pipeline_000_candidates || [];
+  const primary = modeB.primary_suggestion || null;
+
+  // Header & Stage Strip counters
+  const qPill = document.getElementById('mode-b-queue-pill');
+  const compPill = document.getElementById('mode-b-completed-pill');
+  if (qPill) {
+    qPill.textContent = qList.length > 0
+      ? `${qList.length} Queued (${qList.map(q => q.month).join(', ')})`
+      : '0 Queued';
+  }
+  const cnt650 = sb['650']?.count || 0;
+  const assets650 = sb['650']?.assets || 0;
+  if (compPill) {
+    compPill.textContent = `${cnt650} Finalized (${assets650.toLocaleString()} assets)`;
+  }
+
+  const cnt000 = sb['000']?.count || 0;
+  const assets000 = sb['000']?.assets || 0;
+  const cnt400 = sb['400']?.count || 0;
+  const assets400 = sb['400']?.assets || 0;
+  const cnt500 = (sb['500']?.count || 0) + (sb['550']?.count || 0);
+  const assets500 = (sb['500']?.assets || 0) + (sb['550']?.assets || 0);
+
+  if (document.getElementById('mode-b-cnt-000')) {
+    document.getElementById('mode-b-cnt-000').textContent = `${cnt000} batches (${assets000.toLocaleString()})`;
+  }
+  if (document.getElementById('mode-b-cnt-400')) {
+    document.getElementById('mode-b-cnt-400').textContent = `${cnt400} batches (${assets400.toLocaleString()})`;
+  }
+  if (document.getElementById('mode-b-cnt-500')) {
+    document.getElementById('mode-b-cnt-500').textContent = `${cnt500} batches (${assets500.toLocaleString()})`;
+  }
+  if (document.getElementById('mode-b-cnt-650')) {
+    document.getElementById('mode-b-cnt-650').textContent = `${cnt650} batches (${assets650.toLocaleString()})`;
+  }
+
+  // Primary Suggested Action Banner
+  const headlineEl = document.getElementById('mode-b-primary-headline');
+  const detailEl = document.getElementById('mode-b-primary-detail');
+  const secEl = document.getElementById('mode-b-primary-secondary');
+
+  if (primary) {
+    if (headlineEl) headlineEl.textContent = primary.headline;
+    if (detailEl) detailEl.textContent = `👉 ${primary.detail}`;
+    if (secEl) secEl.textContent = primary.secondary || '';
+  } else {
+    if (headlineEl) headlineEl.textContent = 'All eligible batch transitions are queued or complete';
+    if (detailEl) detailEl.textContent = 'No pending manual or pipeline transitions detected.';
+    if (secEl) secEl.textContent = '';
+  }
+
+  // 1. Manual 400 -> 500 Table
+  const b400Badge = document.getElementById('mode-b-400-badge');
+  const b400Tbody = document.getElementById('mode-b-400-tbody');
+  if (b400Badge) b400Badge.textContent = `${c400.length} batch${c400.length === 1 ? '' : 'es'}`;
+
+  if (b400Tbody) {
+    if (!c400.length) {
+      b400Tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No batches currently awaiting manual Google Photos curation (400).</td></tr>';
+    } else {
+      b400Tbody.innerHTML = c400.map(item => {
+        const favBadge = item.fav_assets > 0
+          ? `<span class="badge badge-xs badge-green font-mono">⭐ ${item.fav_assets}</span>`
+          : `<span class="text-muted font-mono">0</span>`;
+        const elapsedStr = item.elapsed_days !== null ? ` (${item.elapsed_days}d ago)` : '';
+        return `
+          <tr>
+            <td><strong class="font-mono text-primary">${escapeHtml(item.month)}</strong></td>
+            <td><span class="badge badge-xs badge-amber font-mono">400</span></td>
+            <td style="text-align: right;" class="font-mono">${item.total_assets.toLocaleString()}</td>
+            <td style="text-align: right;">${favBadge}</td>
+            <td style="font-size: 0.72rem;">${escapeHtml(item.next_step)}${escapeHtml(elapsedStr)}</td>
+            <td style="text-align: right; white-space: nowrap;">
+              <button class="btn btn-xs btn-green" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'confirm_500')" title="Confirm Google Photos curation complete (400 ➜ 500)">
+                ✓ Confirm 500
+              </button>
+              <button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'bypass_500')" title="Bypass manual starring & proceed with AI aesthetic ranking (400 ➜ 500)">
+                ⚡ Bypass
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // 2. Pipeline 500 -> 550 -> 600 -> 650 Table
+  const b500Badge = document.getElementById('mode-b-500-badge');
+  const b500Tbody = document.getElementById('mode-b-500-tbody');
+  if (b500Badge) b500Badge.textContent = `${c500.length} batch${c500.length === 1 ? '' : 'es'}`;
+
+  if (b500Tbody) {
+    if (!c500.length) {
+      b500Tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No batches at stage 500 waiting for favorites pull & ranking.</td></tr>';
+    } else {
+      b500Tbody.innerHTML = c500.map(item => {
+        const favBadge = item.fav_assets > 0
+          ? `<span class="badge badge-xs badge-green font-mono">⭐ ${item.fav_assets}</span>`
+          : (item.is_bypassed ? `<span class="badge badge-xs badge-outline">Bypassed</span>` : `<span class="text-muted font-mono">0</span>`);
+        const actionBtn = item.in_queue
+          ? `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'remove_queue')" title="Remove from planned_execution queue">✓ Queued (Remove)</button>`
+          : `<button class="btn btn-xs btn-purple" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'queue')" title="Add ${escapeHtml(item.month)} to planned_execution queue">➕ Queue (500➜650)</button>`;
+
+        return `
+          <tr>
+            <td><strong class="font-mono text-primary">${escapeHtml(item.month)}</strong></td>
+            <td><span class="badge badge-xs badge-purple font-mono">${escapeHtml(item.status_code)}</span></td>
+            <td style="text-align: right;" class="font-mono">${item.total_assets.toLocaleString()}</td>
+            <td style="text-align: right;">${favBadge}</td>
+            <td class="font-mono" style="font-size: 0.7rem; color: var(--text-secondary);">500 ➜ 550 (Pull Favs) ➜ 600 (Rank) ➜ 650</td>
+            <td style="text-align: right; white-space: nowrap;">${actionBtn}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // 3. Pipeline 000 -> 100 -> 200 -> 210 -> 399 Table
+  const b000Badge = document.getElementById('mode-b-000-badge');
+  const b000Tbody = document.getElementById('mode-b-000-tbody');
+  if (b000Badge) {
+    b000Badge.textContent = `Top ${c000.length} of ${modeB.total_000_batches || 0} batches`;
+  }
+
+  if (b000Tbody) {
+    if (!c000.length) {
+      b000Tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No unprocessed 000 batches remaining.</td></tr>';
+    } else {
+      b000Tbody.innerHTML = c000.map(item => {
+        const actionBtn = item.in_queue
+          ? `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'remove_queue')">✓ Queued (Remove)</button>`
+          : `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'queue')" title="Queue ${escapeHtml(item.month)} for Verify, Export & Google Upload">➕ Queue (000➜399)</button>`;
+
+        return `
+          <tr>
+            <td><strong class="font-mono text-primary">${escapeHtml(item.month)}</strong></td>
+            <td><span class="badge badge-xs badge-outline font-mono">${escapeHtml(item.status_code)}</span></td>
+            <td style="text-align: right;" class="font-mono">${item.total_assets.toLocaleString()}</td>
+            <td class="font-mono" style="font-size: 0.7rem; color: var(--text-muted);">000 ➜ 100 ➜ 200 ➜ 210 ➜ 399 (Upload)</td>
+            <td style="text-align: right; white-space: nowrap;">${actionBtn}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+}
+
+function renderModeMOverview(modeM) {
+  const th = modeM.threshold || {};
+  const sc = modeM.stage_counts || {};
+  const needsSync = modeM.needs_sync_moments || [];
+  const recs = modeM.actionable_recommendations || [];
+  const disjoint = modeM.disjoint_recommendations || [];
+
+  const thPill = document.getElementById('mode-m-threshold-pill');
+  const momPill = document.getElementById('mode-m-moments-pill');
+
+  if (thPill) {
+    if (th.aligned) {
+      thPill.className = 'badge badge-xs badge-green font-mono';
+      thPill.textContent = `🎉 Threshold Aligned (${(th.current || 0.5315).toFixed(4)})`;
+    } else {
+      thPill.className = 'badge badge-xs badge-amber font-mono';
+      thPill.textContent = `⚠️ Threshold ${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0).toFixed(4)}`;
+    }
+  }
+  if (momPill) {
+    momPill.textContent = `${sc.total_moments || 163} Moments (${sc.published_assets_total || 0} pub. assets)`;
+  }
+
+  // Stage Strip
+  if (document.getElementById('mode-m-cnt-sync')) {
+    document.getElementById('mode-m-cnt-sync').textContent = `${needsSync.length} moment${needsSync.length === 1 ? '' : 's'}`;
+  }
+  if (document.getElementById('mode-m-cnt-m400')) {
+    document.getElementById('mode-m-cnt-m400').textContent = `${sc.M400 || 0} moments`;
+  }
+  if (document.getElementById('mode-m-cnt-m450')) {
+    document.getElementById('mode-m-cnt-m450').textContent = `${sc.M450 || 0} moments`;
+  }
+  if (document.getElementById('mode-m-cnt-m500')) {
+    document.getElementById('mode-m-cnt-m500').textContent = `${sc.M500 || 0} moments`;
+  }
+
+  // Primary Banner for Mode [M]
+  const headlineEl = document.getElementById('mode-m-primary-headline');
+  const detailEl = document.getElementById('mode-m-primary-detail');
+
+  if (needsSync.length > 0) {
+    const names = needsSync.map(m => m.moment_name).join(', ');
+    if (headlineEl) {
+      headlineEl.textContent = `Step 1: Sync ${needsSync.length} Moment(s) Requiring Curation Updates (${names}) ➜ Step 2: Publish Top ${recs.length} Ready Moments`;
+    }
+    if (detailEl) {
+      detailEl.textContent = `👉 Run Option [1] to sync new qualified assets to ToBeCurated in Apple Photos, or publish top ready candidate: ${recs[0] ? `${recs[0].moment_name} (${recs[0].action})` : '—'}`;
+    }
+  } else if (recs.length > 0) {
+    if (headlineEl) {
+      headlineEl.textContent = `Threshold Aligned (${(th.current || 0.5315).toFixed(4)}) · Top Next Candidate: "${recs[0].moment_name}" (${recs[0].action})`;
+    }
+    if (detailEl) {
+      detailEl.textContent = `👉 ${recs.length} actionable moments ready for Shutterfly/YouTube publishing (up to 9 assets per batch) and ${disjoint.length} disjoint moments ready for merge.`;
+    }
+  }
+
+  // Step 1: Sync Box
+  const syncBox = document.getElementById('mode-m-sync-box');
+  if (syncBox) {
+    const thText = th.aligned
+      ? `<span class="text-green">✅ <strong>Curation Threshold Aligned:</strong> Current <code>${(th.current || 0.5315).toFixed(4)}</code> matches target <code>${(th.historical_min || 0.5315).toFixed(4)}</code>.</span>`
+      : `<span class="text-amber">⚠️ <strong>Threshold Mismatch:</strong> Current <code>${(th.current || 0).toFixed(4)}</code> exceeds target <code>${(th.historical_min || 0).toFixed(4)}</code> — assign Moments to top unassigned assets first.</span>`;
+
+    let syncMomentsHtml = '';
+    if (needsSync.length > 0) {
+      syncMomentsHtml = `<div style="margin-top: 0.35rem;">🔄 <strong>Moments Requiring Option [1] Sync to <code>ToBeCurated</code>:</strong> ` +
+        needsSync.map(m => `<span class="badge badge-xs badge-amber font-mono">${escapeHtml(m.moment_name)} (${m.stage} · ${m.assets} assets · Rank ${m.rank_score.toFixed(2)})</span>`).join(' ') +
+        `</div>`;
+    } else {
+      syncMomentsHtml = `<div style="margin-top: 0.3rem;" class="text-muted">All qualified assets are synced to <code>ToBeCurated</code> or <code>Curated</code>.</div>`;
+    }
+    syncBox.innerHTML = thText + syncMomentsHtml;
+  }
+
+  // Step 2: Top Actionable Recommendations Table
+  const recBadge = document.getElementById('mode-m-rec-badge');
+  const recTbody = document.getElementById('mode-m-recs-tbody');
+  if (recBadge) recBadge.textContent = `${recs.length} actionable`;
+
+  if (recTbody) {
+    if (!recs.length) {
+      recTbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No actionable publishing recommendations found in log.</td></tr>';
+    } else {
+      recTbody.innerHTML = recs.map(r => {
+        const isRepub = r.action.startsWith('Republish');
+        const actionBadge = isRepub
+          ? `<span class="badge badge-xs badge-purple">${escapeHtml(r.action)}</span>`
+          : `<span class="badge badge-xs badge-green">${escapeHtml(r.action)}</span>`;
+        return `
+          <tr>
+            <td><strong class="text-primary">${escapeHtml(r.moment_name)}</strong></td>
+            <td style="text-align: right;" class="font-mono text-amber">${r.avg_score.toFixed(4)}</td>
+            <td style="text-align: right;" class="font-mono">${r.files}</td>
+            <td style="text-align: right;" class="font-mono">${r.published}</td>
+            <td>${actionBadge}</td>
+            <td class="font-mono text-muted" style="font-size: 0.69rem; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.details)}">
+              ${escapeHtml(r.details)}
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // Step 3: Disjoint Moments Table
+  const disjBadge = document.getElementById('mode-m-disjoint-badge');
+  const disjTbody = document.getElementById('mode-m-disjoint-tbody');
+  if (disjBadge) disjBadge.textContent = `${disjoint.length} disjoint`;
+
+  if (disjTbody) {
+    if (!disjoint.length) {
+      disjTbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No disjoint moments (&lt;2 assets) detected.</td></tr>';
+    } else {
+      disjTbody.innerHTML = disjoint.map(d => `
+        <tr>
+          <td><strong class="text-primary">${escapeHtml(d.moment_name)}</strong></td>
+          <td style="text-align: right;" class="font-mono">${d.avg_score.toFixed(4)}</td>
+          <td style="text-align: right;" class="font-mono">${d.files}</td>
+          <td style="font-size: 0.72rem; color: var(--accent-amber);">${escapeHtml(d.details)}</td>
+        </tr>
+      `).join('');
+    }
+  }
+}
+
+window.runPlannerBatchAction = async function(month, action) {
+  try {
+    const res = await fetch('/api/media/planner/batch-action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month, action })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(`Action failed: ${data.error || 'Unknown error'}`);
+      return;
+    }
+    await fetchPlannerOverview();
+    fetchExecutorMonitor();
+  } catch (err) {
+    console.error('Error running planner batch action:', err);
+    alert(`Network error: ${err.message || 'Unknown error'}`);
+  }
+};

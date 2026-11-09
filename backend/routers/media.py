@@ -11,8 +11,11 @@ from typing import Optional
 from pathlib import Path
 from datetime import datetime, timezone
 from pydantic import BaseModel
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, Response
 from backend.config import MEDIA_DB_PATH, REPOS, get_db_connection
+
+APPLE_PHOTOS_LIBRARY_PATH = Path("/Volumes/Extreme Pro/Photos Library/All-Media.photoslibrary")
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -23,6 +26,19 @@ class PublishedUrlUpdateRequest(BaseModel):
     moment_name: str
     shutterfly_url: Optional[str] = None
     youtube_url: Optional[str] = None
+
+class MarkRemovedRequest(BaseModel):
+    asset_ids: list[str]
+    action: Optional[str] = "remove"  # "remove" or "restore"
+
+class PlannerBatchActionRequest(BaseModel):
+    month: str
+    action: str  # "queue" | "remove_queue" | "confirm_500" | "bypass_500" | "reset_000"
+
+_cleanup_devices_cache = {
+    "timestamp": 0.0,
+    "payload": None
+}
 
 def _ensure_published_url_schema():
     """Ensure migration 060 columns (published_url, shutterfly_url, youtube_url) exist in media_organizer.db."""
@@ -812,6 +828,1021 @@ def update_published_moment_urls(req: PublishedUrlUpdateRequest):
                 "shutterfly_url": sf_url,
                 "youtube_url": yt_url
             }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.get("/cleanup/devices")
+def get_cleanup_devices(refresh: bool = False):
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {
+            "connected": False,
+            "error": "Media database unavailable",
+            "summary": {},
+            "owners": []
+        }
+
+    now = time.time()
+    if not refresh and _cleanup_devices_cache["payload"] and (now - _cleanup_devices_cache["timestamp"] < 300):
+        return _cleanup_devices_cache["payload"]
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                WITH scored_assets AS (
+                    SELECT 
+                        COALESCE(zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
+                        COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
+                        COALESCE(do.is_active, 0) AS is_active,
+                        do.start_date AS owner_start_date,
+                        do.end_date AS owner_end_date,
+                        COALESCE(v.score_normalized, 0.0) AS score_normalized,
+                        COALESCE(aaa.ZORIGINALFILESIZE, 0) AS file_size_bytes,
+                        NTILE(4) OVER (
+                            PARTITION BY COALESCE(zea.ZCAMERAMODEL, 'Unknown')
+                            ORDER BY COALESCE(v.score_normalized, 0.0) ASC
+                        ) AS score_quartile
+                    FROM assets a
+                    LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                    LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = za.Z_PK
+                    LEFT JOIN ZEXTENDEDATTRIBUTES zea ON zea.ZASSET = za.Z_PK
+                    LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
+                        AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                        AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    WHERE zea.ZCAMERAMODEL IS NOT NULL 
+                      AND zea.ZCAMERAMODEL != ''
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                )
+                SELECT 
+                    primary_owner,
+                    camera_model,
+                    COUNT(CASE WHEN score_quartile IN (1, 2) THEN 1 END) AS low_quality_count,
+                    ROUND(SUM(CASE WHEN score_quartile IN (1, 2) THEN file_size_bytes ELSE 0 END) / 1073741824.0, 2) AS low_quality_gb,
+                    COUNT(*) AS total_assets,
+                    ROUND(SUM(file_size_bytes) / 1073741824.0, 2) AS total_gb,
+                    ROUND(MIN(score_normalized), 4) AS min_score,
+                    ROUND(MAX(CASE WHEN score_quartile = 2 THEN score_normalized END), 4) AS q2_max_score,
+                    MAX(is_active) AS is_active,
+                    MIN(owner_start_date) AS start_date,
+                    MAX(owner_end_date) AS end_date
+                FROM scored_assets
+                GROUP BY primary_owner, camera_model
+                ORDER BY primary_owner ASC, low_quality_gb DESC, low_quality_count DESC;
+            """)
+            rows = cur.fetchall()
+
+            owner_dict = {}
+            grand_low_count = 0
+            grand_low_gb = 0.0
+            grand_total_count = 0
+            grand_total_gb = 0.0
+
+            active_devices_count = 0
+            active_low_count = 0
+            active_low_gb = 0.0
+            active_total_count = 0
+            active_total_gb = 0.0
+
+            for r in rows:
+                p_owner = r[0] or "Shared/Other"
+                c_model = r[1]
+                l_cnt = r[2] or 0
+                l_gb = r[3] or 0.0
+                t_cnt = r[4] or 0
+                t_gb = r[5] or 0.0
+                min_s = r[6] if r[6] is not None else 0.0
+                max_s = r[7] if r[7] is not None else 0.0
+                is_act = bool(r[8])
+                s_date = r[9]
+                e_date = r[10]
+
+                if p_owner not in owner_dict:
+                    owner_dict[p_owner] = {
+                        "owner_name": p_owner,
+                        "low_count": 0,
+                        "low_gb": 0.0,
+                        "total_count": 0,
+                        "total_gb": 0.0,
+                        "active_low_count": 0,
+                        "active_low_gb": 0.0,
+                        "active_total_count": 0,
+                        "active_total_gb": 0.0,
+                        "active_device_count": 0,
+                        "devices": []
+                    }
+
+                owner_dict[p_owner]["low_count"] += l_cnt
+                owner_dict[p_owner]["low_gb"] = round(owner_dict[p_owner]["low_gb"] + l_gb, 2)
+                owner_dict[p_owner]["total_count"] += t_cnt
+                owner_dict[p_owner]["total_gb"] = round(owner_dict[p_owner]["total_gb"] + t_gb, 2)
+
+                if is_act:
+                    owner_dict[p_owner]["active_low_count"] += l_cnt
+                    owner_dict[p_owner]["active_low_gb"] = round(owner_dict[p_owner]["active_low_gb"] + l_gb, 2)
+                    owner_dict[p_owner]["active_total_count"] += t_cnt
+                    owner_dict[p_owner]["active_total_gb"] = round(owner_dict[p_owner]["active_total_gb"] + t_gb, 2)
+                    owner_dict[p_owner]["active_device_count"] += 1
+
+                    active_devices_count += 1
+                    active_low_count += l_cnt
+                    active_low_gb += l_gb
+                    active_total_count += t_cnt
+                    active_total_gb += t_gb
+
+                owner_dict[p_owner]["devices"].append({
+                    "camera_model": c_model,
+                    "owner": p_owner,
+                    "low_count": l_cnt,
+                    "low_gb": l_gb,
+                    "total_count": t_cnt,
+                    "total_gb": t_gb,
+                    "min_score": min_s,
+                    "q2_max_score": max_s,
+                    "is_active": is_act,
+                    "start_date": s_date,
+                    "end_date": e_date
+                })
+
+                grand_low_count += l_cnt
+                grand_low_gb += l_gb
+                grand_total_count += t_cnt
+                grand_total_gb += t_gb
+
+            # Sort owners alphabetically, but keep Shared/Other at the end
+            def owner_sort_key(name):
+                return (1 if name == "Shared/Other" else 0, name.lower())
+
+            sorted_owners = [owner_dict[k] for k in sorted(owner_dict.keys(), key=owner_sort_key)]
+
+            payload = {
+                "connected": True,
+                "summary": {
+                    "total_devices": len(rows),
+                    "grand_low_count": grand_low_count,
+                    "grand_low_gb": round(grand_low_gb, 2),
+                    "grand_total_count": grand_total_count,
+                    "grand_total_gb": round(grand_total_gb, 2),
+                    "active_devices": active_devices_count,
+                    "active_low_count": active_low_count,
+                    "active_low_gb": round(active_low_gb, 2),
+                    "active_total_count": active_total_count,
+                    "active_total_gb": round(active_total_gb, 2)
+                },
+                "owners": sorted_owners,
+                "cached_at": datetime.now(timezone.utc).isoformat()
+            }
+
+            _cleanup_devices_cache["timestamp"] = now
+            _cleanup_devices_cache["payload"] = payload
+            return payload
+        finally:
+            conn.close()
+    except Exception as e:
+        return {
+            "connected": False,
+            "error": str(e),
+            "summary": {},
+            "owners": []
+        }
+
+@router.get("/cleanup/candidates")
+def get_cleanup_candidates(
+    camera_model: str,
+    owner: Optional[str] = None,
+    quartile: str = "all",       # "all" (Q1+Q2), "1", "2"
+    media_type: str = "all",     # "all", "video", "photo"
+    limit: int = 50,
+    offset: int = 0
+):
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable", "candidates": [], "total_count": 0}
+
+    limit = max(1, min(limit, 250))
+    offset = max(0, offset)
+
+    quartile_cond = "score_quartile IN (1, 2)"
+    if quartile == "1":
+        quartile_cond = "score_quartile = 1"
+    elif quartile == "2":
+        quartile_cond = "score_quartile = 2"
+
+    media_cond = ""
+    if media_type == "video":
+        media_cond = "AND media_type = 'video'"
+    elif media_type == "photo":
+        media_cond = "AND media_type = 'photo'"
+
+    owner_cond = ""
+    if owner and owner != "all":
+        owner_cond = "AND primary_owner = ?"
+
+    query = f"""
+        WITH all_assets_with_moments AS (
+            SELECT 
+                a.asset_id,
+                a.original_filename,
+                a.month,
+                a.date_created_utc,
+                aaa.ZEXIFTIMESTAMPSTRING AS exif_timestamp_raw,
+                COALESCE(zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
+                COALESCE(zea.ZCAMERAMAKE, 'Unknown') AS camera_make,
+                COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
+                COALESCE(v.score_normalized, 0.0) AS score_normalized,
+                a.aesthetic_score,
+                a.google_favorite,
+                a.mobile_apple_photos_featured_photos AS apple_featured,
+                a.apple_photos_monthly_selection AS apple_monthly_sel,
+                CASE 
+                    WHEN COALESCE(za.ZKIND, 0) = 1 
+                         OR lower(a.original_filename) LIKE '%.mov' 
+                         OR lower(a.original_filename) LIKE '%.mp4' 
+                         OR lower(a.original_filename) LIKE '%.m4v' 
+                         OR lower(a.original_filename) LIKE '%.avi' 
+                    THEN 'video' 
+                    ELSE 'photo' 
+                END AS media_type,
+                ROUND(COALESCE(za.ZDURATION, zea.ZDURATION, 0.0), 2) AS duration_sec,
+                COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0) AS width,
+                COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0) AS height,
+                ROUND(COALESCE(zea.ZFPS, 0.0), 1) AS fps,
+                COALESCE(
+                    a.MomentsAlbumName, 
+                    a.curated_album, 
+                    a.to_be_curated_album, 
+                    ps.published_moments,
+                    '—'
+                ) AS assigned_moment,
+                ps.last_asset_pub,
+                aaa.ZORIGINALFILESIZE AS file_size_bytes,
+                ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2) AS file_size_mb,
+                ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1073741824.0, 3) AS file_size_gb,
+                NTILE(4) OVER (
+                    PARTITION BY COALESCE(zea.ZCAMERAMODEL, 'Unknown')
+                    ORDER BY COALESCE(v.score_normalized, 0.0) ASC
+                ) AS score_quartile
+            FROM assets a
+            LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+            LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = za.Z_PK
+            LEFT JOIN ZEXTENDEDATTRIBUTES zea ON zea.ZASSET = za.Z_PK
+            LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
+                AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+            LEFT JOIN (
+                SELECT asset_uuid, GROUP_CONCAT(DISTINCT moment_name) AS published_moments, MAX(published_at_utc) AS last_asset_pub 
+                FROM publications 
+                GROUP BY asset_uuid
+            ) ps ON ps.asset_uuid = a.asset_id
+            LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+            WHERE zea.ZCAMERAMODEL = ?
+              AND COALESCE(a.removed_from_source, 0) = 0
+        ),
+        filtered AS (
+            SELECT 
+                score_quartile,
+                original_filename,
+                month,
+                file_size_mb,
+                ROUND(score_normalized, 4) AS score_normalized,
+                assigned_moment,
+                media_type,
+                date_created_utc,
+                primary_owner,
+                camera_model,
+                asset_id,
+                file_size_bytes,
+                last_asset_pub,
+                duration_sec,
+                width,
+                height,
+                fps,
+                exif_timestamp_raw,
+                COUNT(*) OVER () as filtered_total_count,
+                ROUND(SUM(file_size_bytes) OVER () / 1048576.0, 2) as filtered_total_mb
+            FROM all_assets_with_moments
+            WHERE {quartile_cond} {media_cond} {owner_cond}
+        )
+        SELECT * FROM filtered
+        ORDER BY file_size_bytes DESC
+        LIMIT ? OFFSET ?;
+    """
+
+    def _normalize_timestamp(exif_ts: Optional[str], utc_ts: Optional[str]) -> str:
+        if exif_ts and len(exif_ts) >= 19:
+            # Convert EXIF '2025:02:16 14:20:06' -> '2025-02-16 14:20:06'
+            date_part = exif_ts[:10].replace(":", "-")
+            time_part = exif_ts[11:19]
+            return f"{date_part} {time_part}"
+        if utc_ts:
+            cleaned = utc_ts.replace("T", " ").replace("Z", "")
+            return cleaned[:19]
+        return "—"
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            params = [camera_model]
+            if owner and owner != "all":
+                params.append(owner)
+            params.extend([limit, offset])
+
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+
+            total_count = 0
+            total_mb = 0.0
+            candidates = []
+
+            for r in rows:
+                total_count = r[18] or 0
+                total_mb = r[19] or 0.0
+                exif_raw = r[17]
+                utc_raw = r[7]
+                capture_ts = _normalize_timestamp(exif_raw, utc_raw)
+
+                candidates.append({
+                    "score_quartile": r[0],
+                    "original_filename": r[1],
+                    "month": r[2] or "—",
+                    "file_size_mb": r[3] or 0.0,
+                    "score_normalized": r[4] if r[4] is not None else 0.0,
+                    "assigned_moment": r[5] or "—",
+                    "media_type": r[6] or "photo",
+                    "date_created_utc": utc_raw or "—",
+                    "capture_timestamp": capture_ts,
+                    "primary_owner": r[8] or "—",
+                    "camera_model": r[9] or "—",
+                    "asset_id": r[10],
+                    "file_size_bytes": r[11] or 0,
+                    "last_asset_pub": r[12] or None,
+                    "duration_sec": r[13] or 0.0,
+                    "width": r[14] or 0,
+                    "height": r[15] or 0,
+                    "fps": r[16] or 0.0
+                })
+
+            if not rows and offset > 0:
+                count_params = [camera_model]
+                if owner and owner != "all":
+                    count_params.append(owner)
+                cur.execute(f"""
+                    WITH all_assets_with_moments AS (
+                        SELECT 
+                            a.asset_id,
+                            COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
+                            COALESCE(aaa.ZORIGINALFILESIZE, 0) AS file_size_bytes,
+                            CASE 
+                                WHEN COALESCE(za.ZKIND, 0) = 1 
+                                     OR lower(a.original_filename) LIKE '%.mov' 
+                                     OR lower(a.original_filename) LIKE '%.mp4' 
+                                     OR lower(a.original_filename) LIKE '%.m4v' 
+                                     OR lower(a.original_filename) LIKE '%.avi' 
+                                THEN 'video' 
+                                ELSE 'photo' 
+                            END AS media_type,
+                            NTILE(4) OVER (
+                                PARTITION BY COALESCE(zea.ZCAMERAMODEL, 'Unknown')
+                                ORDER BY COALESCE(v.score_normalized, 0.0) ASC
+                            ) AS score_quartile
+                        FROM assets a
+                        LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = za.Z_PK
+                        LEFT JOIN ZEXTENDEDATTRIBUTES zea ON zea.ZASSET = za.Z_PK
+                        LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
+                            AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                            AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                        LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                        WHERE zea.ZCAMERAMODEL = ?
+                          AND COALESCE(a.removed_from_source, 0) = 0
+                    )
+                    SELECT COUNT(*), ROUND(SUM(file_size_bytes) / 1048576.0, 2)
+                    FROM all_assets_with_moments
+                    WHERE {quartile_cond} {media_cond} {owner_cond}
+                """, tuple(count_params))
+                c_row = cur.fetchone()
+                if c_row:
+                    total_count = c_row[0] or 0
+                    total_mb = c_row[1] or 0.0
+
+            total_gb = round(total_mb / 1024.0, 2)
+
+            return {
+                "ok": True,
+                "camera_model": camera_model,
+                "owner": owner,
+                "quartile": quartile,
+                "media_type": media_type,
+                "limit": limit,
+                "offset": offset,
+                "total_count": total_count,
+                "total_mb": total_mb,
+                "total_gb": total_gb,
+                "candidates": candidates
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e), "candidates": [], "total_count": 0}
+
+
+def _resolve_asset_paths(asset_id: str) -> dict:
+    """Look up ZDIRECTORY and ZFILENAME in O(1) from media_organizer.db."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {}
+    conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=10)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT za.ZDIRECTORY, za.ZFILENAME, a.original_filename, COALESCE(za.ZKIND, 0)
+            FROM ZASSET za
+            LEFT JOIN assets a ON a.asset_id = za.ZUUID
+            WHERE za.ZUUID = ?
+            LIMIT 1
+        """, (asset_id,))
+        row = cur.fetchone()
+        if not row:
+            return {}
+        return {
+            "zdir": row[0] or "",
+            "zfilename": row[1] or "",
+            "original_filename": row[2] or "",
+            "zkind": row[3] or 0
+        }
+    finally:
+        conn.close()
+
+
+def _placeholder_svg_response(label: str = "Preview") -> Response:
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+      <rect width="160" height="120" rx="8" fill="#131926"/>
+      <rect x="2" y="2" width="156" height="116" rx="6" fill="none" stroke="#2d3748" stroke-width="1"/>
+      <text x="80" y="56" text-anchor="middle" fill="#8b5cf6" font-family="monospace" font-size="13" font-weight="bold">{label}</text>
+      <text x="80" y="76" text-anchor="middle" fill="#64748b" font-family="sans-serif" font-size="10">Offline / No Derivative</text>
+    </svg>"""
+    return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=300"})
+
+
+@router.get("/cleanup/thumbnail/{asset_id}")
+def get_cleanup_thumbnail(asset_id: str):
+    info = _resolve_asset_paths(asset_id)
+    if not info:
+        return _placeholder_svg_response("Not Found")
+
+    zdir = info["zdir"]
+    zfn = info["zfilename"]
+    orig_fn = info["original_filename"] or zfn
+    ext = (orig_fn.split(".")[-1] if "." in orig_fn else "").upper() or "MEDIA"
+
+    if APPLE_PHOTOS_LIBRARY_PATH.exists() and zdir:
+        deriv_dir = APPLE_PHOTOS_LIBRARY_PATH / "resources" / "derivatives" / zdir
+        # Check standard Apple Photos thumbnail derivatives in O(1)
+        for suffix in ("_1_105_c.jpeg", "_1_102_o.jpeg", "_1_100_o.jpeg"):
+            cand = deriv_dir / f"{asset_id}{suffix}"
+            if cand.exists():
+                return FileResponse(str(cand), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+        # Also check masters/renders or any matching jpeg in that single directory
+        if deriv_dir.exists():
+            for p in deriv_dir.glob(f"{asset_id}*.jpeg"):
+                return FileResponse(str(p), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+
+        # Fallback to original if it is browser-compatible JPEG/PNG
+        if zfn and zfn.lower().endswith((".jpg", ".jpeg", ".png")):
+            orig_path = APPLE_PHOTOS_LIBRARY_PATH / "originals" / zdir / zfn
+            if orig_path.exists():
+                mtype = "image/png" if zfn.lower().endswith(".png") else "image/jpeg"
+                return FileResponse(str(orig_path), media_type=mtype, headers={"Cache-Control": "public, max-age=3600"})
+
+    return _placeholder_svg_response(ext)
+
+
+@router.get("/cleanup/preview/{asset_id}")
+def get_cleanup_preview(asset_id: str):
+    info = _resolve_asset_paths(asset_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    zdir = info["zdir"]
+    zfn = info["zfilename"]
+    orig_fn = info["original_filename"] or zfn
+    is_video = info["zkind"] == 1 or orig_fn.lower().endswith((".mov", ".mp4", ".m4v", ".avi"))
+
+    if APPLE_PHOTOS_LIBRARY_PATH.exists() and zdir:
+        orig_path = APPLE_PHOTOS_LIBRARY_PATH / "originals" / zdir / zfn if zfn else None
+        deriv_dir = APPLE_PHOTOS_LIBRARY_PATH / "resources" / "derivatives" / zdir
+
+        if is_video:
+            # Check if there is a medium derivative video or serve original .mov/.mp4
+            if deriv_dir.exists():
+                for p in deriv_dir.glob(f"{asset_id}*.mov"):
+                    return FileResponse(str(p), media_type="video/quicktime")
+                for p in deriv_dir.glob(f"{asset_id}*.mp4"):
+                    return FileResponse(str(p), media_type="video/mp4")
+            if orig_path and orig_path.exists():
+                mtype = "video/mp4" if zfn.lower().endswith(".mp4") else "video/quicktime"
+                return FileResponse(str(orig_path), media_type=mtype)
+
+        # For photos (or fallback if video original missing), serve highest resolution JPEG derivative or original
+        if deriv_dir.exists():
+            for suffix in ("_1_102_o.jpeg", "_1_105_c.jpeg", "_1_100_o.jpeg"):
+                cand = deriv_dir / f"{asset_id}{suffix}"
+                if cand.exists():
+                    return FileResponse(str(cand), media_type="image/jpeg")
+            for p in deriv_dir.glob(f"{asset_id}*.jpeg"):
+                return FileResponse(str(p), media_type="image/jpeg")
+
+        if orig_path and orig_path.exists():
+            return FileResponse(str(orig_path))
+
+    return _placeholder_svg_response("Offline")
+
+@router.post("/cleanup/mark-removed")
+def mark_cleanup_assets_removed(req: MarkRemovedRequest):
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    if not req.asset_ids:
+        return {"ok": False, "error": "No asset_ids provided"}
+
+    action = (req.action or "remove").lower().strip()
+    val = 1 if action == "remove" else 0
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            placeholders = ",".join("?" for _ in req.asset_ids)
+            cur.execute(f"""
+                SELECT COALESCE(SUM(aaa.ZORIGINALFILESIZE), 0)
+                FROM assets a
+                LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = za.Z_PK
+                WHERE a.asset_id IN ({placeholders})
+            """, req.asset_ids)
+            row = cur.fetchone()
+            total_bytes = row[0] if row else 0
+
+            if val == 1:
+                cur.execute(f"""
+                    UPDATE assets 
+                    SET removed_from_source = 1,
+                        removed_from_source_at_utc = datetime('now'),
+                        updated_at_utc = datetime('now')
+                    WHERE asset_id IN ({placeholders})
+                """, req.asset_ids)
+            else:
+                cur.execute(f"""
+                    UPDATE assets 
+                    SET removed_from_source = 0,
+                        removed_from_source_at_utc = NULL,
+                        updated_at_utc = datetime('now')
+                    WHERE asset_id IN ({placeholders})
+                """, req.asset_ids)
+
+            affected = cur.rowcount
+            conn.commit()
+
+            # Invalidate device cache
+            _cleanup_devices_cache["timestamp"] = 0.0
+            _cleanup_devices_cache["payload"] = None
+
+            freed_mb = round(total_bytes / 1048576.0, 2)
+            freed_gb = round(total_bytes / 1073741824.0, 2)
+
+            return {
+                "ok": True,
+                "action": action,
+                "affected_count": affected,
+                "freed_bytes": total_bytes,
+                "freed_mb": freed_mb,
+                "freed_gb": freed_gb
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _parse_mode_m_logs(log_dir: Path):
+    """Parse publishing_recommendations.log, publishing_candidates.log, and curation_threshold_status.log."""
+    actionable_recs = []
+    disjoint_recs = []
+    needs_sync_moments = []
+    threshold_aligned = True
+    current_threshold = None
+    historical_min = None
+
+    thresh_log = log_dir / "curation_threshold_status.log"
+    if thresh_log.exists():
+        try:
+            text = thresh_log.read_text(encoding="utf-8", errors="replace")
+            m_cur = re.search(r"Current dynamic threshold:\s+(\d+\.\d+)", text)
+            m_min = re.search(r"Historical minimum target:\s+(\d+\.\d+)", text)
+            if m_cur:
+                current_threshold = float(m_cur.group(1))
+            if m_min:
+                historical_min = float(m_min.group(1))
+            if "Threshold aligned" in text:
+                threshold_aligned = True
+            elif current_threshold is not None and historical_min is not None:
+                threshold_aligned = current_threshold <= (historical_min + 1e-4)
+        except Exception:
+            pass
+
+    rec_log = log_dir / "publishing_recommendations.log"
+    if rec_log.exists():
+        try:
+            in_disjoint = False
+            for raw_line in rec_log.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if "Disjoint Moments (Need Merge)" in line:
+                    in_disjoint = True
+                    continue
+                m = re.match(
+                    r"^(\d+)\s+(.+?)\s+(\d+\.\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(Republish:.*?\)|Publish .*?\)|Publish Whole Album|Disjoint:.*?\))\s+(.+)$",
+                    line
+                )
+                if m:
+                    item = {
+                        "idx": int(m.group(1)),
+                        "moment_name": m.group(2).strip(),
+                        "avg_score": float(m.group(3)),
+                        "files": int(m.group(4)),
+                        "published": int(m.group(5)),
+                        "recommended": int(m.group(6)),
+                        "action": m.group(7).strip(),
+                        "details": m.group(8).strip()
+                    }
+                    if in_disjoint or item["action"].startswith("Disjoint"):
+                        disjoint_recs.append(item)
+                    else:
+                        actionable_recs.append(item)
+        except Exception:
+            pass
+
+    cand_log = log_dir / "publishing_candidates.log"
+    if cand_log.exists():
+        try:
+            in_needs_update = False
+            for raw_line in cand_log.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw_line.strip()
+                if "Moments Requiring Curation Updates" in line:
+                    in_needs_update = True
+                    continue
+                if "Up-To-Date Moments" in line:
+                    in_needs_update = False
+                    break
+                if in_needs_update:
+                    m = re.match(
+                        r"^(\d+)\s+(.+?)\s+(M\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+)\s+(\S+)",
+                        line
+                    )
+                    if m:
+                        needs_sync_moments.append({
+                            "idx": int(m.group(1)),
+                            "moment_name": m.group(2).strip(),
+                            "stage": m.group(3),
+                            "rank_score": float(m.group(4)),
+                            "avg_score": float(m.group(5)),
+                            "assets": int(m.group(8)),
+                            "published": m.group(9)
+                        })
+        except Exception:
+            pass
+
+    return {
+        "threshold_aligned": threshold_aligned,
+        "current_threshold": current_threshold,
+        "historical_min": historical_min,
+        "actionable_recs": actionable_recs,
+        "disjoint_recs": disjoint_recs,
+        "needs_sync_moments": needs_sync_moments
+    }
+
+
+@router.get("/planner-overview")
+def get_planner_overview():
+    """Return comprehensive next-step overview for Mode [B] Batch Management and Mode [M] Memory Feature & Publishing."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"connected": False, "error": "Media database unavailable"}
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            current_month_str = now_utc.strftime("%Y-%m")
+
+            # -----------------------------------------------------------------
+            # 1. Mode [B]: Batch Management Overview & Next Steps
+            # -----------------------------------------------------------------
+            cur.execute("SELECT id, planned_month, set_at_utc FROM planned_execution WHERE active = 1 ORDER BY id ASC")
+            active_queue = [
+                {"id": r[0], "month": r[1], "queued_at_utc": r[2]}
+                for r in cur.fetchall()
+            ]
+            queued_months_set = {q["month"] for q in active_queue}
+
+            cur.execute("""
+                SELECT status_code, COUNT(*), COALESCE(SUM(assets_count), 0)
+                FROM month_batches
+                GROUP BY status_code
+                ORDER BY status_code ASC
+            """)
+            status_breakdown = {}
+            for sc, cnt, assets_sum in cur.fetchall():
+                status_breakdown[str(sc)] = {"count": cnt, "assets": assets_sum}
+
+            # Outdated completed batches (status >= 600 with newly imported assets)
+            cur.execute("""
+                SELECT mb.month, mb.updated_at_utc, MAX(a.imported_date_utc), COUNT(a.asset_id)
+                FROM month_batches mb
+                JOIN assets a ON a.month = mb.month
+                WHERE mb.status_code >= '600'
+                GROUP BY mb.month
+                HAVING MAX(a.imported_date_utc) > mb.updated_at_utc
+                ORDER BY mb.month DESC
+            """)
+            outdated_batches = [
+                {
+                    "month": r[0],
+                    "finalized_at_utc": r[1],
+                    "newest_import_utc": r[2],
+                    "assets_count": r[3]
+                }
+                for r in cur.fetchall()
+            ]
+
+            # Active (non-650) batches with favorites and upload timestamps
+            cur.execute("""
+                SELECT 
+                    mb.month, 
+                    mb.status_code,
+                    COALESCE(a.total_assets, mb.assets_count, 0) as total_assets,
+                    COALESCE(a.fav_assets, 0) as fav_assets,
+                    a.max_fav_updated as fav_synced,
+                    a.last_uploaded_at,
+                    COALESCE(mb.is_bypassed, 0) as is_bypassed,
+                    mb.bypass_timestamp
+                FROM month_batches mb
+                LEFT JOIN (
+                    SELECT 
+                        month, 
+                        COUNT(*) as total_assets,
+                        SUM(CASE WHEN google_favorite = 1 THEN 1 ELSE 0 END) as fav_assets,
+                        MAX(CASE WHEN google_favorite = 1 THEN updated_at_utc END) as max_fav_updated,
+                        MAX(CASE WHEN uploaded_to_google = 1 THEN updated_at_utc END) as last_uploaded_at
+                    FROM assets
+                    GROUP BY month
+                ) a ON mb.month = a.month
+                WHERE mb.status_code != '650' AND mb.month < ?
+                ORDER BY mb.month DESC
+            """, (current_month_str,))
+            non_final_rows = cur.fetchall()
+
+            manual_400_candidates = []
+            pipeline_500_candidates = []
+            pipeline_600_candidates = []
+            pipeline_000_candidates = []
+            retryable_candidates = []
+
+            for r in non_final_rows:
+                m_str, sc, tot_a, fav_a, fav_sync, last_up, is_byp, byp_ts = r
+                sc_str = str(sc)
+                in_q = m_str in queued_months_set
+
+                elapsed_days = None
+                if last_up:
+                    try:
+                        dt_up = datetime.strptime(last_up[:19], "%Y-%m-%d %H:%M:%S")
+                        elapsed_days = round((now_utc - dt_up).total_seconds() / 86400.0, 1)
+                    except Exception:
+                        pass
+
+                item = {
+                    "month": m_str,
+                    "status_code": sc_str,
+                    "total_assets": tot_a,
+                    "fav_assets": fav_a,
+                    "fav_synced": fav_sync[:10] if fav_sync else None,
+                    "last_uploaded_at": last_up[:16] if last_up else None,
+                    "elapsed_days": elapsed_days,
+                    "is_bypassed": bool(is_byp),
+                    "in_queue": in_q
+                }
+
+                if sc_str == "400":
+                    if fav_a > 0:
+                        item["readiness"] = "ready"
+                        item["next_step"] = f"Confirm Google Photos Curation (400 ➜ 500) — {fav_a} favorites detected"
+                    elif elapsed_days is not None and elapsed_days < 3.0:
+                        item["readiness"] = "cooldown"
+                        item["next_step"] = f"Wait for Google AI curation ({elapsed_days:.1f}d / 3.0d elapsed)"
+                    else:
+                        item["readiness"] = "action_needed"
+                        item["next_step"] = "Star favorites in Google Photos album or Bypass to Direct-Rank (400 ➜ 500)"
+                    manual_400_candidates.append(item)
+                elif sc_str in ("500", "550"):
+                    item["transition_path"] = "500 ➜ 550 (Pull Favorites) ➜ 600 (Rank & Export) ➜ 650 (Cloud Retain)"
+                    item["next_step"] = (
+                        f"Queue pipeline execution ({fav_a} favorites synced)"
+                        if fav_a > 0
+                        else ("Queue Direct-Rank Bypass execution" if is_byp else "Queue Pull Google Favorites & Rank (500 ➜ 650)")
+                    )
+                    pipeline_500_candidates.append(item)
+                elif sc_str == "600":
+                    item["transition_path"] = "600 ➜ 650 (Cloud Retention & Local Staging Cleanup)"
+                    item["next_step"] = "Finalize batch & clean staging folder"
+                    pipeline_600_candidates.append(item)
+                elif sc_str in ("399",) or sc_str.endswith("E"):
+                    item["transition_path"] = f"{sc_str} ➜ Retry step"
+                    item["next_step"] = "Resume / retry interrupted upload or failed transition"
+                    retryable_candidates.append(item)
+                elif sc_str in ("000", "100", "200", "210"):
+                    item["transition_path"] = "000 ➜ 100 (Verify DB) ➜ 200 (Export) ➜ 210 (Dedupe) ➜ 399 (Upload)"
+                    item["next_step"] = f"Verify sequencing & export {tot_a} assets to staging for Google upload"
+                    pipeline_000_candidates.append(item)
+
+            # Determine primary suggested next action for Mode [B]
+            primary_b_suggestion = None
+            if manual_400_candidates:
+                top_m = manual_400_candidates[0]
+                primary_b_suggestion = {
+                    "type": "manual_curation",
+                    "month": top_m["month"],
+                    "status_code": "400 ➜ 500",
+                    "headline": f"Step 1 (Manual Curation Check): Batch {top_m['month']} ({top_m['total_assets']} assets)",
+                    "detail": top_m["next_step"],
+                    "secondary": (
+                        f"If skipped, planner proceeds to Pipeline Candidate: Batch {pipeline_500_candidates[0]['month']} (500 ➜ 550 ➜ 600 ➜ 650)"
+                        if pipeline_500_candidates
+                        else (f"If skipped, planner proceeds to Ingest Candidate: Batch {pipeline_000_candidates[0]['month']} (000 ➜ 399)" if pipeline_000_candidates else "")
+                    )
+                }
+            elif retryable_candidates:
+                top_r = retryable_candidates[0]
+                primary_b_suggestion = {
+                    "type": "retryable",
+                    "month": top_r["month"],
+                    "status_code": top_r["status_code"],
+                    "headline": f"Retry Interrupted Batch {top_r['month']}",
+                    "detail": top_r["next_step"],
+                    "secondary": ""
+                }
+            elif pipeline_500_candidates:
+                top_p = pipeline_500_candidates[0]
+                primary_b_suggestion = {
+                    "type": "pipeline_500",
+                    "month": top_p["month"],
+                    "status_code": "500 ➜ 650",
+                    "headline": f"Queue Ranking & Finalization for Batch {top_p['month']} ({top_p['total_assets']} assets)",
+                    "detail": top_p["next_step"],
+                    "secondary": ""
+                }
+            elif pipeline_000_candidates:
+                top_0 = pipeline_000_candidates[0]
+                primary_b_suggestion = {
+                    "type": "pipeline_000",
+                    "month": top_0["month"],
+                    "status_code": "000 ➜ 399",
+                    "headline": f"Start Batch Ingest & Upload for {top_0['month']} ({top_0['total_assets']} assets)",
+                    "detail": top_0["next_step"],
+                    "secondary": ""
+                }
+
+            # -----------------------------------------------------------------
+            # 2. Mode [M]: Memory Feature & Publishing Overview & Next Steps
+            # -----------------------------------------------------------------
+            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+            min_th_row = cur.fetchone()
+            db_hist_min = round(min_th_row[0], 4) if min_th_row and min_th_row[0] else 0.5315
+
+            cur.execute("SELECT threshold_score, threshold_met, recorded_at_utc FROM threshold_history ORDER BY id DESC LIMIT 1")
+            last_th_row = cur.fetchone()
+            db_curr_th = round(last_th_row[0], 4) if last_th_row and last_th_row[0] else db_hist_min
+            db_th_met = bool(last_th_row[1]) if last_th_row and last_th_row[1] is not None else True
+            last_th_utc = last_th_row[2] if last_th_row else None
+
+            cur.execute("SELECT memory_stage, COUNT(*) FROM curated_moments GROUP BY memory_stage")
+            moment_stage_counts = {r[0]: r[1] for r in cur.fetchall()}
+
+            cur.execute("SELECT COUNT(DISTINCT moment_name), COUNT(DISTINCT asset_uuid) FROM publications")
+            pub_totals = cur.fetchone()
+            published_moments_total = pub_totals[0] if pub_totals else 0
+            published_assets_total = pub_totals[1] if pub_totals else 0
+
+            log_dir = MEDIA_DB_PATH.resolve().parent.parent / "logs"
+            parsed_logs = _parse_mode_m_logs(log_dir)
+
+            curr_thresh = parsed_logs["current_threshold"] if parsed_logs["current_threshold"] is not None else db_curr_th
+            hist_min = parsed_logs["historical_min"] if parsed_logs["historical_min"] is not None else db_hist_min
+            thresh_aligned = parsed_logs["threshold_aligned"] if parsed_logs["current_threshold"] is not None else db_th_met
+
+            return {
+                "connected": True,
+                "mode_b": {
+                    "active_queue": active_queue,
+                    "status_breakdown": status_breakdown,
+                    "outdated_batches": outdated_batches,
+                    "manual_400_candidates": manual_400_candidates,
+                    "pipeline_500_candidates": pipeline_500_candidates,
+                    "pipeline_600_candidates": pipeline_600_candidates,
+                    "pipeline_000_candidates": pipeline_000_candidates[:8],
+                    "total_000_batches": len(pipeline_000_candidates),
+                    "total_000_assets": sum(x["total_assets"] for x in pipeline_000_candidates),
+                    "retryable_candidates": retryable_candidates,
+                    "primary_suggestion": primary_b_suggestion
+                },
+                "mode_m": {
+                    "threshold": {
+                        "current": curr_thresh,
+                        "historical_min": hist_min,
+                        "aligned": thresh_aligned,
+                        "last_checked_utc": last_th_utc
+                    },
+                    "stage_counts": {
+                        "M400": moment_stage_counts.get("M400", 0),
+                        "M450": moment_stage_counts.get("M450", 0),
+                        "M500": moment_stage_counts.get("M500", 0),
+                        "needs_sync": len(parsed_logs["needs_sync_moments"]),
+                        "total_moments": sum(moment_stage_counts.values()),
+                        "published_moments_total": published_moments_total,
+                        "published_assets_total": published_assets_total
+                    },
+                    "needs_sync_moments": parsed_logs["needs_sync_moments"],
+                    "actionable_recommendations": parsed_logs["actionable_recs"][:12],
+                    "disjoint_recommendations": parsed_logs["disjoint_recs"][:10]
+                }
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
+@router.post("/planner/batch-action")
+def execute_planner_batch_action(req: PlannerBatchActionRequest):
+    """Perform interactive Mode [B] batch management actions (queue batch, confirm 400->500, bypass 400->500, remove from queue)."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    month = (req.month or "").strip()
+    action = (req.action or "").strip().lower()
+    if not month or not action:
+        return {"ok": False, "error": "Month and action are required"}
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            if action == "queue":
+                cur.execute("SELECT id FROM planned_execution WHERE planned_month = ? AND active = 1", (month,))
+                existing = cur.fetchone()
+                if existing:
+                    cur.execute("UPDATE planned_execution SET set_at_utc = datetime('now') WHERE id = ?", (existing[0],))
+                    msg = f"Updated existing queue entry for batch {month} (ID #{existing[0]})"
+                else:
+                    cur.execute("INSERT INTO planned_execution (planned_month, active, set_at_utc) VALUES (?, 1, datetime('now'))", (month,))
+                    msg = f"Added batch {month} to active execution queue"
+            elif action == "remove_queue":
+                cur.execute("UPDATE planned_execution SET active = 0 WHERE planned_month = ? AND active = 1", (month,))
+                msg = f"Removed batch {month} from active execution queue"
+            elif action == "confirm_500":
+                cur.execute("""
+                    UPDATE month_batches
+                    SET status_code = '500', is_bypassed = 0, bypass_timestamp = NULL, updated_at_utc = datetime('now')
+                    WHERE month = ?
+                """, (month,))
+                msg = f"Confirmed Google Photos Curation for {month} (status 400 ➜ 500)"
+            elif action == "bypass_500":
+                cur.execute("""
+                    UPDATE month_batches
+                    SET status_code = '500', is_bypassed = 1, bypass_timestamp = datetime('now'), updated_at_utc = datetime('now')
+                    WHERE month = ?
+                """, (month,))
+                msg = f"Marked {month} as Direct-Rank Bypassed (status 400 ➜ 500)"
+            elif action == "reset_000":
+                cur.execute("""
+                    UPDATE month_batches
+                    SET status_code = '000', updated_at_utc = datetime('now')
+                    WHERE month = ?
+                """, (month,))
+                msg = f"Reset batch {month} to status 000"
+            else:
+                return {"ok": False, "error": f"Unsupported action: {action}"}
+
+            conn.commit()
+            return {"ok": True, "month": month, "action": action, "message": msg}
         finally:
             conn.close()
     except Exception as e:

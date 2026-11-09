@@ -250,6 +250,439 @@
             </div>
           </div>
 
+          <!-- Session Mode Selector & Next-Steps Overview ([B] Batch Management | [M] Memory Feature & Publishing | [C] Media Cleanup) -->
+          <div class="planner-mode-selector-bar mb-3" id="planner-mode-selector-bar">
+            <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+              <span class="planner-mode-label">🛠️ Planner Mode Overview:</span>
+              <button class="planner-mode-tab active" data-mode-view="all">All Modes Overview</button>
+              <button class="planner-mode-tab" data-mode-view="b">[B] Batch Management (default)</button>
+              <button class="planner-mode-tab" data-mode-view="m">[M] Memory Feature &amp; Publishing</button>
+              <button class="planner-mode-tab" data-mode-view="c">[C] Media Cleanup &amp; Reclaim</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <span class="font-mono text-muted" style="font-size: 0.72rem;" id="planner-overview-updated">—</span>
+              <button class="btn btn-xs btn-outline" id="btn-refresh-planner-overview" title="Refresh Mode [B] &amp; Mode [M] Next Steps">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Refresh Overview
+              </button>
+            </div>
+          </div>
+
+          <!-- Two Sections: [B] Batch Management (default) | [M] Memory Feature & Publishing -->
+          <div class="planner-modes-grid mb-4" id="planner-modes-grid">
+            <!-- SECTION [B]: Batch Management (default) -->
+            <div class="card planner-mode-card" id="planner-mode-b-card">
+              <div class="card-header">
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                  <div class="action-icon icon-purple" style="width: 36px; height: 36px; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; border-radius: 8px;">📦</div>
+                  <div>
+                    <h3 style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                      [B] Batch Management <span class="badge badge-xs badge-purple">Default Mode</span>
+                      <span class="badge badge-xs badge-blue font-mono" id="mode-b-queue-pill">0 Queued</span>
+                      <span class="badge badge-xs badge-green font-mono" id="mode-b-completed-pill">67 Finalized (650)</span>
+                    </h3>
+                    <p class="card-subtitle">
+                      Overview of next steps if <code>[B] Batch Management</code> is selected — evaluates Manual Curation (<code>400➜500</code>), Favorites Pull &amp; Ranking (<code>500➜650</code>), and Batch Ingest (<code>000➜399</code>).
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Primary Suggested Action Banner for Mode [B] -->
+              <div class="planner-next-action-banner" id="mode-b-primary-banner">
+                <div class="planner-banner-step-tag">NEXT STEP IF [B] SELECTED</div>
+                <div class="planner-banner-main" id="mode-b-primary-headline">Evaluating batch transition candidates...</div>
+                <div class="planner-banner-sub" id="mode-b-primary-detail">—</div>
+                <div class="planner-banner-fallback font-mono" id="mode-b-primary-secondary"></div>
+              </div>
+
+              <!-- Pipeline Stage Distribution Strip -->
+              <div class="planner-stage-strip" id="mode-b-stage-strip">
+                <div class="planner-stage-chip">
+                  <span class="stage-code">000</span>
+                  <span class="stage-name">Added / Ready</span>
+                  <strong class="font-mono text-secondary" id="mode-b-cnt-000">—</strong>
+                </div>
+                <span class="stage-arrow">➜</span>
+                <div class="planner-stage-chip">
+                  <span class="stage-code text-amber">400</span>
+                  <span class="stage-name">Uploaded (Curate)</span>
+                  <strong class="font-mono text-amber" id="mode-b-cnt-400">—</strong>
+                </div>
+                <span class="stage-arrow">➜</span>
+                <div class="planner-stage-chip">
+                  <span class="stage-code text-purple">500</span>
+                  <span class="stage-name">Curated (Pull &amp; Rank)</span>
+                  <strong class="font-mono text-purple" id="mode-b-cnt-500">—</strong>
+                </div>
+                <span class="stage-arrow">➜</span>
+                <div class="planner-stage-chip">
+                  <span class="stage-code text-green">650</span>
+                  <span class="stage-name">Archived &amp; Cleaned</span>
+                  <strong class="font-mono text-green" id="mode-b-cnt-650">—</strong>
+                </div>
+              </div>
+
+              <!-- Step-by-Step Candidate Queues for Mode [B] -->
+              <div class="planner-steps-body">
+                <!-- Step 1: Manual Curation Candidates (400 -> 500) -->
+                <div class="planner-subblock">
+                  <div class="planner-subblock-header">
+                    <span><strong>1️⃣ Manual Transition Candidates (<code>400 ➜ 500</code>)</strong> · Google Photos Curation &amp; Best-of Album</span>
+                    <span class="badge badge-xs badge-amber font-mono" id="mode-b-400-badge">0 batches</span>
+                  </div>
+                  <div class="planner-table-wrap">
+                    <table class="cleanup-table planner-compact-table">
+                      <thead>
+                        <tr>
+                          <th>Batch</th>
+                          <th>Status</th>
+                          <th style="text-align: right;">Assets</th>
+                          <th style="text-align: right;">Favorites</th>
+                          <th>Next Step / Readiness</th>
+                          <th style="text-align: right;">Quick Action</th>
+                        </tr>
+                      </thead>
+                      <tbody id="mode-b-400-tbody">
+                        <tr><td colspan="6" class="text-center text-muted">Loading 400 batches...</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Step 2: Pipeline Ranking & Finalization Candidates (500 -> 550 -> 600 -> 650) -->
+                <div class="planner-subblock">
+                  <div class="planner-subblock-header">
+                    <span><strong>2️⃣ Ready for Favorites Pull, Ranking &amp; Cleanup (<code>500 ➜ 550 ➜ 600 ➜ 650</code>)</strong></span>
+                    <span class="badge badge-xs badge-purple font-mono" id="mode-b-500-badge">0 batches</span>
+                  </div>
+                  <div class="planner-table-wrap">
+                    <table class="cleanup-table planner-compact-table">
+                      <thead>
+                        <tr>
+                          <th>Batch</th>
+                          <th>Status</th>
+                          <th style="text-align: right;">Assets</th>
+                          <th style="text-align: right;">Favorites</th>
+                          <th>Pipeline Path</th>
+                          <th style="text-align: right;">Queue Action</th>
+                        </tr>
+                      </thead>
+                      <tbody id="mode-b-500-tbody">
+                        <tr><td colspan="6" class="text-center text-muted">Loading 500 batches...</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Step 3: Next Unprocessed Batches Ready for Ingest & Upload (000 -> 100 -> 200 -> 210 -> 399) -->
+                <div class="planner-subblock">
+                  <div class="planner-subblock-header">
+                    <span><strong>3️⃣ Next Unprocessed Batches for Ingest &amp; Google Upload (<code>000 ➜ 100 ➜ 200 ➜ 210 ➜ 399</code>)</strong></span>
+                    <span class="badge badge-xs badge-outline font-mono" id="mode-b-000-badge">0 batches</span>
+                  </div>
+                  <div class="planner-table-wrap">
+                    <table class="cleanup-table planner-compact-table">
+                      <thead>
+                        <tr>
+                          <th>Batch</th>
+                          <th>Status</th>
+                          <th style="text-align: right;">Assets</th>
+                          <th>Pipeline Path</th>
+                          <th style="text-align: right;">Queue Action</th>
+                        </tr>
+                      </thead>
+                      <tbody id="mode-b-000-tbody">
+                        <tr><td colspan="5" class="text-center text-muted">Loading 000 batches...</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- SECTION [M]: Memory Feature & Publishing -->
+            <div class="card planner-mode-card" id="planner-mode-m-card">
+              <div class="card-header">
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                  <div class="action-icon icon-green" style="width: 36px; height: 36px; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; border-radius: 8px;">🌟</div>
+                  <div>
+                    <h3 style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                      [M] Memory Feature &amp; Publishing
+                      <span class="badge badge-xs badge-green font-mono" id="mode-m-threshold-pill">Threshold: Checking...</span>
+                      <span class="badge badge-xs badge-purple font-mono" id="mode-m-moments-pill">163 Moments</span>
+                    </h3>
+                    <p class="card-subtitle">
+                      Overview of next steps if <code>[M] Memory Feature &amp; Publishing</code> is selected — checks Curation Threshold, syncs <code>ToBeCurated</code>/<code>Curated</code>, &amp; ranks Top Publishing Candidates.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Primary Suggested Action Banner for Mode [M] -->
+              <div class="planner-next-action-banner banner-green" id="mode-m-primary-banner">
+                <div class="planner-banner-step-tag">NEXT STEPS IF [M] SELECTED</div>
+                <div class="planner-banner-main" id="mode-m-primary-headline">Evaluating curation threshold &amp; moment publishing readiness...</div>
+                <div class="planner-banner-sub" id="mode-m-primary-detail">—</div>
+              </div>
+
+              <!-- Moment Lifecycle Stage Strip -->
+              <div class="planner-stage-strip" id="mode-m-stage-strip">
+                <div class="planner-stage-chip">
+                  <span class="stage-code text-amber">Sync [1]</span>
+                  <span class="stage-name">Needs ToBeCurated</span>
+                  <strong class="font-mono text-amber" id="mode-m-cnt-sync">—</strong>
+                </div>
+                <span class="stage-arrow">➜</span>
+                <div class="planner-stage-chip">
+                  <span class="stage-code text-blue">M400</span>
+                  <span class="stage-name">Curated (Unpublished)</span>
+                  <strong class="font-mono text-blue" id="mode-m-cnt-m400">—</strong>
+                </div>
+                <span class="stage-arrow">➜</span>
+                <div class="planner-stage-chip">
+                  <span class="stage-code text-purple">M450</span>
+                  <span class="stage-name">Partially Published</span>
+                  <strong class="font-mono text-purple" id="mode-m-cnt-m450">—</strong>
+                </div>
+                <span class="stage-arrow">➜</span>
+                <div class="planner-stage-chip">
+                  <span class="stage-code text-green">M500</span>
+                  <span class="stage-name">Fully Published</span>
+                  <strong class="font-mono text-green" id="mode-m-cnt-m500">—</strong>
+                </div>
+              </div>
+
+              <!-- Step-by-Step Breakdown for Mode [M] -->
+              <div class="planner-steps-body">
+                <!-- Step 1: Curation Threshold & Moments Needing ToBeCurated Sync -->
+                <div class="planner-subblock">
+                  <div class="planner-subblock-header">
+                    <span><strong>1️⃣ Curation Threshold &amp; Moments Requiring <code>ToBeCurated</code> Update (Option <code>[1]</code>)</strong></span>
+                    <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_create_moments')" title="Run Option [1]: Sync proposed assets to ToBeCurated in Apple Photos">
+                      ▶ Run [1] Sync ToBeCurated
+                    </button>
+                  </div>
+                  <div id="mode-m-sync-box" class="planner-sync-box">
+                    Checking moments requiring curation sync...
+                  </div>
+                </div>
+
+                <!-- Step 2: Top 12 Actionable Publishing Recommendations -->
+                <div class="planner-subblock">
+                  <div class="planner-subblock-header">
+                    <span><strong>2️⃣ Top Actionable Publishing Recommendations (Ready for Shutterfly / YouTube)</strong></span>
+                    <span class="badge badge-xs badge-green font-mono" id="mode-m-rec-badge">0 actionable</span>
+                  </div>
+                  <div class="planner-table-wrap">
+                    <table class="cleanup-table planner-compact-table">
+                      <thead>
+                        <tr>
+                          <th>Moment Name</th>
+                          <th style="text-align: right;">Avg Score</th>
+                          <th style="text-align: right;">Curated</th>
+                          <th style="text-align: right;">Pub.</th>
+                          <th>Recommended Next Action</th>
+                          <th>Top Proposed Assets</th>
+                        </tr>
+                      </thead>
+                      <tbody id="mode-m-recs-tbody">
+                        <tr><td colspan="6" class="text-center text-muted">Loading publishing recommendations...</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Step 3: Disjoint Moments Needing Merge (<2 Assets) -->
+                <div class="planner-subblock">
+                  <div class="planner-subblock-header">
+                    <span><strong>3️⃣ Disjoint Moments Needing Consolidation (<code>&lt; 2</code> Qualified Assets)</strong></span>
+                    <span class="badge badge-xs badge-amber font-mono" id="mode-m-disjoint-badge">0 disjoint</span>
+                  </div>
+                  <div class="planner-table-wrap">
+                    <table class="cleanup-table planner-compact-table">
+                      <thead>
+                        <tr>
+                          <th>Disjoint Moment</th>
+                          <th style="text-align: right;">Score</th>
+                          <th style="text-align: right;">Files</th>
+                          <th>Suggested Chronological Merge Target</th>
+                        </tr>
+                      </thead>
+                      <tbody id="mode-m-disjoint-tbody">
+                        <tr><td colspan="4" class="text-center text-muted">Loading disjoint moment suggestions...</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Media Cleanup & Device Reclaim (Mode [C] UI Organizer) -->
+          <div class="card mb-4" id="media-cleanup-card">
+            <div class="card-header">
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div class="action-icon icon-amber" style="width: 36px; height: 36px; font-size: 1.15rem; display: flex; align-items: center; justify-content: center; border-radius: 8px;">🧹</div>
+                <div>
+                  <h3 style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                    Media Cleanup &amp; Storage Reclaim
+                    <span class="badge badge-sm badge-amber" id="cleanup-badge-reclaimable">Calculating...</span>
+                    <span class="badge badge-sm badge-purple" id="cleanup-badge-candidates">Calculating...</span>
+                    <span class="badge badge-sm badge-outline" id="cleanup-badge-devices">0 Devices</span>
+                  </h3>
+                  <p class="card-subtitle">
+                    4-Quartile Low-Quality Asset Organizer (Q1 &amp; Q2 bottom 50%). Interactive review to reclaim storage and mark candidate assets as Removed from source.
+                  </p>
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <span style="font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono);" id="cleanup-last-updated">—</span>
+                <button class="btn btn-xs btn-outline" id="btn-refresh-cleanup" title="Refresh Device Summary &amp; Reclaimable Stats">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                  Refresh
+                </button>
+                <button class="btn btn-xs btn-purple" onclick="window.triggerTask('media_pipeline_planner')" title="Launch CLI Planner in Live Console">
+                  ▶ Launch CLI (pipeline_planner.py)
+                </button>
+              </div>
+            </div>
+
+            <!-- Two-Pane Master Detail: Left = Devices by Owner, Right = Candidates Table -->
+            <div class="cleanup-split-container">
+              <!-- Left Pane: Devices Master List -->
+              <div class="cleanup-devices-pane">
+                <div class="cleanup-pane-header">
+                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.55rem;">
+                    <strong style="font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-secondary);" id="cleanup-pane-scope-title">
+                      📱 Active Devices by Owner
+                    </strong>
+                    <span class="badge badge-xs badge-outline font-mono" id="cleanup-device-count-pill">0 Devices</span>
+                  </div>
+
+                  <!-- Active vs. All Devices Filter Toggle -->
+                  <div class="cleanup-scope-toggle mb-2" id="cleanup-device-scope-toggle">
+                    <button class="cleanup-scope-btn active" data-device-scope="active" id="btn-scope-active">
+                      🟢 Active Devices <span class="scope-count font-mono" id="scope-count-active">2</span>
+                    </button>
+                    <button class="cleanup-scope-btn" data-device-scope="all" id="btn-scope-all">
+                      📚 All Devices <span class="scope-count font-mono" id="scope-count-all">116</span>
+                    </button>
+                  </div>
+
+                  <div class="cleanup-search-bar mb-2">
+                    <input type="text" class="form-control form-control-sm" id="cleanup-device-search" placeholder="Search devices or owners..." />
+                  </div>
+                  <div class="cleanup-owner-filter-chips" id="cleanup-owner-chips">
+                    <button class="cleanup-chip active" data-owner="all">All Owners</button>
+                  </div>
+                </div>
+
+                <div class="cleanup-devices-list" id="cleanup-devices-list">
+                  <div class="text-muted text-center" style="padding: 2.5rem 1rem; font-size: 0.85rem;">
+                    <div class="spinner-sm mb-2" style="margin: 0 auto;"></div>
+                    Analyzing device quartiles &amp; storage gains...
+                  </div>
+                </div>
+              </div>
+
+              <!-- Right Pane: Candidates Detail View -->
+              <div class="cleanup-candidates-pane">
+                <div class="cleanup-pane-header">
+                  <div class="cleanup-detail-header-row">
+                    <div>
+                      <h4 id="cleanup-detail-title" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem; flex-wrap: wrap;">
+                        <span id="cleanup-detail-device-name">Select a Device</span>
+                        <span class="badge badge-xs badge-purple" id="cleanup-detail-owner-badge" style="display:none;">Owner</span>
+                        <span class="badge badge-xs badge-green" id="cleanup-detail-active-badge" style="display:none;">🟢 Active Device</span>
+                      </h4>
+                      <p class="cleanup-detail-subtitle" id="cleanup-detail-subtitle">
+                        Click any camera model on the left to inspect its bottom 2 quartiles (Q1 &amp; Q2) ordered by size descending.
+                      </p>
+                    </div>
+                    <div class="cleanup-detail-kpis" id="cleanup-detail-kpis" style="display: none;">
+                      <span class="tp-kpi-pill">Reclaimable: <strong class="text-amber font-mono" id="cleanup-kpi-device-gb">0 GB</strong></span>
+                      <span class="tp-kpi-pill">Low-Quality: <strong class="text-purple font-mono" id="cleanup-kpi-device-count">0 files</strong></span>
+                      <span class="tp-kpi-pill">Score Ceiling: <strong class="text-blue font-mono" id="cleanup-kpi-device-max-score">0.0</strong></span>
+                    </div>
+                  </div>
+
+                  <!-- Candidate Filters & Bulk Action Toolbar -->
+                  <div class="cleanup-toolbar" id="cleanup-toolbar" style="display: none;">
+                    <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                      <div class="cleanup-filter-group">
+                        <span class="cleanup-filter-label">Quartile:</span>
+                        <button class="cleanup-filter-btn active" data-quartile="all">All (Q1+Q2)</button>
+                        <button class="cleanup-filter-btn" data-quartile="1">Q1 Only (Bottom 25%)</button>
+                        <button class="cleanup-filter-btn" data-quartile="2">Q2 Only (25%-50%)</button>
+                      </div>
+
+                      <div class="cleanup-filter-group">
+                        <span class="cleanup-filter-label">Type:</span>
+                        <button class="cleanup-type-btn active" data-type="all">All</button>
+                        <button class="cleanup-type-btn" data-type="video">🎥 Videos</button>
+                        <button class="cleanup-type-btn" data-type="photo">📷 Photos</button>
+                      </div>
+                    </div>
+
+                    <div class="cleanup-actions-group">
+                      <span class="cleanup-selection-summary font-mono" id="cleanup-selection-summary">0 selected (0 MB)</span>
+                      <button class="btn btn-xs btn-danger" id="btn-mark-selected-removed" disabled>
+                        🗑️ Mark Selected as Removed
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Candidates Table Container -->
+                <div class="cleanup-candidates-table-wrap" id="cleanup-table-wrap">
+                  <div class="text-muted text-center" id="cleanup-empty-placeholder" style="padding: 4.5rem 2rem; font-size: 0.9rem;">
+                    <div style="font-size: 2.2rem; margin-bottom: 0.5rem; opacity: 0.5;">👈</div>
+                    <strong>No Device Selected</strong>
+                    <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.25rem;">
+                      Choose an active device from the left panel to load its candidate files for cleanup.
+                    </p>
+                  </div>
+
+                  <table class="cleanup-table" id="cleanup-candidates-table" style="display: none;">
+                    <thead>
+                      <tr>
+                        <th style="width: 34px; text-align: center;">
+                          <input type="checkbox" id="cleanup-select-all-checkbox" title="Select / Deselect all in current view" />
+                        </th>
+                        <th style="width: 36px; text-align: center;">#</th>
+                        <th style="width: 78px;">Preview</th>
+                        <th>Filename &amp; Info</th>
+                        <th style="width: 155px;">Capture Timestamp</th>
+                        <th style="width: 88px; text-align: right;">Length</th>
+                        <th style="width: 92px; text-align: right;">Size</th>
+                        <th style="width: 86px; text-align: center;">Quartile</th>
+                        <th style="width: 72px; text-align: right;">Score</th>
+                        <th>Moment / Pub.</th>
+                        <th style="width: 132px; text-align: center;">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="cleanup-candidates-tbody">
+                      <!-- Rendered candidate rows -->
+                    </tbody>
+                  </table>
+                </div>
+
+                <!-- Pagination Footer -->
+                <div class="cleanup-pagination-bar" id="cleanup-pagination-bar" style="display: none;">
+                  <div class="cleanup-page-info font-mono" id="cleanup-pagination-info">
+                    Showing 0–0 of 0 candidates
+                  </div>
+                  <div class="cleanup-page-buttons">
+                    <button class="btn btn-xs btn-outline" id="btn-cleanup-prev-page" disabled>◀ Prev</button>
+                    <span class="font-mono" id="cleanup-page-number" style="font-size: 0.75rem; color: var(--text-secondary); padding: 0 0.5rem;">Page 1</span>
+                    <button class="btn btn-xs btn-outline" id="btn-cleanup-next-page" disabled>Next ▶</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Media Manager Scheduler & Executor Monitor -->
           <div class="card mb-4" id="media-scheduler-monitor-card">
             <div class="card-header">
@@ -1039,6 +1472,107 @@
           <div class="modal-footer">
             <button class="btn btn-outline btn-close-modal">Cancel</button>
             <button class="btn btn-primary" id="btn-confirm-triage">Start Triage Execution</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Media Cleanup Confirmation Modal -->
+      <div class="modal-backdrop" id="modal-cleanup-confirm">
+        <div class="modal-dialog">
+          <div class="modal-header">
+            <h3>Confirm Media Asset Removal</h3>
+            <button class="btn btn-xs btn-icon btn-close-modal" id="btn-close-cleanup-modal">✕</button>
+          </div>
+          <div class="modal-body">
+            <p style="margin-bottom: 0.75rem;">
+              Are you sure you want to mark these candidate assets as <strong class="text-amber">Removed from source</strong>?
+            </p>
+            <div class="cleanup-confirm-summary-box mb-3">
+              <div class="cleanup-confirm-stat">
+                <span class="stat-label">Device</span>
+                <strong id="cleanup-confirm-device-name">—</strong>
+              </div>
+              <div class="cleanup-confirm-stat">
+                <span class="stat-label">Selected Assets</span>
+                <strong class="text-purple font-mono" id="cleanup-confirm-count">0 files</strong>
+              </div>
+              <div class="cleanup-confirm-stat">
+                <span class="stat-label">Reclaimable Space</span>
+                <strong class="text-amber font-mono" id="cleanup-confirm-size">0.0 MB</strong>
+              </div>
+            </div>
+            <div style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted); font-weight: 600; margin-bottom: 0.35rem;">
+              Preview of Targeted Assets:
+            </div>
+            <div class="cleanup-confirm-files-preview font-mono" id="cleanup-confirm-files-preview">
+              <!-- Up to 5 filenames shown -->
+            </div>
+            <p class="text-muted" style="font-size: 0.78rem; margin-top: 0.85rem; line-height: 1.4;">
+              ℹ️ Assets will be updated with <code>removed_from_source = 1</code> in <code>media_organizer.db</code>. They will be excluded from future batch curation and cleanup scans.
+            </p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline btn-close-modal">Cancel</button>
+            <button class="btn btn-danger" id="btn-execute-cleanup-removal">
+              Confirm &amp; Mark Removed
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Media Cleanup Asset Preview Modal -->
+      <div class="modal-backdrop" id="modal-cleanup-preview">
+        <div class="modal-dialog modal-dialog-preview">
+          <div class="modal-header">
+            <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+              <h3 id="cleanup-preview-title" class="font-mono">IMG_0000.MOV</h3>
+              <span class="badge badge-xs badge-purple" id="cleanup-preview-type-badge">VIDEO</span>
+              <span class="badge badge-xs badge-amber font-mono" id="cleanup-preview-size-badge">0 MB</span>
+            </div>
+            <button class="btn btn-xs btn-icon btn-close-modal" id="btn-close-preview-modal">✕</button>
+          </div>
+          <div class="modal-body cleanup-preview-body">
+            <!-- Media Viewer Stage -->
+            <div class="cleanup-preview-stage" id="cleanup-preview-stage">
+              <!-- Populated dynamically with <video> or <img> -->
+            </div>
+
+            <!-- Device Identification Metadata Grid (to quickly locate on iPhone/Camera) -->
+            <div class="cleanup-preview-meta-grid">
+              <div class="cleanup-preview-meta-item">
+                <span class="meta-label">📅 Capture Date &amp; Time (On Device)</span>
+                <strong class="font-mono text-primary" id="cleanup-preview-timestamp">—</strong>
+              </div>
+              <div class="cleanup-preview-meta-item">
+                <span class="meta-label">⏱️ Video Length / Format</span>
+                <strong class="font-mono text-amber" id="cleanup-preview-duration">—</strong>
+              </div>
+              <div class="cleanup-preview-meta-item">
+                <span class="meta-label">📐 Resolution &amp; FPS</span>
+                <strong class="font-mono" id="cleanup-preview-resolution">—</strong>
+              </div>
+              <div class="cleanup-preview-meta-item">
+                <span class="meta-label">📱 Device &amp; Owner</span>
+                <strong id="cleanup-preview-device">—</strong>
+              </div>
+              <div class="cleanup-preview-meta-item">
+                <span class="meta-label">📊 Quartile &amp; AI Score</span>
+                <strong class="font-mono" id="cleanup-preview-score">—</strong>
+              </div>
+              <div class="cleanup-preview-meta-item">
+                <span class="meta-label">🌟 Assigned Moment</span>
+                <strong class="font-mono" id="cleanup-preview-moment">—</strong>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer" style="justify-content: space-between;">
+            <span class="font-mono text-muted" style="font-size: 0.72rem;" id="cleanup-preview-uuid">UUID: —</span>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <button class="btn btn-outline btn-close-modal">Close</button>
+              <button class="btn btn-danger" id="btn-preview-mark-removed">
+                🗑️ Mark Asset as Removed
+              </button>
+            </div>
           </div>
         </div>
       </div>
