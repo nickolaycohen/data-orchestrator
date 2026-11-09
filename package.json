@@ -8,11 +8,13 @@
     "dev": "concurrently -k -n \"API,WEB\" -c \"cyan,magenta\" \"npm run dev:api\" \"npm run dev:web\"",
     "dev:api": ".venv/bin/python3 -m uvicorn backend.main:app --port 8008 --reload",
     "dev:web": "vite --port 5173",
-    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
+    "typescript": "^7.0.2",
     "vite": "^6.2.0"
   }
 }
