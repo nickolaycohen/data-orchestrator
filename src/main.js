@@ -2272,6 +2272,7 @@ function stopMergeLogPolling() {
 
 let cleanupDevicesData = null;
 let selectedCleanupDevice = null;
+let activeFamilyScope = 'family'; // 'family' (default) | 'all'
 let activeDeviceScope = 'active'; // 'active' (default) | 'all'
 let activeOwnerFilter = 'all';
 let activeQuartileFilter = 'all';
@@ -2332,15 +2333,48 @@ function formatCaptureTimestampParts(tsStr) {
   };
 }
 
+function syncSelectedDeviceToScope() {
+  const visibleDevices = getDevicesInActiveScope();
+  const stillVisible = selectedCleanupDevice && visibleDevices.some(
+    d => d.camera_model === selectedCleanupDevice.camera_model && d.owner === selectedCleanupDevice.owner
+  );
+  if (!stillVisible && visibleDevices.length > 0) {
+    let topDev = visibleDevices[0];
+    visibleDevices.forEach(d => {
+      if ((d.low_gb || 0) > (topDev.low_gb || 0)) topDev = d;
+    });
+    selectCleanupDevice(topDev);
+  }
+}
+
 function setupMediaCleanup() {
-  // 0. Active vs. All Devices Scope Toggle
-  document.querySelectorAll('.cleanup-scope-btn').forEach(btn => {
+  // 0a. Family vs. All Owners Scope Toggle
+  document.querySelectorAll('#cleanup-family-scope-toggle .cleanup-scope-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const nextFamilyScope = btn.dataset.familyScope || 'family';
+      if (activeFamilyScope === nextFamilyScope) return;
+      activeFamilyScope = nextFamilyScope;
+
+      document.querySelectorAll('#cleanup-family-scope-toggle .cleanup-scope-btn').forEach(b => {
+        b.classList.toggle('active', (b.dataset.familyScope || 'family') === activeFamilyScope);
+      });
+
+      activeOwnerFilter = 'all';
+      updateCleanupScopeSummaryBadges();
+      renderCleanupOwnerChips();
+      renderCleanupDevicesList();
+      syncSelectedDeviceToScope();
+    });
+  });
+
+  // 0b. Active vs. All Devices Scope Toggle
+  document.querySelectorAll('#cleanup-device-scope-toggle .cleanup-scope-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const nextScope = btn.dataset.deviceScope || 'active';
       if (activeDeviceScope === nextScope) return;
       activeDeviceScope = nextScope;
 
-      document.querySelectorAll('.cleanup-scope-btn').forEach(b => {
+      document.querySelectorAll('#cleanup-device-scope-toggle .cleanup-scope-btn').forEach(b => {
         b.classList.toggle('active', (b.dataset.deviceScope || 'active') === activeDeviceScope);
       });
 
@@ -2348,19 +2382,7 @@ function setupMediaCleanup() {
       updateCleanupScopeSummaryBadges();
       renderCleanupOwnerChips();
       renderCleanupDevicesList();
-
-      // Ensure a valid device in the current scope is selected
-      const visibleDevices = getDevicesInActiveScope();
-      const stillVisible = selectedCleanupDevice && visibleDevices.some(
-        d => d.camera_model === selectedCleanupDevice.camera_model && d.owner === selectedCleanupDevice.owner
-      );
-      if (!stillVisible && visibleDevices.length > 0) {
-        let topDev = visibleDevices[0];
-        visibleDevices.forEach(d => {
-          if ((d.low_gb || 0) > (topDev.low_gb || 0)) topDev = d;
-        });
-        selectCleanupDevice(topDev);
-      }
+      syncSelectedDeviceToScope();
     });
   });
 
@@ -2461,12 +2483,18 @@ function setupMediaCleanup() {
   });
 }
 
+function isDeviceMatchingFilters(d, familyScope = activeFamilyScope, deviceScope = activeDeviceScope) {
+  if (familyScope === 'family' && !d.is_family) return false;
+  if (deviceScope === 'active' && !d.is_active) return false;
+  return true;
+}
+
 function getDevicesInActiveScope() {
   if (!cleanupDevicesData || !cleanupDevicesData.owners) return [];
   const list = [];
   cleanupDevicesData.owners.forEach(o => {
     (o.devices || []).forEach(d => {
-      if (activeDeviceScope === 'active' && !d.is_active) return;
+      if (!isDeviceMatchingFilters(d)) return;
       list.push(d);
     });
   });
@@ -2475,37 +2503,66 @@ function getDevicesInActiveScope() {
 
 function updateCleanupScopeSummaryBadges() {
   if (!cleanupDevicesData) return;
-  const summary = cleanupDevicesData.summary || {};
+  const owners = cleanupDevicesData.owners || [];
 
   const reclaimableBadge = document.getElementById('cleanup-badge-reclaimable');
   const candidatesBadge = document.getElementById('cleanup-badge-candidates');
   const devicesBadge = document.getElementById('cleanup-badge-devices');
   const paneTitle = document.getElementById('cleanup-pane-scope-title');
   const countPill = document.getElementById('cleanup-device-count-pill');
+
+  const scopeCountFamily = document.getElementById('scope-count-family');
+  const scopeCountOwnersAll = document.getElementById('scope-count-owners-all');
   const scopeCountActive = document.getElementById('scope-count-active');
   const scopeCountAll = document.getElementById('scope-count-all');
 
-  if (scopeCountActive) scopeCountActive.textContent = summary.active_devices ?? 0;
-  if (scopeCountAll) scopeCountAll.textContent = summary.total_devices ?? 0;
+  // Compute dynamic counts for the toggle pills and current active combination
+  let familyMatchingDeviceScopeCount = 0;
+  let allOwnersMatchingDeviceScopeCount = 0;
+  let activeMatchingFamilyScopeCount = 0;
+  let allDevicesMatchingFamilyScopeCount = 0;
 
-  if (activeDeviceScope === 'active') {
-    const actGb = summary.active_low_gb ?? 0;
-    const actCnt = summary.active_low_count ?? 0;
-    const actDev = summary.active_devices ?? 0;
-    if (reclaimableBadge) reclaimableBadge.textContent = `${actGb} GB Reclaimable (Active)`;
-    if (candidatesBadge) candidatesBadge.textContent = `${actCnt.toLocaleString()} Active Low-Quality Files`;
-    if (devicesBadge) devicesBadge.textContent = `${actDev} Active Devices`;
-    if (paneTitle) paneTitle.textContent = '🟢 Active Devices by Owner';
-    if (countPill) countPill.textContent = `${actDev} Active`;
-  } else {
-    const allGb = summary.grand_low_gb ?? 0;
-    const allCnt = summary.grand_low_count ?? 0;
-    const allDev = summary.total_devices ?? 0;
-    if (reclaimableBadge) reclaimableBadge.textContent = `${allGb} GB Reclaimable (All)`;
-    if (candidatesBadge) candidatesBadge.textContent = `${allCnt.toLocaleString()} Low-Quality Files`;
-    if (devicesBadge) devicesBadge.textContent = `${allDev} Total Devices`;
-    if (paneTitle) paneTitle.textContent = '📚 All Devices by Owner';
-    if (countPill) countPill.textContent = `${allDev} Devices`;
+  let currentLowGb = 0;
+  let currentLowCount = 0;
+  let currentDeviceCount = 0;
+
+  owners.forEach(o => {
+    (o.devices || []).forEach(d => {
+      if (isDeviceMatchingFilters(d, 'family', activeDeviceScope)) familyMatchingDeviceScopeCount++;
+      if (isDeviceMatchingFilters(d, 'all', activeDeviceScope)) allOwnersMatchingDeviceScopeCount++;
+      if (isDeviceMatchingFilters(d, activeFamilyScope, 'active')) activeMatchingFamilyScopeCount++;
+      if (isDeviceMatchingFilters(d, activeFamilyScope, 'all')) allDevicesMatchingFamilyScopeCount++;
+
+      if (isDeviceMatchingFilters(d, activeFamilyScope, activeDeviceScope)) {
+        currentDeviceCount++;
+        currentLowGb += (d.low_gb || 0);
+        currentLowCount += (d.low_count || 0);
+      }
+    });
+  });
+
+  if (scopeCountFamily) scopeCountFamily.textContent = familyMatchingDeviceScopeCount;
+  if (scopeCountOwnersAll) scopeCountOwnersAll.textContent = allOwnersMatchingDeviceScopeCount;
+  if (scopeCountActive) scopeCountActive.textContent = activeMatchingFamilyScopeCount;
+  if (scopeCountAll) scopeCountAll.textContent = allDevicesMatchingFamilyScopeCount;
+
+  const scopeLabelParts = [];
+  if (activeFamilyScope === 'family') scopeLabelParts.push('Family');
+  if (activeDeviceScope === 'active') scopeLabelParts.push('Active');
+  const scopeSuffix = scopeLabelParts.length ? ` (${scopeLabelParts.join(' · ')})` : ' (All)';
+
+  if (reclaimableBadge) reclaimableBadge.textContent = `${currentLowGb.toFixed(1)} GB Reclaimable${scopeSuffix}`;
+  if (candidatesBadge) candidatesBadge.textContent = `${currentLowCount.toLocaleString()} Low-Quality Files`;
+  if (devicesBadge) devicesBadge.textContent = `${currentDeviceCount} ${activeDeviceScope === 'active' ? 'Active ' : ''}Devices`;
+
+  if (paneTitle) {
+    const icon = activeDeviceScope === 'active' ? '🟢' : '📚';
+    const devWord = activeDeviceScope === 'active' ? 'Active Devices' : 'All Devices';
+    const famWord = activeFamilyScope === 'family' ? 'Family' : 'All Owners';
+    paneTitle.textContent = `${icon} ${devWord} · ${famWord}`;
+  }
+  if (countPill) {
+    countPill.textContent = `${currentDeviceCount} ${activeDeviceScope === 'active' ? 'Active' : 'Devices'}`;
   }
 }
 
@@ -2542,7 +2599,7 @@ async function fetchCleanupDevices(forceRefresh = false) {
     // If there are no active devices in DB, fallback to 'all'
     if (activeDeviceScope === 'active' && (summary.active_devices || 0) === 0) {
       activeDeviceScope = 'all';
-      document.querySelectorAll('.cleanup-scope-btn').forEach(b => {
+      document.querySelectorAll('#cleanup-device-scope-toggle .cleanup-scope-btn').forEach(b => {
         b.classList.toggle('active', (b.dataset.deviceScope || 'active') === activeDeviceScope);
       });
     }
@@ -2598,19 +2655,17 @@ function renderCleanupOwnerChips() {
   const container = document.getElementById('cleanup-owner-chips');
   if (!container || !cleanupDevicesData) return;
 
-  const summary = cleanupDevicesData.summary || {};
-  const totalScopedDev = activeDeviceScope === 'active'
-    ? (summary.active_devices || 0)
-    : (summary.total_devices || 0);
+  const scopedAllDevs = getDevicesInActiveScope();
+  const allChipLabel = activeFamilyScope === 'family' ? 'All Family' : 'All Owners';
 
   let html = `
     <button class="cleanup-chip ${activeOwnerFilter === 'all' ? 'active' : ''}" data-owner="all">
-      All Owners (${totalScopedDev})
+      ${allChipLabel} (${scopedAllDevs.length})
     </button>
   `;
 
   (cleanupDevicesData.owners || []).forEach(o => {
-    const scopedDevs = (o.devices || []).filter(d => activeDeviceScope === 'all' || d.is_active);
+    const scopedDevs = (o.devices || []).filter(d => isDeviceMatchingFilters(d));
     if (!scopedDevs.length) return;
     const isAct = activeOwnerFilter === o.owner_name;
     html += `
@@ -2648,7 +2703,7 @@ function renderCleanupDevicesList() {
   let totalVisibleDevices = 0;
 
   filteredOwners.forEach(o => {
-    let devices = (o.devices || []).filter(d => activeDeviceScope === 'all' || d.is_active);
+    let devices = (o.devices || []).filter(d => isDeviceMatchingFilters(d));
     if (searchTerm) {
       devices = devices.filter(d => 
         d.camera_model.toLowerCase().includes(searchTerm) || 
@@ -2660,12 +2715,13 @@ function renderCleanupDevicesList() {
     totalVisibleDevices += devices.length;
 
     const ownerReclaimGb = devices.reduce((acc, d) => acc + (d.low_gb || 0), 0);
+    const ownerIcon = o.is_family ? '👨‍👩‍👧‍👦' : '👤';
 
     html += `
       <div class="cleanup-owner-group">
         <div class="cleanup-owner-header">
           <span class="cleanup-owner-name">
-            <span>👤</span> ${escapeHtml(o.owner_name)}
+            <span>${ownerIcon}</span> ${escapeHtml(o.owner_name)}
           </span>
           <span class="badge badge-xs badge-amber font-mono">${ownerReclaimGb.toFixed(2)} GB reclaimable</span>
         </div>
@@ -3086,8 +3142,11 @@ function openCleanupPreviewModal(assetId) {
       ? `${c.width} × ${c.height} px${c.fps > 0 ? ` @ ${c.fps} fps` : ''}`
       : '—';
   }
-  if (devEl) devEl.textContent = `${c.camera_model} (${c.primary_owner})`;
-  if (scoreEl) scoreEl.textContent = `Q${c.score_quartile} · Score ${(c.score_normalized || 0).toFixed(4)}`;
+  if (devEl) devEl.textContent = `${c.camera_model || 'Unknown Device'} (${c.primary_owner || 'Unassigned'})`;
+  if (scoreEl) {
+    const qPrefix = typeof c.score_quartile === 'number' ? `Q${c.score_quartile}` : (c.score_quartile || 'High Rank');
+    scoreEl.textContent = `${qPrefix} · Score ${(c.score_normalized || 0).toFixed(4)}`;
+  }
   if (momEl) momEl.textContent = c.assigned_moment || '—';
   if (uuidEl) uuidEl.textContent = `Asset UUID: ${c.asset_id}`;
 
@@ -3241,6 +3300,10 @@ async function executeCleanupRemoval() {
 
 let plannerOverviewData = null;
 let isFetchingPlannerOverview = false;
+let unassignedSortMode = 'size'; // 'size' | 'score' | 'date'
+let unassignedSearchQuery = '';
+let expandedUnassignedFolders = new Set();
+let hasInitializedUnassignedExpansion = false;
 
 function setupPlannerOverview() {
   // Mode view tabs (All | [B] | [M] | [C])
@@ -3288,6 +3351,43 @@ function setupPlannerOverview() {
       }
     });
   });
+
+  // Unassigned High-Rank Assets cluster sort buttons
+  document.querySelectorAll('.unassigned-sort-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.unassigned-sort-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      unassignedSortMode = btn.dataset.unassignedSort || 'size';
+      renderUnassignedClustersList();
+    });
+  });
+
+  // Unassigned cluster search input
+  const unassignedSearchInput = document.getElementById('mode-m-unassigned-search');
+  if (unassignedSearchInput) {
+    unassignedSearchInput.addEventListener('input', (e) => {
+      unassignedSearchQuery = (e.target.value || '').trim().toLowerCase();
+      renderUnassignedClustersList();
+    });
+  }
+
+  // Expand / Collapse all unassigned clusters
+  const btnToggleAllClusters = document.getElementById('btn-toggle-all-unassigned-clusters');
+  if (btnToggleAllClusters) {
+    btnToggleAllClusters.addEventListener('click', () => {
+      const clusters = plannerOverviewData?.mode_m?.unassigned_clusters || [];
+      if (!clusters.length) return;
+      const allExpanded = clusters.every(c => expandedUnassignedFolders.has(c.folder));
+      if (allExpanded) {
+        expandedUnassignedFolders.clear();
+        btnToggleAllClusters.textContent = '⊞ Expand All';
+      } else {
+        clusters.forEach(c => expandedUnassignedFolders.add(c.folder));
+        btnToggleAllClusters.textContent = '⊟ Collapse All';
+      }
+      renderUnassignedClustersList();
+    });
+  }
 
   document.getElementById('btn-refresh-planner-overview')?.addEventListener('click', () => {
     fetchPlannerOverview();
@@ -3551,6 +3651,54 @@ function renderModeMOverview(modeM) {
     syncBox.innerHTML = thText + syncMomentsHtml;
   }
 
+  // Step 1b: Unassigned High-Rank Assets Above Threshold Clusters
+  const unassignedClusters = modeM.unassigned_clusters || [];
+  const totalUnassignedAssets = modeM.unassigned_total_assets || 0;
+  const totalUnassignedClusters = modeM.unassigned_total_clusters || unassignedClusters.length;
+
+  const unassignedSummaryBadge = document.getElementById('mode-m-unassigned-summary-badge');
+  const unassignedSection = document.getElementById('mode-m-unassigned-section');
+  const unassignedTitleEl = document.getElementById('mode-m-unassigned-title');
+
+  // Register all unassigned assets into candidateAssetMeta so full preview modal works
+  unassignedClusters.forEach(cluster => {
+    (cluster.assets || []).forEach(a => {
+      if (a.asset_id) {
+        candidateAssetMeta.set(a.asset_id, {
+          ...a,
+          bytes: a.file_size_bytes || 0,
+          filename: a.original_filename,
+          score_quartile: `Top (>${(th.historical_min || 0.5315).toFixed(4)})`,
+          assigned_moment: `Proposed: ${cluster.folder} [${cluster.group_type}]`
+        });
+      }
+    });
+  });
+
+  if (unassignedClusters.length > 0) {
+    if (unassignedSummaryBadge) {
+      unassignedSummaryBadge.style.display = 'inline-flex';
+      unassignedSummaryBadge.textContent = `${totalUnassignedAssets} unassigned · ${totalUnassignedClusters} folders`;
+    }
+    if (unassignedSection) {
+      unassignedSection.style.display = 'block';
+    }
+    if (unassignedTitleEl) {
+      unassignedTitleEl.textContent = `⚠️ Unassigned High-Rank Assets Above Threshold > ${(th.historical_min || 0.5315).toFixed(4)} (${totalUnassignedAssets} Asset(s) Grouped into ${totalUnassignedClusters} Proposed Moment Folder(s))`;
+    }
+
+    // Default expand top 3 largest clusters on initial load
+    if (!hasInitializedUnassignedExpansion) {
+      hasInitializedUnassignedExpansion = true;
+      unassignedClusters.slice(0, 3).forEach(c => expandedUnassignedFolders.add(c.folder));
+    }
+
+    renderUnassignedClustersList();
+  } else {
+    if (unassignedSummaryBadge) unassignedSummaryBadge.style.display = 'none';
+    if (unassignedSection) unassignedSection.style.display = 'none';
+  }
+
   // Step 2: Top Actionable Recommendations Table
   const recBadge = document.getElementById('mode-m-rec-badge');
   const recTbody = document.getElementById('mode-m-recs-tbody');
@@ -3600,6 +3748,210 @@ function renderModeMOverview(modeM) {
       `).join('');
     }
   }
+}
+
+function renderUnassignedClustersList() {
+  const listEl = document.getElementById('mode-m-unassigned-list');
+  if (!listEl) return;
+
+  const rawClusters = plannerOverviewData?.mode_m?.unassigned_clusters || [];
+  if (!rawClusters.length) {
+    listEl.innerHTML = '<div class="text-center text-muted" style="padding: 1rem;">No unassigned high-rank asset clusters found.</div>';
+    return;
+  }
+
+  // Filter by search query if active
+  let filtered = rawClusters;
+  if (unassignedSearchQuery) {
+    filtered = rawClusters.filter(c => {
+      if ((c.folder || '').toLowerCase().includes(unassignedSearchQuery)) return true;
+      if ((c.group_type || '').toLowerCase().includes(unassignedSearchQuery)) return true;
+      if ((c.months || '').toLowerCase().includes(unassignedSearchQuery)) return true;
+      return (c.assets || []).some(a =>
+        (a.original_filename || '').toLowerCase().includes(unassignedSearchQuery) ||
+        (a.notes || '').toLowerCase().includes(unassignedSearchQuery) ||
+        (a.camera_model || '').toLowerCase().includes(unassignedSearchQuery)
+      );
+    });
+  }
+
+  // Sort according to unassignedSortMode
+  const sorted = [...filtered].sort((a, b) => {
+    const cntA = (a.assets || []).length || a.asset_count || 0;
+    const cntB = (b.assets || []).length || b.asset_count || 0;
+    if (unassignedSortMode === 'size') {
+      if (cntB !== cntA) return cntB - cntA;
+      if (b.max_score !== a.max_score) return b.max_score - a.max_score;
+      return (a.folder || '').localeCompare(b.folder || '');
+    } else if (unassignedSortMode === 'score') {
+      if (b.max_score !== a.max_score) return b.max_score - a.max_score;
+      if (cntB !== cntA) return cntB - cntA;
+      return (a.folder || '').localeCompare(b.folder || '');
+    } else {
+      // 'date' chronological
+      return (a.folder || '').localeCompare(b.folder || '');
+    }
+  });
+
+  if (!sorted.length) {
+    listEl.innerHTML = `<div class="text-center text-muted" style="padding: 1rem;">No clusters match "${escapeHtml(unassignedSearchQuery)}".</div>`;
+    return;
+  }
+
+  listEl.innerHTML = sorted.map((cluster, idx) => {
+    const assets = cluster.assets || [];
+    const count = assets.length || cluster.asset_count || 0;
+    const isExpanded = expandedUnassignedFolders.has(cluster.folder);
+
+    let typeBadgeClass = 'badge-amber';
+    if ((cluster.group_type || '').includes('Proposed New')) {
+      typeBadgeClass = 'badge-purple';
+    } else if ((cluster.group_type || '').includes('Existing')) {
+      typeBadgeClass = 'badge-green';
+    }
+
+    const sizeBadgeClass = count >= 10 ? 'badge-purple' : (count >= 3 ? 'badge-amber' : 'badge-outline');
+
+    // Mini thumbnail strip in cluster header (up to 5 thumbnails)
+    const previewAssets = assets.filter(a => a.asset_id).slice(0, 5);
+    const extraCount = Math.max(0, assets.length - previewAssets.length);
+    const thumbStripHtml = previewAssets.map(a => {
+      const thumbUrl = `/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}`;
+      const isVideo = a.media_type === 'video';
+      return `
+        <div class="unassigned-mini-thumb" data-preview-asset-id="${escapeHtml(a.asset_id)}" title="${escapeHtml(a.original_filename)} · Score ${a.score_normalized.toFixed(4)} · ${escapeHtml(a.capture_timestamp)} (Click to preview)">
+          <img src="${thumbUrl}" loading="lazy" alt="${escapeHtml(a.original_filename)}" onerror="this.style.display='none'" />
+          ${isVideo ? '<span class="mini-play-dot">▶</span>' : ''}
+        </div>
+      `;
+    }).join('') + (extraCount > 0 ? `<span class="unassigned-more-thumbs">+${extraCount}</span>` : '');
+
+    // Expanded asset rows
+    const rowsHtml = assets.map((a, aIdx) => {
+      const hasUuid = Boolean(a.asset_id);
+      const isVideo = a.media_type === 'video';
+      const ext = (a.original_filename.split('.').pop() || '').toUpperCase();
+      const thumbUrl = hasUuid ? `/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}` : '';
+      const durStr = isVideo && a.duration_sec > 0 ? formatDuration(a.duration_sec) : '';
+      const sizeStr = a.file_size_mb > 0
+        ? (a.file_size_mb >= 1024 ? `${(a.file_size_mb / 1024).toFixed(2)} GB` : `${a.file_size_mb.toFixed(1)} MB`)
+        : '—';
+      const resStr = (a.width && a.height) ? `${a.width}×${a.height}` : '';
+      const devStr = a.camera_model ? `${a.camera_model}${a.primary_owner && a.primary_owner !== 'Unassigned' ? ' · ' + a.primary_owner : ''}` : '';
+
+      const thumbCell = hasUuid ? `
+        <div class="cleanup-thumb-wrap" data-preview-asset-id="${escapeHtml(a.asset_id)}" title="Click to preview ${escapeHtml(a.original_filename)}" style="width: 52px; height: 38px;">
+          <img class="cleanup-thumb-img" src="${thumbUrl}" loading="lazy" alt="${escapeHtml(a.original_filename)}" onerror="this.style.display='none';" />
+          <span class="cleanup-thumb-badge">${escapeHtml(ext.slice(0, 4))}</span>
+          ${isVideo ? '<span class="cleanup-thumb-play">▶</span>' : ''}
+        </div>
+      ` : `<span class="badge badge-xs badge-outline font-mono">${escapeHtml(ext)}</span>`;
+
+      const notesHtml = a.notes
+        ? `<span class="text-amber" style="font-size: 0.68rem;">⟵ ${escapeHtml(a.notes)}</span>`
+        : `<span class="text-muted" style="font-size: 0.68rem;">—</span>`;
+
+      const actionBtn = hasUuid
+        ? `<button class="btn btn-xs btn-outline btn-cleanup-preview" data-asset-id="${escapeHtml(a.asset_id)}" title="Preview full asset">👁️ Preview</button>`
+        : `<span class="text-muted">—</span>`;
+
+      return `
+        <tr>
+          <td class="text-muted font-mono" style="width: 28px;">${aIdx + 1}</td>
+          <td style="width: 56px;">${thumbCell}</td>
+          <td>
+            <div class="font-mono" style="font-weight: 600; color: var(--text-primary); font-size: 0.75rem;">${escapeHtml(a.original_filename)}</div>
+            <div class="font-mono text-muted" style="font-size: 0.65rem;">
+              ${escapeHtml([resStr, devStr].filter(Boolean).join(' · ') || a.month)}
+            </div>
+          </td>
+          <td style="text-align: right;" class="font-mono text-amber"><strong>${a.score_normalized.toFixed(4)}</strong></td>
+          <td class="font-mono" style="font-size: 0.71rem; white-space: nowrap;">${escapeHtml(a.capture_timestamp)}</td>
+          <td class="font-mono" style="font-size: 0.7rem; white-space: nowrap;">
+            ${isVideo ? `<span class="text-purple">🎥 ${escapeHtml(durStr || ext)}</span>` : `<span class="text-secondary">📷 ${escapeHtml(ext)}</span>`}
+            <span class="text-muted"> · ${escapeHtml(sizeStr)}</span>
+          </td>
+          <td>${notesHtml}</td>
+          <td style="text-align: right;">${actionBtn}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <div class="unassigned-cluster-card ${isExpanded ? 'expanded' : ''}" data-cluster-folder="${escapeHtml(cluster.folder)}">
+        <div class="unassigned-cluster-header" data-toggle-cluster="${escapeHtml(cluster.folder)}">
+          <div class="unassigned-cluster-left">
+            <span class="unassigned-cluster-chevron">▶</span>
+            <span class="unassigned-cluster-rank font-mono">#${idx + 1}</span>
+            <div class="unassigned-cluster-info">
+              <div class="unassigned-cluster-title-row">
+                <span class="unassigned-cluster-folder">📁 ${escapeHtml(cluster.folder)}</span>
+                <span class="badge badge-xs ${sizeBadgeClass} font-mono">${count} asset${count === 1 ? '' : 's'}</span>
+                <span class="badge badge-xs ${typeBadgeClass}" style="font-size: 0.64rem;">${escapeHtml(cluster.group_type)}</span>
+              </div>
+              <div class="unassigned-cluster-meta-row font-mono">
+                <span>Score: <strong class="text-amber">${escapeHtml(cluster.score_span)}</strong></span>
+                <span>•</span>
+                <span>Month(s): <strong>${escapeHtml(cluster.months)}</strong></span>
+                <span>•</span>
+                <span>Log #[${cluster.orig_rank}]</span>
+              </div>
+            </div>
+          </div>
+          <div class="unassigned-cluster-right">
+            <div class="unassigned-thumb-strip">
+              ${thumbStripHtml}
+            </div>
+          </div>
+        </div>
+        <div class="unassigned-cluster-body">
+          <table class="cleanup-table planner-compact-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Preview</th>
+                <th>Filename &amp; Device</th>
+                <th style="text-align: right;">Score</th>
+                <th>Captured Timestamp</th>
+                <th>Type / Length</th>
+                <th>Proximity / Notes</th>
+                <th style="text-align: right;">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Attach accordion toggle listeners
+  listEl.querySelectorAll('[data-toggle-cluster]').forEach(headerEl => {
+    headerEl.addEventListener('click', (e) => {
+      // Don't toggle accordion if user clicked a mini-thumbnail inside the header
+      if (e.target.closest('[data-preview-asset-id]')) return;
+      const folder = headerEl.dataset.toggleCluster;
+      if (!folder) return;
+      if (expandedUnassignedFolders.has(folder)) {
+        expandedUnassignedFolders.delete(folder);
+      } else {
+        expandedUnassignedFolders.add(folder);
+      }
+      const card = headerEl.closest('.unassigned-cluster-card');
+      card?.classList.toggle('expanded', expandedUnassignedFolders.has(folder));
+    });
+  });
+
+  // Attach preview modal listeners to mini-thumbnails, row thumbnails, and preview buttons
+  listEl.querySelectorAll('[data-preview-asset-id], .btn-cleanup-preview').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const aid = el.dataset.previewAssetId || el.dataset.assetId;
+      if (aid) openCleanupPreviewModal(aid);
+    });
+  });
 }
 
 window.runPlannerBatchAction = async function(month, action) {

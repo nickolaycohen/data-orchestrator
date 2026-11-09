@@ -858,6 +858,7 @@ def get_cleanup_devices(refresh: bool = False):
                         COALESCE(zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
                         COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
                         COALESCE(do.is_active, 0) AS is_active,
+                        COALESCE(o.is_family, 0) AS is_family,
                         do.start_date AS owner_start_date,
                         do.end_date AS owner_end_date,
                         COALESCE(v.score_normalized, 0.0) AS score_normalized,
@@ -873,6 +874,7 @@ def get_cleanup_devices(refresh: bool = False):
                     LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
                         AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
                         AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                    LEFT JOIN owners o ON o.name = do.owner_name
                     LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
                     WHERE zea.ZCAMERAMODEL IS NOT NULL 
                       AND zea.ZCAMERAMODEL != ''
@@ -889,7 +891,8 @@ def get_cleanup_devices(refresh: bool = False):
                     ROUND(MAX(CASE WHEN score_quartile = 2 THEN score_normalized END), 4) AS q2_max_score,
                     MAX(is_active) AS is_active,
                     MIN(owner_start_date) AS start_date,
-                    MAX(owner_end_date) AS end_date
+                    MAX(owner_end_date) AS end_date,
+                    MAX(is_family) AS is_family
                 FROM scored_assets
                 GROUP BY primary_owner, camera_model
                 ORDER BY primary_owner ASC, low_quality_gb DESC, low_quality_count DESC;
@@ -920,10 +923,12 @@ def get_cleanup_devices(refresh: bool = False):
                 is_act = bool(r[8])
                 s_date = r[9]
                 e_date = r[10]
+                is_fam = bool(r[11]) if len(r) > 11 else False
 
                 if p_owner not in owner_dict:
                     owner_dict[p_owner] = {
                         "owner_name": p_owner,
+                        "is_family": is_fam,
                         "low_count": 0,
                         "low_gb": 0.0,
                         "total_count": 0,
@@ -935,6 +940,8 @@ def get_cleanup_devices(refresh: bool = False):
                         "active_device_count": 0,
                         "devices": []
                     }
+                elif is_fam:
+                    owner_dict[p_owner]["is_family"] = True
 
                 owner_dict[p_owner]["low_count"] += l_cnt
                 owner_dict[p_owner]["low_gb"] = round(owner_dict[p_owner]["low_gb"] + l_gb, 2)
@@ -957,6 +964,7 @@ def get_cleanup_devices(refresh: bool = False):
                 owner_dict[p_owner]["devices"].append({
                     "camera_model": c_model,
                     "owner": p_owner,
+                    "is_family": is_fam,
                     "low_count": l_cnt,
                     "low_gb": l_gb,
                     "total_count": t_cnt,
@@ -1434,6 +1442,7 @@ def _parse_mode_m_logs(log_dir: Path):
     actionable_recs = []
     disjoint_recs = []
     needs_sync_moments = []
+    unassigned_clusters = []
     threshold_aligned = True
     current_threshold = None
     historical_min = None
@@ -1452,6 +1461,48 @@ def _parse_mode_m_logs(log_dir: Path):
                 threshold_aligned = True
             elif current_threshold is not None and historical_min is not None:
                 threshold_aligned = current_threshold <= (historical_min + 1e-4)
+
+            cur_cluster = None
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                m_hdr = re.match(
+                    r"^\[\s*(\d+)\]\s*📁\s*(.+?)\s+\[(.+?)\]\s+—\s*(\d+)\s*asset\(s\)\s*\|\s*Score:\s*([^|]+?)\s*\|\s*Month\(s\):\s*(.+)$",
+                    line
+                )
+                if m_hdr:
+                    score_span_str = m_hdr.group(5).strip()
+                    score_parts = score_span_str.split()
+                    max_sc = float(score_parts[0]) if score_parts else 0.0
+                    min_sc = float(score_parts[-1]) if len(score_parts) >= 3 else max_sc
+                    cur_cluster = {
+                        "orig_rank": int(m_hdr.group(1)),
+                        "folder": m_hdr.group(2).strip(),
+                        "group_type": m_hdr.group(3).strip(),
+                        "asset_count": int(m_hdr.group(4)),
+                        "score_span": score_span_str,
+                        "max_score": max_sc,
+                        "min_score": min_sc,
+                        "months": m_hdr.group(6).strip(),
+                        "assets": []
+                    }
+                    unassigned_clusters.append(cur_cluster)
+                    continue
+
+                if cur_cluster is not None and line.startswith("•"):
+                    m_ast = re.match(
+                        r"^•\s*(.+?)\s*\|\s*Score:\s*(\d+\.\d+)\s*\|\s*Captured:\s*([^|]+?)\s*\|\s*Month:\s*(\d{4}-\d{2})(?:\s+\((.+)\))?$",
+                        line
+                    )
+                    if m_ast:
+                        cur_cluster["assets"].append({
+                            "original_filename": m_ast.group(1).strip(),
+                            "score_normalized": float(m_ast.group(2)),
+                            "capture_timestamp": m_ast.group(3).strip(),
+                            "month": m_ast.group(4).strip(),
+                            "notes": (m_ast.group(5) or "").strip()
+                        })
         except Exception:
             pass
 
@@ -1524,7 +1575,8 @@ def _parse_mode_m_logs(log_dir: Path):
         "historical_min": historical_min,
         "actionable_recs": actionable_recs,
         "disjoint_recs": disjoint_recs,
-        "needs_sync_moments": needs_sync_moments
+        "needs_sync_moments": needs_sync_moments,
+        "unassigned_clusters": unassigned_clusters
     }
 
 
@@ -1747,6 +1799,97 @@ def get_planner_overview():
             hist_min = parsed_logs["historical_min"] if parsed_logs["historical_min"] is not None else db_hist_min
             thresh_aligned = parsed_logs["threshold_aligned"] if parsed_logs["current_threshold"] is not None else db_th_met
 
+            # Enrich unassigned high-rank clusters with asset_id and ZASSET metadata for previews
+            unassigned_clusters = parsed_logs.get("unassigned_clusters", [])
+            if unassigned_clusters:
+                floor_sc = max(0.50, (hist_min or 0.5315) - 0.01)
+                cur.execute("""
+                    SELECT v.asset_id, v.original_filename, ROUND(v.score_normalized, 4) as score, v.month, v.date_created_utc
+                    FROM ranked_assets_view v
+                    JOIN month_batches mb ON v.month = mb.month
+                    WHERE mb.status_code >= '600'
+                      AND (v.MomentsAlbumName IS NULL OR v.MomentsAlbumName = '')
+                      AND v.score_normalized >= ?
+                    ORDER BY v.score_normalized DESC
+                """, (floor_sc,))
+                base_unassigned = cur.fetchall()
+                u_aids = [r[0] for r in base_unassigned]
+                u_meta = {}
+                if u_aids:
+                    ph_u = ",".join("?" for _ in u_aids)
+                    cur.execute(f"""
+                        SELECT 
+                            za.ZUUID,
+                            COALESCE(za.ZKIND, 0),
+                            ROUND(COALESCE(za.ZDURATION, zea.ZDURATION, 0.0), 2),
+                            COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
+                            COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
+                            ROUND(COALESCE(zea.ZFPS, 0.0), 1),
+                            ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2),
+                            COALESCE(aaa.ZORIGINALFILESIZE, 0),
+                            COALESCE(zea.ZCAMERAMODEL, 'Unknown'),
+                            COALESCE(do.owner_name, 'Shared/Other')
+                        FROM ZASSET za
+                        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+                        LEFT JOIN ZEXTENDEDATTRIBUTES zea ON zea.Z_PK = za.ZEXTENDEDATTRIBUTES
+                        LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
+                            AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                            AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                        WHERE za.ZUUID IN ({ph_u})
+                    """, u_aids)
+                    for mr in cur.fetchall():
+                        u_meta[mr[0]] = mr
+
+                by_fn_month = {}
+                by_month = {}
+                for aid, fn, sc, mo, dt in base_unassigned:
+                    key = ((fn or "").lower(), mo)
+                    by_fn_month.setdefault(key, []).append((aid, fn, sc, mo, dt))
+                    by_month.setdefault(mo, []).append((aid, fn, sc, mo, dt))
+
+                used_aids = set()
+                for c in unassigned_clusters:
+                    for a in c["assets"]:
+                        fn_lower = (a["original_filename"] or "").lower()
+                        key = (fn_lower, a["month"])
+                        cands = by_fn_month.get(key, [])
+                        chosen = None
+                        if cands:
+                            unused = [x for x in cands if x[0] not in used_aids]
+                            pool = unused if unused else cands
+                            pool.sort(key=lambda x: abs(x[2] - a["score_normalized"]))
+                            chosen = pool[0]
+                        else:
+                            m_cands = by_month.get(a["month"], [])
+                            if m_cands:
+                                m_cands.sort(key=lambda x: abs(x[2] - a["score_normalized"]))
+                                chosen = m_cands[0]
+
+                        if chosen:
+                            aid, full_fn, _, _, dt_utc = chosen
+                            used_aids.add(aid)
+                            m_info = u_meta.get(aid)
+                            zkind = m_info[1] if m_info else 0
+                            is_vid = zkind == 1 or full_fn.lower().endswith((".mov", ".mp4", ".m4v", ".avi", ".mpg"))
+                            a["asset_id"] = aid
+                            a["original_filename"] = full_fn
+                            a["date_created_utc"] = dt_utc or a["capture_timestamp"]
+                            a["media_type"] = "video" if is_vid else "photo"
+                            a["duration_sec"] = m_info[2] if m_info else 0.0
+                            a["width"] = m_info[3] if m_info else 0
+                            a["height"] = m_info[4] if m_info else 0
+                            a["fps"] = m_info[5] if m_info else 0.0
+                            a["file_size_mb"] = m_info[6] if m_info else 0.0
+                            a["file_size_bytes"] = m_info[7] if m_info else 0
+                            a["camera_model"] = m_info[8] if m_info else "Unknown"
+                            a["primary_owner"] = m_info[9] if m_info else "Shared/Other"
+                            a["assigned_moment"] = f"Proposed: {c['folder']}"
+
+                # Sort clusters by cluster size descending, then max_score descending
+                unassigned_clusters.sort(key=lambda g: (-len(g["assets"]), -g["max_score"], g["folder"]))
+
+            total_unassigned_assets = sum(len(c["assets"]) for c in unassigned_clusters)
+
             return {
                 "connected": True,
                 "mode_b": {
@@ -1779,6 +1922,9 @@ def get_planner_overview():
                         "published_assets_total": published_assets_total
                     },
                     "needs_sync_moments": parsed_logs["needs_sync_moments"],
+                    "unassigned_total_assets": total_unassigned_assets,
+                    "unassigned_total_clusters": len(unassigned_clusters),
+                    "unassigned_clusters": unassigned_clusters,
                     "actionable_recommendations": parsed_logs["actionable_recs"][:12],
                     "disjoint_recommendations": parsed_logs["disjoint_recs"][:10]
                 }

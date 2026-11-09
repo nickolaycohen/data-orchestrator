@@ -2749,3 +2749,215 @@ body {
   color: var(--text-secondary);
   line-height: 1.45;
 }
+
+/* Unassigned High-Rank Assets Clusters (Mode [M] Step 1) */
+.unassigned-clusters-section {
+  border-top: 1px solid var(--border-subtle);
+  background: rgba(11, 15, 24, 0.65);
+}
+
+.unassigned-clusters-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  background: rgba(255, 255, 255, 0.025);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.unassigned-toolbar-title {
+  font-size: 0.75rem;
+  color: var(--accent-amber);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.unassigned-toolbar-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.unassigned-clusters-wrap {
+  max-height: 520px;
+  overflow-y: auto;
+  padding: 0.65rem;
+  display: block;
+}
+
+.unassigned-cluster-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: rgba(18, 24, 38, 0.85);
+  margin-bottom: 0.55rem;
+  transition: border-color 0.15s ease;
+}
+
+.unassigned-cluster-card:last-child {
+  margin-bottom: 0;
+}
+
+.unassigned-cluster-card:hover {
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.unassigned-cluster-card.expanded {
+  border-color: rgba(168, 85, 247, 0.45);
+  background: rgba(18, 24, 38, 0.95);
+}
+
+.unassigned-cluster-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.unassigned-cluster-header:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.unassigned-cluster-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.unassigned-cluster-chevron {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  width: 14px;
+  text-align: center;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.unassigned-cluster-card.expanded .unassigned-cluster-chevron {
+  transform: rotate(90deg);
+  color: var(--accent-purple);
+}
+
+.unassigned-cluster-rank {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.unassigned-cluster-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.unassigned-cluster-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.unassigned-cluster-folder {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.unassigned-cluster-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.69rem;
+  color: var(--text-muted);
+}
+
+.unassigned-cluster-right {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-shrink: 0;
+}
+
+.unassigned-thumb-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.unassigned-mini-thumb {
+  position: relative;
+  width: 40px;
+  height: 30px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #090d16;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.unassigned-mini-thumb:hover {
+  transform: scale(1.08);
+  border-color: var(--accent-purple);
+  z-index: 2;
+}
+
+.unassigned-mini-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.unassigned-mini-thumb .mini-play-dot {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  font-size: 0.5rem;
+  line-height: 1;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
+.unassigned-more-thumbs {
+  font-size: 0.66rem;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0.2rem 0.35rem;
+}
+
+.unassigned-cluster-body {
+  display: none;
+  border-top: 1px solid var(--border-subtle);
+  background: rgba(9, 13, 22, 0.8);
+  padding: 0.35rem 0.5rem 0.5rem 0.5rem;
+  overflow-x: auto;
+}
+
+.unassigned-cluster-card.expanded .unassigned-cluster-body {
+  display: block;
+}
+

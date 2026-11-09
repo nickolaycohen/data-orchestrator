@@ -458,13 +458,50 @@
                 <!-- Step 1: Curation Threshold & Moments Needing ToBeCurated Sync -->
                 <div class="planner-subblock">
                   <div class="planner-subblock-header">
-                    <span><strong>1️⃣ Curation Threshold &amp; Moments Requiring <code>ToBeCurated</code> Update (Option <code>[1]</code>)</strong></span>
+                    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                      <span><strong>1️⃣ Curation Threshold &amp; Moments Requiring <code>ToBeCurated</code> Update (Option <code>[1]</code>)</strong></span>
+                      <span class="badge badge-xs badge-amber font-mono" id="mode-m-unassigned-summary-badge" style="display: none;">0 Unassigned</span>
+                    </div>
                     <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_create_moments')" title="Run Option [1]: Sync proposed assets to ToBeCurated in Apple Photos">
                       ▶ Run [1] Sync ToBeCurated
                     </button>
                   </div>
                   <div id="mode-m-sync-box" class="planner-sync-box">
                     Checking moments requiring curation sync...
+                  </div>
+
+                  <!-- Expanded Unassigned High-Rank Assets Above Threshold (Clustered by Proposed Moment & Sorted by Cluster Size) -->
+                  <div id="mode-m-unassigned-section" class="unassigned-clusters-section" style="display: none;">
+                    <div class="unassigned-clusters-toolbar">
+                      <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                        <span class="cleanup-filter-label" style="padding-right: 0.1rem;">Sort Clusters:</span>
+                        <button class="cleanup-filter-btn unassigned-sort-btn active" data-unassigned-sort="size">
+                          📊 Cluster Size (Largest)
+                        </button>
+                        <button class="cleanup-filter-btn unassigned-sort-btn" data-unassigned-sort="score">
+                          ⭐ Top Score
+                        </button>
+                        <button class="cleanup-filter-btn unassigned-sort-btn" data-unassigned-sort="date">
+                          📅 Chronological
+                        </button>
+                      </div>
+                      <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                        <input
+                          type="text"
+                          class="form-control form-control-sm"
+                          id="mode-m-unassigned-search"
+                          placeholder="Filter folders, files, months..."
+                          style="width: 195px; padding: 0.2rem 0.5rem; font-size: 0.72rem;"
+                        />
+                        <button class="btn btn-xs btn-outline" id="btn-toggle-all-unassigned-clusters" title="Expand or collapse all proposed Moment clusters">
+                          ⊞ Expand All
+                        </button>
+                      </div>
+                    </div>
+
+                    <div class="unassigned-clusters-wrap" id="mode-m-unassigned-list">
+                      <!-- Populated dynamically with proposed Moment clusters sorted by cluster size & asset previews -->
+                    </div>
                   </div>
                 </div>
 
@@ -560,7 +597,15 @@
                     <span class="badge badge-xs badge-outline font-mono" id="cleanup-device-count-pill">0 Devices</span>
                   </div>
 
-                  <!-- Active vs. All Devices Filter Toggle -->
+                  <!-- Family vs. All Owners & Active vs. All Devices Filter Toggles -->
+                  <div class="cleanup-scope-toggle mb-1" id="cleanup-family-scope-toggle">
+                    <button class="cleanup-scope-btn active" data-family-scope="family" id="btn-scope-family">
+                      👨‍👩‍👧‍👦 Family Only <span class="scope-count font-mono" id="scope-count-family">0</span>
+                    </button>
+                    <button class="cleanup-scope-btn" data-family-scope="all" id="btn-scope-owners-all">
+                      🌐 All Owners <span class="scope-count font-mono" id="scope-count-owners-all">0</span>
+                    </button>
+                  </div>
                   <div class="cleanup-scope-toggle mb-2" id="cleanup-device-scope-toggle">
                     <button class="cleanup-scope-btn active" data-device-scope="active" id="btn-scope-active">
                       🟢 Active Devices <span class="scope-count font-mono" id="scope-count-active">2</span>
