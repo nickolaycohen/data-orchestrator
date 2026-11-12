@@ -249,6 +249,203 @@ async function fetchMediaMetrics(): Promise<void> {
       topoMedia.textContent = `${(stats.total_assets || 0).toLocaleString()} assets · ${stats.curated_moments || 0} moments`;
     }
 
+    // Render per-phase breakdown below each top stat tile
+    const pb = stats.phase_breakdown || null;
+    const ms = stats.moment_stages || null;
+    const totalAssets = Math.max(1, stats.total_assets || 0);
+    const totalBatches = Math.max(1, stats.month_batches || 0);
+    const totalMoments = Math.max(1, stats.curated_moments || 0);
+
+    if (pb) {
+      const a650 = pb.assets_650 || 0;
+      const a500 = pb.assets_500_600 || 0;
+      const a400 = pb.assets_400 || 0;
+      const a100 = pb.assets_100_399 || 0;
+      const a000 = pb.assets_000 || 0;
+
+      const p650 = ((a650 / totalAssets) * 100).toFixed(1);
+      const pInFlight = (((a500 + a400 + a100) / totalAssets) * 100).toFixed(1);
+      const p000 = ((a000 / totalAssets) * 100).toFixed(1);
+
+      const assetsSubEl = document.getElementById('stat-media-assets-sub');
+      const assetsBarEl = document.getElementById('stat-media-assets-bar');
+      const assetsPhasesEl = document.getElementById('stat-media-assets-phases');
+
+      const scoredPct = (((pb.assets_scored || stats.total_assets || 0) / totalAssets) * 100).toFixed(0);
+      if (assetsSubEl) {
+        assetsSubEl.textContent = `In master catalog · ${scoredPct}% AI scored`;
+      }
+      if (assetsBarEl) {
+        assetsBarEl.innerHTML = `
+          <div class="stat-phase-seg" style="width:${p650}%; background:#34d399;" title="650 Finalized: ${a650.toLocaleString()} (${p650}%)"></div>
+          <div class="stat-phase-seg" style="width:${pInFlight}%; background:#fbbf24;" title="In Progress (100–600): ${(a500 + a400 + a100).toLocaleString()} (${pInFlight}%)"></div>
+          <div class="stat-phase-seg" style="width:${p000}%; background:#64748b;" title="000 Pending: ${a000.toLocaleString()} (${p000}%)"></div>
+        `;
+      }
+      if (assetsPhasesEl) {
+        const inFlightRows: string[] = [];
+        if (a500 > 0) {
+          inFlightRows.push(`
+            <div class="stat-phase-row">
+              <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#a78bfa;"></span>500–600 Curated / Ranked</span>
+              <span class="stat-phase-val">${a500.toLocaleString()}<span class="stat-phase-pct">(${((a500 / totalAssets) * 100).toFixed(1)}%)</span></span>
+            </div>
+          `);
+        }
+        if (a400 > 0 || a500 === 0) {
+          inFlightRows.push(`
+            <div class="stat-phase-row">
+              <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#fbbf24;"></span>400 Uploaded (In Curation)</span>
+              <span class="stat-phase-val">${a400.toLocaleString()}<span class="stat-phase-pct">(${((a400 / totalAssets) * 100).toFixed(1)}%)</span></span>
+            </div>
+          `);
+        }
+        if (a100 > 0) {
+          inFlightRows.push(`
+            <div class="stat-phase-row">
+              <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#38bdf8;"></span>100–399 Staging / Upload</span>
+              <span class="stat-phase-val">${a100.toLocaleString()}<span class="stat-phase-pct">(${((a100 / totalAssets) * 100).toFixed(1)}%)</span></span>
+            </div>
+          `);
+        }
+
+        assetsPhasesEl.innerHTML = `
+          <div class="stat-phase-row">
+            <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#34d399;"></span>650 Finalized (Cloud Retained)</span>
+            <span class="stat-phase-val">${a650.toLocaleString()}<span class="stat-phase-pct">(${p650}%)</span></span>
+          </div>
+          ${inFlightRows.join('')}
+          <div class="stat-phase-row">
+            <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#64748b;"></span>000 Ingested / Pending</span>
+            <span class="stat-phase-val">${a000.toLocaleString()}<span class="stat-phase-pct">(${p000}%)</span></span>
+          </div>
+          <div class="stat-phase-footer">
+            <span title="Google or Apple Favorites">★ ${(pb.assets_favorited || 0).toLocaleString()} Favs</span>
+            <span>·</span>
+            <span title="Assets assigned to Moments">📁 ${(pb.assets_in_moments || 0).toLocaleString()} in Moments</span>
+            <span>·</span>
+            <span title="Assets published to Shutterfly/YouTube">🚀 ${(pb.assets_published || 0).toLocaleString()} Pub</span>
+          </div>
+        `;
+      }
+
+      // Tile 3: Month Batches phase breakdown
+      const b650 = pb.batches_650 || 0;
+      const b500 = pb.batches_500_600 || 0;
+      const b400 = pb.batches_400 || 0;
+      const b100 = pb.batches_100_399 || 0;
+      const b000 = pb.batches_000 || 0;
+      const bp650 = ((b650 / totalBatches) * 100).toFixed(1);
+      const bpInFlight = (((b500 + b400 + b100) / totalBatches) * 100).toFixed(1);
+      const bp000 = ((b000 / totalBatches) * 100).toFixed(1);
+
+      const batchesBarEl = document.getElementById('stat-media-batches-bar');
+      const batchesPhasesEl = document.getElementById('stat-media-batches-phases');
+      if (batchesBarEl) {
+        batchesBarEl.innerHTML = `
+          <div class="stat-phase-seg" style="width:${bp650}%; background:#34d399;"></div>
+          <div class="stat-phase-seg" style="width:${bpInFlight}%; background:#fbbf24;"></div>
+          <div class="stat-phase-seg" style="width:${bp000}%; background:#64748b;"></div>
+        `;
+      }
+      if (batchesPhasesEl) {
+        batchesPhasesEl.innerHTML = `
+          <div class="stat-phase-row">
+            <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#34d399;"></span>650 Completed Batches</span>
+            <span class="stat-phase-val">${b650}<span class="stat-phase-pct">(${bp650}%)</span></span>
+          </div>
+          <div class="stat-phase-row">
+            <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#fbbf24;"></span>100–600 In Curation / Active</span>
+            <span class="stat-phase-val">${b500 + b400 + b100}<span class="stat-phase-pct">(${bpInFlight}%)</span></span>
+          </div>
+          <div class="stat-phase-row">
+            <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#64748b;"></span>000 Queued / Unprocessed</span>
+            <span class="stat-phase-val">${b000}<span class="stat-phase-pct">(${bp000}%)</span></span>
+          </div>
+          <div class="stat-phase-footer">
+            <span>Avg ${Math.round(totalAssets / totalBatches).toLocaleString()} assets / batch</span>
+          </div>
+        `;
+      }
+    }
+
+    // Tile 2: Curated Moments stage breakdown
+    if (ms) {
+      const m500 = ms.M500 || 0;
+      const m450 = ms.M450 || 0;
+      const m400 = ms.M400 || 0;
+      const mp500 = ((m500 / totalMoments) * 100).toFixed(1);
+      const mp450 = ((m450 / totalMoments) * 100).toFixed(1);
+      const mp400 = ((m400 / totalMoments) * 100).toFixed(1);
+
+      const momentsBarEl = document.getElementById('stat-media-moments-bar');
+      const momentsPhasesEl = document.getElementById('stat-media-moments-phases');
+      if (momentsBarEl) {
+        momentsBarEl.innerHTML = `
+          <div class="stat-phase-seg" style="width:${mp500}%; background:#34d399;"></div>
+          <div class="stat-phase-seg" style="width:${mp450}%; background:#a78bfa;"></div>
+          <div class="stat-phase-seg" style="width:${mp400}%; background:#64748b;"></div>
+        `;
+      }
+      if (momentsPhasesEl) {
+        const pubSummary = data.published_summary || {};
+        momentsPhasesEl.innerHTML = `
+          <div class="stat-phase-row">
+            <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#34d399;"></span>M500 Fully Published</span>
+            <span class="stat-phase-val">${m500}<span class="stat-phase-pct">(${mp500}%)</span></span>
+          </div>
+          <div class="stat-phase-row">
+            <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#a78bfa;"></span>M450 Curated / Ready</span>
+            <span class="stat-phase-val">${m450}<span class="stat-phase-pct">(${mp450}%)</span></span>
+          </div>
+          <div class="stat-phase-row">
+            <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#64748b;"></span>M400 Candidate / Unsynced</span>
+            <span class="stat-phase-val">${m400}<span class="stat-phase-pct">(${mp400}%)</span></span>
+          </div>
+          <div class="stat-phase-footer">
+            <span>📷 ${(pubSummary.shutterfly_assets || 0).toLocaleString()} Shutterfly</span>
+            <span>·</span>
+            <span>🎥 ${(pubSummary.youtube_assets || 0).toLocaleString()} YouTube</span>
+          </div>
+        `;
+      }
+    }
+
+    // Tile 4: Triage Duplicate Savings breakdown
+    const triageBarEl = document.getElementById('stat-media-triage-bar');
+    const triagePhasesEl = document.getElementById('stat-media-triage-phases');
+    const scannedCnt = stats.triage_scanned || 0;
+    const dupCnt = stats.triage_duplicates || 0;
+    const uniqueCnt = Math.max(0, scannedCnt - dupCnt);
+    const dupPct = scannedCnt > 0 ? ((dupCnt / scannedCnt) * 100).toFixed(1) : '0.0';
+    const uniqPct = scannedCnt > 0 ? ((uniqueCnt / scannedCnt) * 100).toFixed(1) : '100.0';
+
+    if (triageBarEl && scannedCnt > 0) {
+      triageBarEl.innerHTML = `
+        <div class="stat-phase-seg" style="width:${dupPct}%; background:#fbbf24;"></div>
+        <div class="stat-phase-seg" style="width:${uniqPct}%; background:#38bdf8;"></div>
+      `;
+    }
+    if (triagePhasesEl && scannedCnt > 0) {
+      triagePhasesEl.innerHTML = `
+        <div class="stat-phase-row">
+          <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#fbbf24;"></span>Duplicates Skipped</span>
+          <span class="stat-phase-val">${dupCnt.toLocaleString()}<span class="stat-phase-pct">(${dupPct}%)</span></span>
+        </div>
+        <div class="stat-phase-row">
+          <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#38bdf8;"></span>Unique Files Retained</span>
+          <span class="stat-phase-val">${uniqueCnt.toLocaleString()}<span class="stat-phase-pct">(${uniqPct}%)</span></span>
+        </div>
+        <div class="stat-phase-row">
+          <span class="stat-phase-label"><span class="stat-phase-dot" style="background:#a78bfa;"></span>Total Intake Scanned</span>
+          <span class="stat-phase-val">${scannedCnt.toLocaleString()}</span>
+        </div>
+        <div class="stat-phase-footer">
+          <span>🛡️ ${(stats.triage_sessions || 0).toLocaleString()} triage sessions completed</span>
+        </div>
+      `;
+    }
+
     // Published Moments History (Shutterfly & YouTube)
     if (data.published_moments) {
       publishedMomentsCache = data.published_moments;
@@ -277,18 +474,18 @@ async function fetchMediaMetrics(): Promise<void> {
       }
     }
 
-    // Pipeline executions table
+    // Pipeline executions table (compact bottom table)
     const executionsTbody = document.getElementById('pipeline-executions-tbody');
     if (executionsTbody && data.recent_executions) {
       executionsTbody.innerHTML = data.recent_executions
         .map(
           (ex: any) => `
         <tr>
-          <td><span style="font-family: var(--font-mono); color: #94a3b8;">#${ex.id}</span></td>
-          <td><code>${ex.session_id || '-'}</code></td>
-          <td><strong>${ex.label || 'Batch Execution'}</strong></td>
-          <td><span class="badge badge-sm badge-green">${ex.status || 'DONE'}</span></td>
-          <td style="font-family: var(--font-mono); font-size: 0.75rem;">${ex.executed_at_utc || '-'}</td>
+          <td style="padding: 0.28rem 0.5rem;"><span style="font-family: var(--font-mono); color: #94a3b8; font-size: 0.72rem;">#${ex.id}</span></td>
+          <td style="padding: 0.28rem 0.5rem;"><code style="font-size: 0.7rem;">${ex.session_id || '-'}</code></td>
+          <td style="padding: 0.28rem 0.5rem;"><strong style="font-size: 0.74rem;">${ex.label || 'Batch Execution'}</strong></td>
+          <td style="padding: 0.28rem 0.5rem; text-align: center;"><span class="badge badge-xs badge-green">${ex.status || 'DONE'}</span></td>
+          <td style="padding: 0.28rem 0.5rem; text-align: right; font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted);">${ex.executed_at_utc || '-'}</td>
         </tr>
       `
         )

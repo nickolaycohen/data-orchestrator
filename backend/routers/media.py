@@ -10,6 +10,7 @@ import sqlite3
 from typing import Optional
 from pathlib import Path
 from datetime import datetime, timezone
+import calendar
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response
@@ -91,11 +92,100 @@ def get_media_metrics():
         cur.execute("SELECT count(*) FROM curated_moments")
         curated_moments_count = cur.fetchone()[0]
         
-        # Month batches
-        cur.execute("SELECT count(*), sum(assets_count) FROM month_batches")
+        # Month batches & Asset phase breakdown
+        cur.execute("""
+            SELECT count(*), sum(assets_count)
+            FROM month_batches
+            WHERE status_code IS NULL OR status_code != 'INVALID'
+        """)
         batches_row = cur.fetchone()
         month_batches_count = batches_row[0]
         batch_assets_count = batches_row[1] or 0
+
+        # Detailed phase breakdown across assets & month_batches
+        cur.execute("""
+            WITH m_counts AS (
+                SELECT month,
+                       COUNT(*) AS cnt,
+                       SUM(CASE WHEN aesthetic_score IS NOT NULL THEN 1 ELSE 0 END) AS scored,
+                       SUM(CASE WHEN google_favorite = 1 OR apple_favorite = 1 OR apple_photos_monthly_selection = 1 OR mobile_apple_photos_featured_photos = 1 THEN 1 ELSE 0 END) AS favs,
+                       SUM(CASE WHEN MomentsAlbumName IS NOT NULL AND MomentsAlbumName != '' THEN 1 ELSE 0 END) AS in_moments
+                FROM assets
+                GROUP BY month
+            )
+            SELECT COALESCE(mb.status_code, '000') AS status_code,
+                   COALESCE(bs.short_label, 'added') AS label,
+                   COALESCE(bs.pipeline_stage, '1.2') AS stage,
+                   COUNT(mb.month) AS batches,
+                   COALESCE(SUM(mc.cnt), SUM(mb.assets_count), 0) AS assets,
+                   COALESCE(SUM(mc.scored), 0) AS scored,
+                   COALESCE(SUM(mc.favs), 0) AS favs,
+                   COALESCE(SUM(mc.in_moments), 0) AS in_moments
+            FROM month_batches mb
+            LEFT JOIN m_counts mc ON mb.month = mc.month
+            LEFT JOIN batch_status bs ON mb.status_code = bs.code
+            WHERE mb.status_code IS NULL OR mb.status_code != 'INVALID'
+            GROUP BY COALESCE(mb.status_code, '000')
+            ORDER BY status_code
+        """)
+        phase_rows = [dict(r) for r in cur.fetchall()]
+
+        # Aggregate into major pipeline phases + exact status rows
+        phase_summary = {
+            "assets_000": 0,
+            "batches_000": 0,
+            "assets_100_399": 0,
+            "batches_100_399": 0,
+            "assets_400": 0,
+            "batches_400": 0,
+            "assets_500_600": 0,
+            "batches_500_600": 0,
+            "assets_650": 0,
+            "batches_650": 0,
+            "assets_scored": 0,
+            "assets_favorited": 0,
+            "assets_in_moments": 0,
+            "by_status": phase_rows
+        }
+        for pr in phase_rows:
+            code = str(pr["status_code"] or "000")
+            a_cnt = int(pr["assets"] or 0)
+            b_cnt = int(pr["batches"] or 0)
+            phase_summary["assets_scored"] += int(pr["scored"] or 0)
+            phase_summary["assets_favorited"] += int(pr["favs"] or 0)
+            phase_summary["assets_in_moments"] += int(pr["in_moments"] or 0)
+            if code == "000":
+                phase_summary["assets_000"] += a_cnt
+                phase_summary["batches_000"] += b_cnt
+            elif code in ("100", "100E", "200", "200E", "210", "399"):
+                phase_summary["assets_100_399"] += a_cnt
+                phase_summary["batches_100_399"] += b_cnt
+            elif code in ("400", "400E"):
+                phase_summary["assets_400"] += a_cnt
+                phase_summary["batches_400"] += b_cnt
+            elif code in ("500", "550", "600"):
+                phase_summary["assets_500_600"] += a_cnt
+                phase_summary["batches_500_600"] += b_cnt
+            elif code == "650":
+                phase_summary["assets_650"] += a_cnt
+                phase_summary["batches_650"] += b_cnt
+
+        # Moment stage breakdown (M400, M450, M500)
+        cur.execute("""
+            SELECT COALESCE(memory_stage, 'M400') AS stage,
+                   COUNT(*) AS moments,
+                   COALESCE(SUM(to_be_curated_count), 0) AS to_be_curated_assets,
+                   COALESCE(SUM(curated_count), 0) AS curated_assets
+            FROM curated_moments
+            GROUP BY COALESCE(memory_stage, 'M400')
+        """)
+        moment_stages = {"M400": 0, "M450": 0, "M500": 0, "curated_assets": 0, "to_be_curated_assets": 0}
+        for mr in cur.fetchall():
+            st = mr["stage"]
+            if st in moment_stages:
+                moment_stages[st] = int(mr["moments"] or 0)
+            moment_stages["curated_assets"] += int(mr["curated_assets"] or 0)
+            moment_stages["to_be_curated_assets"] += int(mr["to_be_curated_assets"] or 0)
         
         # Triage summary
         cur.execute("""
@@ -269,6 +359,8 @@ def get_media_metrics():
         """)
         recent_triage = [dict(r) for r in cur.fetchall()]
 
+        phase_summary["assets_published"] = int(published_summary.get("total_assets") or 0)
+
         return {
             "connected": True,
             "stats": {
@@ -279,7 +371,9 @@ def get_media_metrics():
                 "triage_sessions": triage_sessions,
                 "triage_scanned": triage_scanned,
                 "triage_duplicates": triage_duplicates,
-                "triage_saved_gb": round(triage_bytes / (1024**3), 2)
+                "triage_saved_gb": round(triage_bytes / (1024**3), 2),
+                "phase_breakdown": phase_summary,
+                "moment_stages": moment_stages
             },
             "recent_executions": recent_executions,
             "featured_moments": featured_moments,
@@ -1580,6 +1674,139 @@ def _parse_mode_m_logs(log_dir: Path):
     }
 
 
+def _enrich_batch_candidates_with_devices(cur, candidates):
+    """Enrich candidate month batch dicts with device counts and active family device coverage comparison."""
+    if not candidates:
+        return
+    months = [c["month"] for c in candidates if c.get("month")]
+    if not months:
+        return
+
+    try:
+        # Camera model aliases (e.g. 'Samsung SCH-I800' -> 'SCH-I800')
+        cur.execute("SELECT camera_model, notes FROM device_owners WHERE notes LIKE 'Alias for %'")
+        aliases = {}
+        for alias_cam, notes in cur.fetchall():
+            target = notes.split("Alias for ")[-1].strip()
+            aliases[alias_cam] = target
+            aliases[target] = alias_cam
+
+        # All device ownership intervals with family status
+        cur.execute("""
+            SELECT d.camera_model, d.owner_name, d.start_date, d.end_date, COALESCE(o.is_family, 0), d.notes
+            FROM device_owners d
+            LEFT JOIN owners o ON d.owner_name = o.name
+            WHERE (d.notes IS NULL OR (d.notes NOT LIKE 'Alias for %' AND d.notes NOT LIKE '%(trimmed)%'))
+            ORDER BY d.owner_name, d.camera_model
+        """)
+        all_device_owners = cur.fetchall()
+
+        # Query actual camera models and asset counts for candidate months
+        ph = ",".join("?" for _ in months)
+        cur.execute(f"""
+            SELECT a.month, COALESCE(zea.ZCAMERAMODEL, 'Unknown') as camera_model, COUNT(*) as cnt
+            FROM assets a
+            JOIN ZASSET za ON a.asset_id = za.ZUUID
+            LEFT JOIN ZEXTENDEDATTRIBUTES zea ON za.ZEXTENDEDATTRIBUTES = zea.Z_PK
+            WHERE a.month IN ({ph})
+            GROUP BY a.month, zea.ZCAMERAMODEL
+            ORDER BY a.month DESC, cnt DESC
+        """, months)
+        batch_device_rows = cur.fetchall()
+
+        devices_by_month = {}
+        for mo, cam, cnt in batch_device_rows:
+            devices_by_month.setdefault(mo, []).append((cam, cnt))
+
+        for item in candidates:
+            m = item.get("month")
+            if not m:
+                continue
+
+            m_start = f"{m}-01"
+            try:
+                y, mon = map(int, m.split("-"))
+                _, last_day = calendar.monthrange(y, mon)
+                m_end = f"{y}-{mon:02d}-{last_day:02d}"
+            except Exception:
+                m_end = f"{m}-31"
+
+            active_fam_dict = {}
+            device_to_owner = {}
+            for cam, owner, s_date, e_date, is_fam, notes in all_device_owners:
+                starts_before = (s_date is None or s_date <= m_end)
+                ends_after = (e_date is None or e_date >= m_start)
+                if starts_before and ends_after:
+                    if is_fam == 1:
+                        active_fam_dict[cam] = owner
+                    if cam not in device_to_owner:
+                        device_to_owner[cam] = (owner, bool(is_fam))
+
+            b_devs = devices_by_month.get(m, [])
+            b_models = {cam: cnt for cam, cnt in b_devs}
+
+            matched_family = []
+            missing_family = []
+            accounted_models = set()
+
+            for fam_cam, fam_owner in active_fam_dict.items():
+                found_cam = None
+                count = 0
+                if fam_cam in b_models:
+                    found_cam = fam_cam
+                    count = b_models[fam_cam]
+                elif aliases.get(fam_cam) in b_models:
+                    found_cam = aliases.get(fam_cam)
+                    count = b_models[found_cam]
+
+                if found_cam:
+                    matched_family.append({
+                        "camera_model": fam_cam,
+                        "owner_name": fam_owner,
+                        "count": count
+                    })
+                    accounted_models.add(found_cam)
+                else:
+                    missing_family.append({
+                        "camera_model": fam_cam,
+                        "owner_name": fam_owner
+                    })
+
+            matched_family.sort(key=lambda x: -x["count"])
+
+            other_devices = []
+            other_assets_count = 0
+            for cam, cnt in b_devs:
+                if cam not in accounted_models and cam not in active_fam_dict:
+                    owner_info = device_to_owner.get(cam) or device_to_owner.get(aliases.get(cam))
+                    owner_name = owner_info[0] if owner_info else None
+                    other_devices.append({
+                        "camera_model": cam,
+                        "owner_name": owner_name,
+                        "count": cnt
+                    })
+                    other_assets_count += cnt
+
+            total_active_fam = len(active_fam_dict)
+            matched_cnt = len(matched_family)
+            pct = round((matched_cnt / total_active_fam * 100.0), 1) if total_active_fam > 0 else 100.0
+
+            item["device_summary"] = {
+                "coverage_percent": pct,
+                "active_family_count": total_active_fam,
+                "matched_family_count": matched_cnt,
+                "matched_family_devices": matched_family,
+                "missing_family_devices": missing_family,
+                "other_devices": other_devices,
+                "other_assets_count": other_assets_count
+            }
+    except Exception as e:
+        # Fallback gracefully if any query fails
+        for item in candidates:
+            if "device_summary" not in item:
+                item["device_summary"] = None
+
+
 @router.get("/planner-overview")
 def get_planner_overview():
     """Return comprehensive next-step overview for Mode [B] Batch Management and Mode [M] Memory Feature & Publishing."""
@@ -1890,6 +2117,14 @@ def get_planner_overview():
 
             total_unassigned_assets = sum(len(c["assets"]) for c in unassigned_clusters)
 
+            # Enrich candidate batches with device summary vs active family devices
+            top_000_batches = pipeline_000_candidates[:8]
+            _enrich_batch_candidates_with_devices(cur, top_000_batches)
+            if manual_400_candidates:
+                _enrich_batch_candidates_with_devices(cur, manual_400_candidates)
+            if pipeline_500_candidates:
+                _enrich_batch_candidates_with_devices(cur, pipeline_500_candidates)
+
             return {
                 "connected": True,
                 "mode_b": {
@@ -1899,7 +2134,7 @@ def get_planner_overview():
                     "manual_400_candidates": manual_400_candidates,
                     "pipeline_500_candidates": pipeline_500_candidates,
                     "pipeline_600_candidates": pipeline_600_candidates,
-                    "pipeline_000_candidates": pipeline_000_candidates[:8],
+                    "pipeline_000_candidates": top_000_batches,
                     "total_000_batches": len(pipeline_000_candidates),
                     "total_000_assets": sum(x["total_assets"] for x in pipeline_000_candidates),
                     "retryable_candidates": retryable_candidates,

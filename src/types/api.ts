@@ -122,16 +122,38 @@ export interface CleanupCandidatesResponse {
   candidates: CleanupCandidateAsset[];
 }
 
+export interface BatchDeviceSummary {
+  coverage_percent: number;
+  active_family_count: number;
+  matched_family_count: number;
+  matched_family_devices: Array<{
+    camera_model: string;
+    owner_name: string;
+    count: number;
+  }>;
+  missing_family_devices: Array<{
+    camera_model: string;
+    owner_name: string;
+  }>;
+  other_devices: Array<{
+    camera_model: string;
+    owner_name?: string | null;
+    count: number;
+  }>;
+  other_assets_count: number;
+}
+
 export interface PlannerBatchCandidate {
   month: string;
   status_code: string;
-  status_name: string;
+  status_name?: string;
   total_assets: number;
   fav_assets?: number;
   is_bypassed?: boolean;
   elapsed_days?: number | null;
   in_queue?: boolean;
   next_step: string;
+  device_summary?: BatchDeviceSummary | null;
 }
 
 export interface PlannerUnassignedCluster {

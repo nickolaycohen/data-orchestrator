@@ -2,7 +2,7 @@
 // Planner Mode Overview: [B] Batch Management | [M] Memory & Publishing
 // ==========================================================================
 
-import type { PlannerModeB, PlannerModeM, PlannerOverviewResponse } from '../types/api.ts';
+import type { BatchDeviceSummary, PlannerModeB, PlannerModeM, PlannerOverviewResponse } from '../types/api.ts';
 import { candidateAssetMeta, escapeHtml, formatDuration } from '../utils/formatters.ts';
 import { openCleanupPreviewModal } from './cleanup.ts';
 
@@ -25,6 +25,8 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
       const cardB = document.getElementById('planner-mode-b-card');
       const cardM = document.getElementById('planner-mode-m-card');
       const cardC = document.getElementById('media-cleanup-card');
+      const cardPub = document.getElementById('published-memories-card');
+      const cardTrack1 = document.getElementById('track-1-reference-card');
 
       if (view === 'all') {
         if (grid) {
@@ -34,6 +36,8 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
         if (cardB) cardB.style.display = 'flex';
         if (cardM) cardM.style.display = 'flex';
         if (cardC) cardC.style.display = 'block';
+        if (cardPub) cardPub.style.display = 'block';
+        if (cardTrack1) cardTrack1.style.display = 'block';
       } else if (view === 'b') {
         if (grid) {
           grid.style.display = 'grid';
@@ -42,6 +46,8 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
         if (cardB) cardB.style.display = 'flex';
         if (cardM) cardM.style.display = 'none';
         if (cardC) cardC.style.display = 'none';
+        if (cardPub) cardPub.style.display = 'none';
+        if (cardTrack1) cardTrack1.style.display = 'block';
       } else if (view === 'm') {
         if (grid) {
           grid.style.display = 'grid';
@@ -50,8 +56,12 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
         if (cardB) cardB.style.display = 'none';
         if (cardM) cardM.style.display = 'flex';
         if (cardC) cardC.style.display = 'none';
+        if (cardPub) cardPub.style.display = 'block';
+        if (cardTrack1) cardTrack1.style.display = 'none';
       } else if (view === 'c') {
         if (grid) grid.style.display = 'none';
+        if (cardPub) cardPub.style.display = 'none';
+        if (cardTrack1) cardTrack1.style.display = 'none';
         if (cardC) {
           cardC.style.display = 'block';
           cardC.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -287,7 +297,7 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
 
   if (b000Tbody) {
     if (!c000.length) {
-      b000Tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No unprocessed 000 batches remaining.</td></tr>';
+      b000Tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No unprocessed 000 batches remaining.</td></tr>';
     } else {
       b000Tbody.innerHTML = c000
         .map(item => {
@@ -295,11 +305,14 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
             ? `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'remove_queue')">✓ Queued (Remove)</button>`
             : `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'queue')" title="Queue ${escapeHtml(item.month)} for Verify, Export & Google Upload">➕ Queue (000➜399)</button>`;
 
+          const deviceCellHtml = formatDeviceSummaryCell(item.device_summary);
+
           return `
           <tr>
             <td><strong class="font-mono text-primary">${escapeHtml(item.month)}</strong></td>
             <td><span class="badge badge-xs badge-outline font-mono">${escapeHtml(item.status_code)}</span></td>
             <td style="text-align: right;" class="font-mono">${item.total_assets.toLocaleString()}</td>
+            <td class="batch-device-cell">${deviceCellHtml}</td>
             <td class="font-mono" style="font-size: 0.7rem; color: var(--text-muted);">000 ➜ 100 ➜ 200 ➜ 210 ➜ 399 (Upload)</td>
             <td style="text-align: right; white-space: nowrap;">${actionBtn}</td>
           </tr>
@@ -308,6 +321,67 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
         .join('');
     }
   }
+}
+
+function formatDeviceSummaryCell(ds: BatchDeviceSummary | null | undefined): string {
+  if (!ds) {
+    return '<span class="text-muted font-mono" style="font-size: 0.72rem;">—</span>';
+  }
+
+  let badgeClass = 'badge-green';
+  if (ds.active_family_count === 0) {
+    badgeClass = 'badge-outline';
+  } else if (ds.matched_family_count === ds.active_family_count) {
+    badgeClass = 'badge-green';
+  } else if (ds.coverage_percent >= 50) {
+    badgeClass = 'badge-blue';
+  } else if (ds.matched_family_count > 0) {
+    badgeClass = 'badge-amber';
+  } else {
+    badgeClass = 'badge-red';
+  }
+
+  const coverageBadge = ds.active_family_count > 0
+    ? `<span class="badge badge-xs ${badgeClass} font-mono">${ds.matched_family_count}/${ds.active_family_count} Active Family (${ds.coverage_percent.toFixed(0)}%)</span>`
+    : `<span class="badge badge-xs badge-outline font-mono">No registered family devices</span>`;
+
+  const matchedPills = ds.matched_family_devices.map(d => `
+    <span class="batch-dev-chip chip-matched" title="${escapeHtml(d.camera_model)} • Owner: ${escapeHtml(d.owner_name)} • ${d.count.toLocaleString()} assets">
+      <span>${escapeHtml(d.camera_model)}</span>
+      <span class="batch-dev-owner">(${escapeHtml(d.owner_name)})</span>
+      <span class="batch-dev-count">${d.count.toLocaleString()}</span>
+    </span>
+  `).join('');
+
+  let missingPill = '';
+  if (ds.missing_family_devices && ds.missing_family_devices.length > 0) {
+    const missingTitle = ds.missing_family_devices.map(d => `${d.camera_model} (${d.owner_name})`).join(', ');
+    const missingShort = ds.missing_family_devices.map(d => `${d.camera_model.replace(/\s*\([^)]*\)/g, '')} (${d.owner_name})`).join(', ');
+    missingPill = `
+      <span class="batch-dev-chip chip-missing" title="Active family devices with 0 assets in this batch: ${escapeHtml(missingTitle)}">
+        ⚠️ Missing (${ds.missing_family_devices.length}): ${escapeHtml(missingShort)}
+      </span>
+    `;
+  }
+
+  let otherPill = '';
+  if (ds.other_devices && ds.other_devices.length > 0) {
+    const otherDetails = ds.other_devices.map(d => `${d.camera_model}${d.owner_name ? ` (${d.owner_name})` : ''}: ${d.count}`).join(', ');
+    otherPill = `
+      <span class="batch-dev-chip chip-other" title="${escapeHtml(otherDetails)}">
+        +${ds.other_assets_count.toLocaleString()} other (${ds.other_devices.length} dev)
+      </span>
+    `;
+  }
+
+  return `
+    <div class="batch-device-header">${coverageBadge}</div>
+    <div class="batch-device-list">
+      ${matchedPills}
+      ${missingPill}
+      ${otherPill}
+    </div>
+  `;
 }
 
 function renderModeMOverview(modeM: Partial<PlannerModeM>): void {

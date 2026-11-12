@@ -385,6 +385,92 @@ body {
   color: var(--text-secondary);
 }
 
+.stat-phase-bar {
+  display: flex;
+  width: 100%;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  margin-top: 0.65rem;
+  gap: 1px;
+}
+
+.stat-phase-bar:empty {
+  display: none;
+}
+
+.stat-phase-seg {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.stat-phase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  margin-top: 0.55rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.71rem;
+}
+
+.stat-phase-list:empty {
+  display: none;
+}
+
+.stat-phase-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+}
+
+.stat-phase-label {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat-phase-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.stat-phase-val {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.stat-phase-pct {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 0.67rem;
+  margin-left: 0.2rem;
+}
+
+.stat-phase-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+  padding-top: 0.38rem;
+  border-top: 1px dashed rgba(255, 255, 255, 0.07);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+
 .text-purple { color: #a78bfa; }
 .text-blue { color: #38bdf8; }
 .text-green { color: #34d399; }
@@ -2959,5 +3045,160 @@ body {
 
 .unassigned-cluster-card.expanded .unassigned-cluster-body {
   display: block;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Batch Devices & Family Coverage (Mode [B] Ingest Table)                   */
+/* -------------------------------------------------------------------------- */
+.batch-device-cell {
+  vertical-align: top;
+  padding: 0.45rem 0.6rem;
+  max-width: 480px;
+}
+
+.batch-device-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.batch-device-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem 0.35rem;
+  align-items: center;
+}
+
+.batch-dev-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.12rem 0.38rem;
+  border-radius: 4px;
+  font-size: 0.67rem;
+  font-family: var(--font-mono);
+  line-height: 1.25;
+}
+
+.batch-dev-chip.chip-matched {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.32);
+  color: #a7f3d0;
+}
+
+.batch-dev-chip.chip-matched .batch-dev-owner {
+  color: #6ee7b7;
+  font-weight: 500;
+}
+
+.batch-dev-chip.chip-matched .batch-dev-count {
+  background: rgba(16, 185, 129, 0.28);
+  padding: 0.05rem 0.28rem;
+  border-radius: 3px;
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 0.65rem;
+}
+
+.batch-dev-chip.chip-missing {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fde68a;
+  cursor: help;
+}
+
+.batch-dev-chip.chip-other {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  cursor: help;
+}
+
+.badge-red {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Compact Track 1 Reference & Compact Recent Pipeline Executions             */
+/* -------------------------------------------------------------------------- */
+.track-1-compact-card {
+  background: rgba(13, 17, 26, 0.75);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.track-1-compact-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.track-1-horizontal-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  overflow-x: auto;
+  padding: 0.25rem 0;
+}
+
+.track-mini-step {
+  flex: 1;
+  min-width: 140px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.track-mini-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.track-mini-header strong {
+  font-size: 0.76rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.track-mini-desc {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.track-mini-arrow {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  opacity: 0.5;
+  user-select: none;
+}
+
+.compact-executions-card {
+  background: rgba(13, 17, 26, 0.65);
+  border: 1px solid var(--border-subtle);
+}
+
+.executions-compact-table th {
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.executions-compact-table td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
 }
 
