@@ -646,6 +646,19 @@ export async function fetchCleanupCandidates(): Promise<void> {
             ? `<div class="candidate-res-sub">${c.width}×${c.height}${c.fps > 0 ? ` · ${Math.round(c.fps)}fps` : ''}</div>`
             : '';
 
+        const hasDiffOrigin =
+          Boolean(c.origin_camera_model &&
+          c.origin_camera_model !== c.camera_model &&
+          c.origin_camera_model !== 'Unknown');
+
+        const originBadgeHtml = hasDiffOrigin
+          ? `<div class="candidate-origin-sub" style="margin-top: 2px;" title="Origin capture device: ${escapeHtml(c.origin_camera_model || '')} · Physical carrier: ${escapeHtml(c.camera_model)}">
+              <span class="badge badge-xs badge-cyan font-mono" style="font-size: 0.65rem; padding: 1px 5px; line-height: 1.2;">
+                ${c.origin_camera_model?.includes('GoPro') ? '🎥' : '📷'} ${escapeHtml(c.origin_camera_model || '')}
+              </span>
+            </div>`
+          : '';
+
         const tsParts = formatCaptureTimestampParts(c.capture_timestamp || c.date_created_utc);
         const captureTsHtml = `
           <div class="candidate-capture-ts" title="Exact capture timestamp: ${escapeHtml(c.capture_timestamp || c.date_created_utc)}">
@@ -686,6 +699,7 @@ export async function fetchCleanupCandidates(): Promise<void> {
             <td>${previewThumbHtml}</td>
             <td class="candidate-filename" title="${escapeHtml(c.original_filename)}">
               <div>${escapeHtml(c.original_filename)}</div>
+              ${originBadgeHtml}
               ${resSub}
             </td>
             <td>${captureTsHtml}</td>
@@ -837,7 +851,13 @@ export function openCleanupPreviewModal(assetId: string): void {
         ? `${c.width} × ${c.height} px${c.fps > 0 ? ` @ ${c.fps} fps` : ''}`
         : '—';
   }
-  if (devEl) devEl.textContent = `${c.camera_model || 'Unknown Device'} (${c.primary_owner || 'Unassigned'})`;
+  if (devEl) {
+    if (c.origin_camera_model && c.origin_camera_model !== c.camera_model && c.origin_camera_model !== 'Unknown') {
+      devEl.textContent = `${c.camera_model || 'Unknown Device'} (${c.primary_owner || 'Unassigned'}) · Origin: ${c.origin_camera_model}`;
+    } else {
+      devEl.textContent = `${c.camera_model || 'Unknown Device'} (${c.primary_owner || 'Unassigned'})`;
+    }
+  }
   if (scoreEl) {
     const qPrefix =
       typeof c.score_quartile === 'number' ? `Q${c.score_quartile}` : c.score_quartile || 'High Rank';

@@ -41,6 +41,32 @@ _cleanup_devices_cache = {
     "payload": None
 }
 
+
+def _ensure_carrier_device_schema(conn: sqlite3.Connection) -> None:
+    """Ensures carrier_device column and index exist on assets table."""
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(assets);")
+        columns = [row[1] for row in cur.fetchall()]
+        if "carrier_device" not in columns:
+            cur.execute("ALTER TABLE assets ADD COLUMN carrier_device TEXT DEFAULT NULL;")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_assets_carrier_device ON assets(carrier_device);")
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Failed to ensure carrier_device schema on assets: {e}")
+
+
+def _infer_origin(camera_model: Optional[str], camera_make: Optional[str], filename: str) -> tuple[str, str]:
+    """Infers origin capture device / camera model if missing from EXIF."""
+    if camera_model and camera_model.strip() and camera_model != "Unknown":
+        return camera_model.strip(), (camera_make or "").strip()
+    fn_upper = (filename or "").upper()
+    if fn_upper.startswith("GX") or fn_upper.startswith("GH") or fn_upper.startswith("GOPR"):
+        return "GoPro Video", "GoPro"
+    if fn_upper.startswith("DJI_"):
+        return "DJI Video", "DJI"
+    return "Unknown", "Unknown"
+
 def _ensure_published_url_schema():
     """Ensure migration 060 columns (published_url, shutterfly_url, youtube_url) exist in media_organizer.db."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
@@ -945,11 +971,12 @@ def get_cleanup_devices(refresh: bool = False):
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
         try:
+            _ensure_carrier_device_schema(conn)
             cur = conn.cursor()
             cur.execute("""
                 WITH scored_assets AS (
                     SELECT 
-                        COALESCE(zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
+                        COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
                         COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
                         COALESCE(do.is_active, 0) AS is_active,
                         COALESCE(o.is_family, 0) AS is_family,
@@ -958,21 +985,24 @@ def get_cleanup_devices(refresh: bool = False):
                         COALESCE(v.score_normalized, 0.0) AS score_normalized,
                         COALESCE(aaa.ZORIGINALFILESIZE, 0) AS file_size_bytes,
                         NTILE(4) OVER (
-                            PARTITION BY COALESCE(zea.ZCAMERAMODEL, 'Unknown')
+                            PARTITION BY COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown')
                             ORDER BY COALESCE(v.score_normalized, 0.0) ASC
                         ) AS score_quartile
                     FROM assets a
                     LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
-                    LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = za.Z_PK
-                    LEFT JOIN ZEXTENDEDATTRIBUTES zea ON zea.ZASSET = za.Z_PK
-                    LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
-                        AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                        AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                    LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON za.ZADDITIONALATTRIBUTES = aaa.Z_PK
+                    LEFT JOIN ZEXTENDEDATTRIBUTES zea ON za.ZEXTENDEDATTRIBUTES = zea.Z_PK
+                    LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, zea.ZCAMERAMODEL)
+                        AND (
+                            do.is_active = 1
+                            OR (
+                                (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                                AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                            )
+                        )
                     LEFT JOIN owners o ON o.name = do.owner_name
                     LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
-                    WHERE zea.ZCAMERAMODEL IS NOT NULL 
-                      AND zea.ZCAMERAMODEL != ''
-                      AND COALESCE(a.removed_from_source, 0) = 0
+                    WHERE COALESCE(a.removed_from_source, 0) = 0
                 )
                 SELECT 
                     primary_owner,
@@ -1151,8 +1181,9 @@ def get_cleanup_candidates(
                 a.month,
                 a.date_created_utc,
                 aaa.ZEXIFTIMESTAMPSTRING AS exif_timestamp_raw,
-                COALESCE(zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
-                COALESCE(zea.ZCAMERAMAKE, 'Unknown') AS camera_make,
+                COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') AS carrier_device,
+                COALESCE(zea.ZCAMERAMODEL, 'Unknown') AS origin_camera_model,
+                COALESCE(zea.ZCAMERAMAKE, 'Unknown') AS origin_camera_make,
                 COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
                 COALESCE(v.score_normalized, 0.0) AS score_normalized,
                 a.aesthetic_score,
@@ -1184,23 +1215,28 @@ def get_cleanup_candidates(
                 ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2) AS file_size_mb,
                 ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1073741824.0, 3) AS file_size_gb,
                 NTILE(4) OVER (
-                    PARTITION BY COALESCE(zea.ZCAMERAMODEL, 'Unknown')
+                    PARTITION BY COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown')
                     ORDER BY COALESCE(v.score_normalized, 0.0) ASC
                 ) AS score_quartile
             FROM assets a
             LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
-            LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = za.Z_PK
-            LEFT JOIN ZEXTENDEDATTRIBUTES zea ON zea.ZASSET = za.Z_PK
-            LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
-                AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+            LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON za.ZADDITIONALATTRIBUTES = aaa.Z_PK
+            LEFT JOIN ZEXTENDEDATTRIBUTES zea ON za.ZEXTENDEDATTRIBUTES = zea.Z_PK
+            LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, zea.ZCAMERAMODEL)
+                AND (
+                    do.is_active = 1
+                    OR (
+                        (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                        AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                    )
+                )
             LEFT JOIN (
                 SELECT asset_uuid, GROUP_CONCAT(DISTINCT moment_name) AS published_moments, MAX(published_at_utc) AS last_asset_pub 
                 FROM publications 
                 GROUP BY asset_uuid
             ) ps ON ps.asset_uuid = a.asset_id
             LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
-            WHERE zea.ZCAMERAMODEL = ?
+            WHERE COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') = ?
               AND COALESCE(a.removed_from_source, 0) = 0
         ),
         filtered AS (
@@ -1214,7 +1250,9 @@ def get_cleanup_candidates(
                 media_type,
                 date_created_utc,
                 primary_owner,
-                camera_model,
+                carrier_device,
+                origin_camera_model,
+                origin_camera_make,
                 asset_id,
                 file_size_bytes,
                 last_asset_pub,
@@ -1248,6 +1286,7 @@ def get_cleanup_candidates(
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
         try:
+            _ensure_carrier_device_schema(conn)
             cur = conn.cursor()
             params = [camera_model]
             if owner and owner != "all":
@@ -1262,15 +1301,28 @@ def get_cleanup_candidates(
             candidates = []
 
             for r in rows:
-                total_count = r[18] or 0
-                total_mb = r[19] or 0.0
-                exif_raw = r[17]
+                total_count = r[20] or 0
+                total_mb = r[21] or 0.0
                 utc_raw = r[7]
+                carrier_dev = r[9]
+                origin_raw_cam = r[10]
+                origin_raw_make = r[11]
+                filename = r[1] or ""
+                aid = r[12]
+                sz_bytes = r[13] or 0
+                last_pub = r[14]
+                dur_sec = r[15] or 0.0
+                w = r[16] or 0
+                h = r[17] or 0
+                fps_val = r[18] or 0.0
+                exif_raw = r[19]
                 capture_ts = _normalize_timestamp(exif_raw, utc_raw)
+
+                origin_cam, origin_make = _infer_origin(origin_raw_cam, origin_raw_make, filename)
 
                 candidates.append({
                     "score_quartile": r[0],
-                    "original_filename": r[1],
+                    "original_filename": filename,
                     "month": r[2] or "—",
                     "file_size_mb": r[3] or 0.0,
                     "score_normalized": r[4] if r[4] is not None else 0.0,
@@ -1279,14 +1331,17 @@ def get_cleanup_candidates(
                     "date_created_utc": utc_raw or "—",
                     "capture_timestamp": capture_ts,
                     "primary_owner": r[8] or "—",
-                    "camera_model": r[9] or "—",
-                    "asset_id": r[10],
-                    "file_size_bytes": r[11] or 0,
-                    "last_asset_pub": r[12] or None,
-                    "duration_sec": r[13] or 0.0,
-                    "width": r[14] or 0,
-                    "height": r[15] or 0,
-                    "fps": r[16] or 0.0
+                    "camera_model": carrier_dev or "—",
+                    "carrier_device": carrier_dev or "—",
+                    "origin_camera_model": origin_cam,
+                    "origin_make": origin_make,
+                    "asset_id": aid,
+                    "file_size_bytes": sz_bytes,
+                    "last_asset_pub": last_pub,
+                    "duration_sec": dur_sec,
+                    "width": w,
+                    "height": h,
+                    "fps": fps_val
                 })
 
             if not rows and offset > 0:
@@ -1309,18 +1364,23 @@ def get_cleanup_candidates(
                                 ELSE 'photo' 
                             END AS media_type,
                             NTILE(4) OVER (
-                                PARTITION BY COALESCE(zea.ZCAMERAMODEL, 'Unknown')
+                                PARTITION BY COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown')
                                 ORDER BY COALESCE(v.score_normalized, 0.0) ASC
                             ) AS score_quartile
                         FROM assets a
                         LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
-                        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = za.Z_PK
-                        LEFT JOIN ZEXTENDEDATTRIBUTES zea ON zea.ZASSET = za.Z_PK
-                        LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
-                            AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                            AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON za.ZADDITIONALATTRIBUTES = aaa.Z_PK
+                        LEFT JOIN ZEXTENDEDATTRIBUTES zea ON za.ZEXTENDEDATTRIBUTES = zea.Z_PK
+                        LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, zea.ZCAMERAMODEL)
+                            AND (
+                                do.is_active = 1
+                                OR (
+                                    (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                                    AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                                )
+                            )
                         LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
-                        WHERE zea.ZCAMERAMODEL = ?
+                        WHERE COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') = ?
                           AND COALESCE(a.removed_from_source, 0) = 0
                     )
                     SELECT COUNT(*), ROUND(SUM(file_size_bytes) / 1048576.0, 2)

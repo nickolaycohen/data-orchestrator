@@ -90,6 +90,9 @@ export interface CleanupCandidateAsset {
   original_filename: string;
   filename?: string;
   camera_model: string;
+  carrier_device?: string;
+  origin_camera_model?: string;
+  origin_make?: string;
   primary_owner: string;
   month: string;
   date_created_utc?: string;
