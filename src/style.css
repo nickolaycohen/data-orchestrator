@@ -2411,6 +2411,10 @@ body {
   color: var(--text-secondary);
 }
 
+.cleanup-table .badge {
+  white-space: nowrap;
+}
+
 /* Thumbnail Preview Cell in Candidates Table */
 .cleanup-thumb-wrap {
   position: relative;

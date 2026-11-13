@@ -768,20 +768,20 @@ export async function fetchCleanupCandidates(): Promise<void> {
               : '';
           onDeviceHtml = `
             <span class="badge badge-xs badge-green font-mono" title="Verified on physical device via ManagedIntake '${escapeHtml(folderTitle)}' (${escapeHtml(c.device_match_tier || 'exact')})">
-              📱 Actually on Device
+              📱 On Device
             </span>
             ${altFile}
           `;
         } else if (hasSnapshot) {
           onDeviceHtml = `
             <span class="badge badge-xs badge-outline font-mono" style="opacity: 0.8;" title="Attributed to ${escapeHtml(c.camera_model)} in DB, not present in ManagedIntake snapshot '${escapeHtml(snapshotFolder)}'">
-              ❓ Possibly Located
+              ❓ Possibly
             </span>
           `;
         } else {
           onDeviceHtml = `
             <span class="badge badge-xs badge-outline font-mono" style="opacity: 0.65;" title="No ManagedIntake ImageCapture snapshot available for ${escapeHtml(c.camera_model)}">
-              ❓ Possibly (No Snap)
+              ❓ No Snap
             </span>
           `;
         }
