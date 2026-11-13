@@ -1075,17 +1075,20 @@ function renderPreviewFilmstrip(): void {
       const isVideo = meta?.media_type === 'video';
       const thumbUrl = `/api/media/cleanup/thumbnail/${encodeURIComponent(aid)}`;
       const filename = meta?.original_filename || aid;
-      const captureTs = (meta?.capture_timestamp || meta?.date_created_utc || '').trim();
+      const captureTs = (meta?.capture_timestamp && meta.capture_timestamp !== '—' ? meta.capture_timestamp : meta?.date_created_utc && meta.date_created_utc !== '—' ? meta.date_created_utc : '').trim();
+      const shortTs = captureTs ? captureTs.replace('T', ' ').slice(0, 19) : '—';
+      const isDupCopy = Boolean(meta?.is_duplicate_copy);
       const scoreLabel = typeof meta?.score_normalized === 'number' ? ` · ${meta.score_normalized.toFixed(4)}` : '';
-      const tooltipParts = [`#${idx + 1} ${filename}`, captureTs ? captureTs : '', scoreLabel].filter(Boolean).join(' ');
+      const tooltipParts = [`#${idx + 1} ${filename}`, captureTs, scoreLabel, isDupCopy ? '· ♻️ Photos Dup Copy' : ''].filter(Boolean).join(' ');
       return `
-        <button type="button" class="cleanup-preview-thumb-item${idx === previewGroupIndex ? ' active' : ''}" data-preview-index="${idx}" title="${escapeHtml(tooltipParts)}">
+        <button type="button" class="cleanup-preview-thumb-item${idx === previewGroupIndex ? ' active' : ''}${isDupCopy ? ' is-dup-copy' : ''}" data-preview-index="${idx}" title="${escapeHtml(tooltipParts)}">
           <div class="cleanup-preview-thumb-media">
             <img src="${thumbUrl}" loading="lazy" alt="${escapeHtml(filename)}" onerror="this.style.display='none'" />
-            <span class="cleanup-preview-thumb-idx">#${idx + 1}</span>
+            <span class="cleanup-preview-thumb-idx">#${idx + 1}${isDupCopy ? ' ♻️' : ''}</span>
             ${isVideo ? '<span class="cleanup-preview-thumb-play">▶</span>' : ''}
           </div>
           <span class="cleanup-preview-thumb-caption">${escapeHtml(filename)}</span>
+          <span class="cleanup-preview-thumb-time">${escapeHtml(shortTs)}</span>
         </button>
       `;
     })
@@ -1217,6 +1220,37 @@ function renderCleanupPreviewAsset(assetId: string): void {
   if (uuidEl) uuidEl.textContent = `Asset UUID: ${c.asset_id}`;
 }
 
+function getAssetCaptureSortValue(assetId: string): { epochMs: number; rawTs: string; filename: string } {
+  const meta = candidateAssetMeta.get(assetId);
+  const raw =
+    (meta?.capture_timestamp && meta.capture_timestamp !== '—' ? meta.capture_timestamp : '') ||
+    (meta?.date_created_utc && meta.date_created_utc !== '—' ? meta.date_created_utc : '');
+  const trimmed = raw.trim();
+  const normalized = trimmed ? trimmed.replace(' ', 'T') : '';
+  const parsed = normalized ? Date.parse(normalized) : Number.NaN;
+  return {
+    epochMs: Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY,
+    rawTs: trimmed,
+    filename: meta?.original_filename || ''
+  };
+}
+
+function compareAssetsByCaptureDate(aId: string, bId: string): number {
+  const a = getAssetCaptureSortValue(aId);
+  const b = getAssetCaptureSortValue(bId);
+  if (a.epochMs !== b.epochMs) {
+    return a.epochMs - b.epochMs;
+  }
+  if (a.rawTs !== b.rawTs) {
+    if (!a.rawTs) return 1;
+    if (!b.rawTs) return -1;
+    return a.rawTs.localeCompare(b.rawTs);
+  }
+  const fnCmp = a.filename.localeCompare(b.filename, undefined, { numeric: true, sensitivity: 'base' });
+  if (fnCmp !== 0) return fnCmp;
+  return aId.localeCompare(bId);
+}
+
 export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupContext): void {
   const c = candidateAssetMeta.get(assetId);
   if (!c) return;
@@ -1236,6 +1270,9 @@ export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupC
   if (!seen.has(assetId)) {
     validGroupIds.unshift(assetId);
   }
+
+  // Order series chronologically by date captured (oldest -> newest) so duplicates sit adjacent
+  validGroupIds.sort(compareAssetsByCaptureDate);
 
   previewGroupAssetIds = validGroupIds;
   previewGroupIndex = validGroupIds.indexOf(assetId);

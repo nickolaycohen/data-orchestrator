@@ -2776,7 +2776,7 @@ body {
 .cleanup-preview-thumb-item {
   position: relative;
   flex: 0 0 auto;
-  width: 88px;
+  width: 96px;
   display: flex;
   flex-direction: column;
   border-radius: 6px;
@@ -2787,6 +2787,10 @@ body {
   cursor: pointer;
   opacity: 0.75;
   transition: border-color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+}
+
+.cleanup-preview-thumb-item.is-dup-copy:not(.active) {
+  border-color: rgba(245, 158, 11, 0.45);
 }
 
 .cleanup-preview-thumb-item:hover {
@@ -2817,19 +2821,34 @@ body {
 
 .cleanup-preview-thumb-caption {
   width: 100%;
-  padding: 0.16rem 0.3rem;
+  padding: 0.14rem 0.3rem 0.04rem;
   background: rgba(10, 14, 24, 0.92);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 0.58rem;
-  line-height: 1.25;
+  line-height: 1.2;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.cleanup-preview-thumb-item.active .cleanup-preview-thumb-caption {
+.cleanup-preview-thumb-time {
+  width: 100%;
+  padding: 0 0.3rem 0.14rem;
+  background: rgba(10, 14, 24, 0.92);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  line-height: 1.15;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cleanup-preview-thumb-item.active .cleanup-preview-thumb-caption,
+.cleanup-preview-thumb-item.active .cleanup-preview-thumb-time {
   color: #f8fafc;
   background: rgba(124, 92, 255, 0.28);
 }
