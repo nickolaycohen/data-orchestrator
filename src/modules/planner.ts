@@ -12,6 +12,7 @@ let pendingPlannerRefresh = false;
 let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
 const expandedUnassignedFolders = new Set<string>();
+const clusterPreviewAssetIds = new Map<string, string[]>();
 let hasInitializedUnassignedExpansion = false;
 
 export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
@@ -639,11 +640,18 @@ function renderUnassignedClustersList(): void {
     return;
   }
 
+  clusterPreviewAssetIds.clear();
+
   listEl.innerHTML = sorted
     .map((cluster, idx) => {
       const assets = cluster.assets || [];
       const count = assets.length || cluster.asset_count || 0;
       const isExpanded = expandedUnassignedFolders.has(cluster.folder);
+      const previewableAssets = assets.filter(a => a.asset_id);
+      clusterPreviewAssetIds.set(
+        cluster.folder,
+        previewableAssets.map(a => a.asset_id)
+      );
 
       let typeBadgeClass = 'badge-amber';
       if ((cluster.group_type || '').includes('Proposed New')) {
@@ -654,8 +662,15 @@ function renderUnassignedClustersList(): void {
 
       const sizeBadgeClass = count >= 10 ? 'badge-purple' : count >= 3 ? 'badge-amber' : 'badge-outline';
 
-      const previewAssets = assets.filter(a => a.asset_id).slice(0, 5);
-      const extraCount = Math.max(0, assets.length - previewAssets.length);
+      const previewAssets = previewableAssets.slice(0, 5);
+      const nextExtraAsset = previewableAssets[5];
+      const extraCount = Math.max(0, previewableAssets.length - previewAssets.length);
+      const extraThumbHtml =
+        extraCount > 0 && nextExtraAsset
+          ? `<span class="unassigned-more-thumbs" data-preview-asset-id="${escapeHtml(nextExtraAsset.asset_id)}" style="cursor: pointer;" title="Preview remaining ${extraCount} asset(s) in ${escapeHtml(cluster.folder)}">+${extraCount}</span>`
+          : extraCount > 0
+            ? `<span class="unassigned-more-thumbs">+${extraCount}</span>`
+            : '';
       const thumbStripHtml =
         previewAssets
           .map(a => {
@@ -668,7 +683,7 @@ function renderUnassignedClustersList(): void {
         </div>
       `;
           })
-          .join('') + (extraCount > 0 ? `<span class="unassigned-more-thumbs">+${extraCount}</span>` : '');
+          .join('') + extraThumbHtml;
 
       const rowsHtml = assets
         .map((a, aIdx) => {
@@ -799,7 +814,14 @@ function renderUnassignedClustersList(): void {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
       const aid = el.dataset.previewAssetId || el.dataset.assetId;
-      if (aid) openCleanupPreviewModal(aid);
+      if (!aid) return;
+      const cardEl = el.closest<HTMLElement>('.unassigned-cluster-card');
+      const folder = cardEl?.dataset.clusterFolder;
+      const groupAssetIds = folder ? clusterPreviewAssetIds.get(folder) : undefined;
+      openCleanupPreviewModal(
+        aid,
+        groupAssetIds && groupAssetIds.length > 0 ? { assetIds: groupAssetIds, groupLabel: folder } : undefined
+      );
     });
   });
 }

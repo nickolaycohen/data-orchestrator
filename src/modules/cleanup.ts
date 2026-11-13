@@ -23,8 +23,16 @@ const cleanupPageLimit = 50;
 let cleanupPageOffset = 0;
 let currentCandidateList: CleanupCandidateAsset[] = [];
 const selectedCandidateAssetIds = new Set<string>();
+export interface PreviewGroupContext {
+  assetIds: string[];
+  groupLabel?: string;
+}
+
 let pendingRemovalAssetIds: string[] = [];
 let previewModalAssetId: string | null = null;
+let previewGroupAssetIds: string[] = [];
+let previewGroupIndex = -1;
+let previewGroupLabel: string | null = null;
 let isFetchingCleanupDevices = false;
 let isFetchingCleanupCandidates = false;
 
@@ -199,12 +207,51 @@ export function setupMediaCleanup(): void {
     executeCleanupRemoval();
   });
 
-  // 8. Preview Modal Mark as Removed button
+  // 8. Preview Modal Mark as Removed button & Group Prev/Next Navigation
   document.getElementById('btn-preview-mark-removed')?.addEventListener('click', () => {
     if (!previewModalAssetId) return;
     const aid = previewModalAssetId;
     closeCleanupPreviewModal();
     openCleanupConfirmModal([aid]);
+  });
+
+  document.getElementById('btn-preview-prev')?.addEventListener('click', () => {
+    navigateCleanupPreview(-1);
+  });
+
+  document.getElementById('btn-preview-next')?.addEventListener('click', () => {
+    navigateCleanupPreview(1);
+  });
+
+  document.getElementById('cleanup-preview-filmstrip')?.addEventListener(
+    'wheel',
+    (e) => {
+      const strip = e.currentTarget as HTMLElement;
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && e.deltaY !== 0) {
+        strip.scrollLeft += e.deltaY;
+        e.preventDefault();
+      }
+    },
+    { passive: false }
+  );
+
+  document.addEventListener('keydown', (e) => {
+    const modal = document.getElementById('modal-cleanup-preview');
+    if (!modal?.classList.contains('open')) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const targetTag = (e.target as HTMLElement)?.tagName;
+    if (targetTag === 'INPUT' || targetTag === 'TEXTAREA') return;
+
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      navigateCleanupPreview(-1);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      navigateCleanupPreview(1);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeCleanupPreviewModal();
+    }
   });
 
   // Close preview modal when clicking backdrop
@@ -881,7 +928,12 @@ export async function fetchCleanupCandidates(): Promise<void> {
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         const aid = el.dataset.previewAssetId || el.dataset.assetId;
-        if (aid) openCleanupPreviewModal(aid);
+        if (!aid) return;
+        const pageAssetIds = currentCandidateList.map(item => item.asset_id).filter(Boolean);
+        const groupLabel = selectedCleanupDevice
+          ? `${selectedCleanupDevice.device_name || selectedCleanupDevice.camera_model || 'Cleanup'} (Current Page)`
+          : 'Cleanup Candidates (Current Page)';
+        openCleanupPreviewModal(aid, { assetIds: pageAssetIds, groupLabel });
       });
     });
 
@@ -925,14 +977,117 @@ export async function fetchCleanupCandidates(): Promise<void> {
   }
 }
 
-export function openCleanupPreviewModal(assetId: string): void {
+function stopPreviewMedia(): void {
+  const stage = document.getElementById('cleanup-preview-stage');
+  if (!stage) return;
+  const vid = stage.querySelector('video');
+  if (vid) {
+    vid.pause();
+    vid.removeAttribute('src');
+    vid.load();
+  }
+}
+
+function navigateCleanupPreview(delta: number): void {
+  if (previewGroupAssetIds.length <= 1) return;
+  const nextIdx = previewGroupIndex + delta;
+  if (nextIdx < 0 || nextIdx >= previewGroupAssetIds.length) return;
+  previewGroupIndex = nextIdx;
+  renderCleanupPreviewAsset(previewGroupAssetIds[previewGroupIndex]);
+  updatePreviewGroupControls();
+}
+
+function renderPreviewFilmstrip(): void {
+  const stripWrap = document.getElementById('cleanup-preview-filmstrip-wrap');
+  const strip = document.getElementById('cleanup-preview-filmstrip');
+  const labelEl = document.getElementById('cleanup-preview-group-label');
+  if (!stripWrap || !strip) return;
+
+  if (previewGroupAssetIds.length <= 1) {
+    stripWrap.style.display = 'none';
+    strip.innerHTML = '';
+    return;
+  }
+
+  stripWrap.style.display = 'flex';
+  if (labelEl) {
+    labelEl.textContent = previewGroupLabel
+      ? `${previewGroupLabel} (${previewGroupAssetIds.length} assets)`
+      : `Group (${previewGroupAssetIds.length} assets)`;
+  }
+
+  strip.innerHTML = previewGroupAssetIds
+    .map((aid, idx) => {
+      const meta = candidateAssetMeta.get(aid);
+      const isVideo = meta?.media_type === 'video';
+      const thumbUrl = `/api/media/cleanup/thumbnail/${encodeURIComponent(aid)}`;
+      const filename = meta?.original_filename || aid;
+      const scoreLabel = typeof meta?.score_normalized === 'number' ? ` · ${meta.score_normalized.toFixed(4)}` : '';
+      return `
+        <button type="button" class="cleanup-preview-thumb-item${idx === previewGroupIndex ? ' active' : ''}" data-preview-index="${idx}" title="#${idx + 1} ${escapeHtml(filename)}${escapeHtml(scoreLabel)}">
+          <img src="${thumbUrl}" loading="lazy" alt="${escapeHtml(filename)}" onerror="this.style.display='none'" />
+          <span class="cleanup-preview-thumb-idx">#${idx + 1}</span>
+          ${isVideo ? '<span class="cleanup-preview-thumb-play">▶</span>' : ''}
+        </button>
+      `;
+    })
+    .join('');
+
+  strip.querySelectorAll<HTMLElement>('.cleanup-preview-thumb-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.previewIndex);
+      if (Number.isNaN(idx) || idx < 0 || idx >= previewGroupAssetIds.length) return;
+      previewGroupIndex = idx;
+      renderCleanupPreviewAsset(previewGroupAssetIds[previewGroupIndex]);
+      updatePreviewGroupControls();
+    });
+  });
+}
+
+function updatePreviewGroupControls(): void {
+  const total = previewGroupAssetIds.length;
+  const hasGroup = total > 1;
+  const btnPrev = document.getElementById('btn-preview-prev') as HTMLButtonElement | null;
+  const btnNext = document.getElementById('btn-preview-next') as HTMLButtonElement | null;
+  const groupBadgeEl = document.getElementById('cleanup-preview-group-badge');
+
+  if (btnPrev) {
+    btnPrev.style.display = hasGroup ? 'flex' : 'none';
+    btnPrev.disabled = previewGroupIndex <= 0;
+  }
+  if (btnNext) {
+    btnNext.style.display = hasGroup ? 'flex' : 'none';
+    btnNext.disabled = previewGroupIndex < 0 || previewGroupIndex >= total - 1;
+  }
+  if (groupBadgeEl) {
+    if (hasGroup && previewGroupIndex >= 0) {
+      groupBadgeEl.style.display = 'inline-flex';
+      groupBadgeEl.textContent = `${previewGroupIndex + 1} / ${total}`;
+    } else {
+      groupBadgeEl.style.display = 'none';
+    }
+  }
+
+  const strip = document.getElementById('cleanup-preview-filmstrip');
+  if (strip && hasGroup) {
+    const items = strip.querySelectorAll<HTMLElement>('.cleanup-preview-thumb-item');
+    items.forEach((item, idx) => {
+      const isActive = idx === previewGroupIndex;
+      item.classList.toggle('active', isActive);
+      if (isActive) {
+        item.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+      }
+    });
+  }
+}
+
+function renderCleanupPreviewAsset(assetId: string): void {
   const c = candidateAssetMeta.get(assetId);
-  if (!c) return;
+  const stage = document.getElementById('cleanup-preview-stage');
+  if (!c || !stage) return;
 
   previewModalAssetId = assetId;
-  const modal = document.getElementById('modal-cleanup-preview');
-  const stage = document.getElementById('cleanup-preview-stage');
-  if (!modal || !stage) return;
+  stopPreviewMedia();
 
   const isVideo = c.media_type === 'video';
   const ext = (c.original_filename.split('.').pop() || '').toUpperCase();
@@ -1002,6 +1157,35 @@ export function openCleanupPreviewModal(assetId: string): void {
   }
   if (momEl) momEl.textContent = c.assigned_moment || '—';
   if (uuidEl) uuidEl.textContent = `Asset UUID: ${c.asset_id}`;
+}
+
+export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupContext): void {
+  const c = candidateAssetMeta.get(assetId);
+  if (!c) return;
+
+  const modal = document.getElementById('modal-cleanup-preview');
+  const stage = document.getElementById('cleanup-preview-stage');
+  if (!modal || !stage) return;
+
+  const seen = new Set<string>();
+  const validGroupIds: string[] = [];
+  for (const id of context?.assetIds || [assetId]) {
+    if (id && !seen.has(id) && candidateAssetMeta.has(id)) {
+      seen.add(id);
+      validGroupIds.push(id);
+    }
+  }
+  if (!seen.has(assetId)) {
+    validGroupIds.unshift(assetId);
+  }
+
+  previewGroupAssetIds = validGroupIds;
+  previewGroupIndex = validGroupIds.indexOf(assetId);
+  previewGroupLabel = context?.groupLabel || null;
+
+  renderCleanupPreviewAsset(assetId);
+  renderPreviewFilmstrip();
+  updatePreviewGroupControls();
 
   modal.classList.add('open');
 }
@@ -1009,17 +1193,23 @@ export function openCleanupPreviewModal(assetId: string): void {
 export function closeCleanupPreviewModal(): void {
   const modal = document.getElementById('modal-cleanup-preview');
   const stage = document.getElementById('cleanup-preview-stage');
+  stopPreviewMedia();
   if (stage) {
-    const vid = stage.querySelector('video');
-    if (vid) {
-      vid.pause();
-      vid.removeAttribute('src');
-      vid.load();
-    }
     stage.innerHTML = '';
+  }
+  const strip = document.getElementById('cleanup-preview-filmstrip');
+  if (strip) {
+    strip.innerHTML = '';
+  }
+  const stripWrap = document.getElementById('cleanup-preview-filmstrip-wrap');
+  if (stripWrap) {
+    stripWrap.style.display = 'none';
   }
   modal?.classList.remove('open');
   previewModalAssetId = null;
+  previewGroupAssetIds = [];
+  previewGroupIndex = -1;
+  previewGroupLabel = null;
 }
 
 function updateCleanupSelectionBar(): void {

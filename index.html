@@ -1707,13 +1707,27 @@
               <h3 id="cleanup-preview-title" class="font-mono">IMG_0000.MOV</h3>
               <span class="badge badge-xs badge-purple" id="cleanup-preview-type-badge">VIDEO</span>
               <span class="badge badge-xs badge-amber font-mono" id="cleanup-preview-size-badge">0 MB</span>
+              <span class="badge badge-xs badge-outline font-mono" id="cleanup-preview-group-badge" style="display: none;">1 / 1</span>
             </div>
             <button class="btn btn-xs btn-icon btn-close-modal" id="btn-close-preview-modal">✕</button>
           </div>
           <div class="modal-body cleanup-preview-body">
-            <!-- Media Viewer Stage -->
-            <div class="cleanup-preview-stage" id="cleanup-preview-stage">
-              <!-- Populated dynamically with <video> or <img> -->
+            <!-- Media Viewer Stage with Left/Right Group Navigation -->
+            <div class="cleanup-preview-stage-wrap">
+              <button type="button" class="cleanup-preview-nav-btn prev" id="btn-preview-prev" title="Previous asset in group (←)" style="display: none;" aria-label="Previous asset">‹</button>
+              <div class="cleanup-preview-stage" id="cleanup-preview-stage">
+                <!-- Populated dynamically with <video> or <img> -->
+              </div>
+              <button type="button" class="cleanup-preview-nav-btn next" id="btn-preview-next" title="Next asset in group (→)" style="display: none;" aria-label="Next asset">›</button>
+            </div>
+
+            <!-- Horizontal Scrollable Group Filmstrip -->
+            <div class="cleanup-preview-filmstrip-wrap" id="cleanup-preview-filmstrip-wrap" style="display: none;">
+              <div class="cleanup-preview-filmstrip-header">
+                <span class="font-mono text-muted" id="cleanup-preview-group-label">Group Assets</span>
+                <span class="font-mono text-muted" style="font-size: 0.68rem;">← / → keys or scroll strip</span>
+              </div>
+              <div class="cleanup-preview-filmstrip" id="cleanup-preview-filmstrip"></div>
             </div>
 
             <!-- Device Identification Metadata Grid (to quickly locate on iPhone/Camera) -->
