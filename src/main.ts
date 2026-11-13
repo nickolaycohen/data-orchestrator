@@ -116,6 +116,7 @@ async function fetchAllMetrics(): Promise<void> {
       fetchSystemStatus(),
       fetchMediaMetrics(),
       fetchExecutorMonitor(),
+      fetchPlannerOverview(),
       fetchStorageMetrics(),
       fetchIDriveMetrics(),
       fetchGmailMetrics()
@@ -1870,6 +1871,7 @@ function connectWebSocket(executionId: string): void {
   }
 
   const renderedLogs = new Set<string>();
+  let doneHandled = false;
 
   const appendUniqueLog = (text: string) => {
     if (!text || renderedLogs.has(text)) return;
@@ -1883,6 +1885,8 @@ function connectWebSocket(executionId: string): void {
   };
 
   const handleTaskDone = (exitCode: number) => {
+    if (doneHandled) return;
+    doneHandled = true;
     if (activePollInterval) {
       clearInterval(activePollInterval);
       activePollInterval = null;
@@ -1903,6 +1907,7 @@ function connectWebSocket(executionId: string): void {
       activeTaskCallbacks.onDone(exitCode);
     }
     fetchAllMetrics();
+    fetchPlannerOverview(true);
   };
 
   // 1. Robust polling fallback (every 350ms) guarantees logs stream even if WebSocket is blocked or fast-exits

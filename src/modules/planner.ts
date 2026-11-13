@@ -8,6 +8,7 @@ import { openCleanupPreviewModal } from './cleanup.ts';
 
 let plannerOverviewData: PlannerOverviewResponse | null = null;
 let isFetchingPlannerOverview = false;
+let pendingPlannerRefresh = false;
 let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
 const expandedUnassignedFolders = new Set<string>();
@@ -135,8 +136,11 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
   fetchPlannerOverview();
 }
 
-export async function fetchPlannerOverview(): Promise<void> {
-  if (isFetchingPlannerOverview) return;
+export async function fetchPlannerOverview(force = false): Promise<void> {
+  if (isFetchingPlannerOverview) {
+    if (force) pendingPlannerRefresh = true;
+    return;
+  }
   isFetchingPlannerOverview = true;
 
   try {
@@ -157,6 +161,10 @@ export async function fetchPlannerOverview(): Promise<void> {
     console.error('Error fetching planner overview:', err);
   } finally {
     isFetchingPlannerOverview = false;
+    if (pendingPlannerRefresh) {
+      pendingPlannerRefresh = false;
+      void fetchPlannerOverview();
+    }
   }
 }
 
@@ -430,12 +438,30 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
         recs[0] ? `${recs[0].moment_name} (${recs[0].action})` : '—'
       }`;
     }
+  } else if (!th.aligned) {
+    if (headlineEl) {
+      headlineEl.textContent = `Step 1: Resolve Threshold Mismatch (${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0).toFixed(4)}) before Step 2 Publishing`;
+    }
+    if (detailEl) {
+      const unassignedCount = modeM.unassigned_total_assets || 0;
+      const clusterCount = modeM.unassigned_total_clusters || (modeM.unassigned_clusters || []).length;
+      detailEl.textContent = `👉 ToBeCurated sync is complete. Assign Moments to top unassigned assets (${unassignedCount} across ${clusterCount} clusters) to align threshold${
+        recs[0] ? `; next ready candidate once aligned: ${recs[0].moment_name}` : ''
+      }.`;
+    }
   } else if (recs.length > 0) {
     if (headlineEl) {
       headlineEl.textContent = `Threshold Aligned (${(th.current || 0.5315).toFixed(4)}) · Top Next Candidate: "${recs[0].moment_name}" (${recs[0].action})`;
     }
     if (detailEl) {
       detailEl.textContent = `👉 ${recs.length} actionable moments ready for Shutterfly/YouTube publishing (up to 9 assets per batch) and ${disjoint.length} disjoint moments ready for merge.`;
+    }
+  } else {
+    if (headlineEl) {
+      headlineEl.textContent = `Threshold Aligned (${(th.current || 0.5315).toFixed(4)}) · ToBeCurated Synced`;
+    }
+    if (detailEl) {
+      detailEl.textContent = `👉 No actionable moments currently ready for publishing${disjoint.length > 0 ? ` (${disjoint.length} disjoint moments ready for merge)` : ''}.`;
     }
   }
 
