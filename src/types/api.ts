@@ -258,6 +258,7 @@ declare global {
   interface Window {
     loadReport: (id: string, title: string, filename: string) => Promise<void>;
     triggerTask: TriggerTaskFn;
+    openManagedIntakeModal: () => void;
     runPlannerBatchAction: (month: string, action: string) => Promise<void>;
   }
 }

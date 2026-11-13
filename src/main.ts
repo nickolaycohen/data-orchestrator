@@ -1971,8 +1971,14 @@ function appendConsoleLog(text: string): void {
   }
 }
 
+window.openManagedIntakeModal = function (): void {
+  const modal = document.getElementById('modal-managed-intake');
+  modal?.classList.add('open');
+};
+
 // 8. Modals
 function setupModals(): void {
+  const modalManagedIntake = document.getElementById('modal-managed-intake');
   const modalTriage = document.getElementById('modal-triage');
   const btnOpenTriage = document.getElementById('btn-open-triage-modal');
   const btnConfirmTriage = document.getElementById('btn-confirm-triage');
@@ -1983,6 +1989,7 @@ function setupModals(): void {
 
   document.querySelectorAll('.btn-close-modal').forEach(btn => {
     btn.addEventListener('click', () => {
+      modalManagedIntake?.classList.remove('open');
       modalTriage?.classList.remove('open');
       document.getElementById('modal-cleanup-confirm')?.classList.remove('open');
       closeCleanupPreviewModal();
@@ -1991,6 +1998,46 @@ function setupModals(): void {
 
   const triageInput = document.getElementById('triage-input-path') as HTMLInputElement | null;
   attachPathSanitizer(triageInput);
+
+  const managedIntakeInput = document.getElementById('managed-intake-path') as HTMLInputElement | null;
+  attachPathSanitizer(managedIntakeInput);
+
+  document.getElementById('btn-quick-open-image-capture')?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/system/open-image-capture', { method: 'POST' });
+    } catch (err) {
+      console.error('Failed to open Image Capture:', err);
+    }
+  });
+
+  document.getElementById('btn-reveal-intake-folder')?.addEventListener('click', async () => {
+    const rawPath = (document.getElementById('managed-intake-path') as HTMLInputElement | null)?.value;
+    const intakePath = cleanPath(rawPath) || '/Volumes/LaCie/Storage/Priority 4/Media Preprocessing/ManagedIntake';
+    try {
+      await fetch('/api/system/reveal-path', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: intakePath })
+      });
+    } catch (err) {
+      console.error('Failed to reveal folder:', err);
+    }
+  });
+
+  document.getElementById('btn-confirm-managed-intake')?.addEventListener('click', () => {
+    const rawPath = (document.getElementById('managed-intake-path') as HTMLInputElement | null)?.value;
+    const intakePath = cleanPath(rawPath);
+    const monthVal = (document.getElementById('managed-intake-month') as HTMLInputElement | null)?.value?.trim() || 'latest';
+    const deviceVal = (document.getElementById('managed-intake-device') as HTMLInputElement | null)?.value?.trim() || 'iPhone 17 Pro Max';
+
+    modalManagedIntake?.classList.remove('open');
+
+    const args: string[] = ['--month', monthVal, '--device', deviceVal];
+    if (intakePath) {
+      args.push('--source', intakePath);
+    }
+    window.triggerTask('media_managed_intake', args as any);
+  });
 
   btnConfirmTriage?.addEventListener('click', () => {
     const rawPath = (document.getElementById('triage-input-path') as HTMLInputElement | null)?.value;

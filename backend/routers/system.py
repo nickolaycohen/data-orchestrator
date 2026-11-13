@@ -106,3 +106,27 @@ def get_system_status():
         },
         "alerts": alerts
     }
+
+@router.post("/open-image-capture")
+def open_image_capture():
+    import subprocess
+    try:
+        subprocess.run(["open", "-a", "Image Capture"], check=True)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.post("/reveal-path")
+def reveal_path(payload: dict):
+    import subprocess
+    target = payload.get("path")
+    if not target:
+        return {"ok": False, "error": "No path provided"}
+    try:
+        # Create directory if it doesn't exist yet so Finder can reveal it
+        os.makedirs(target, exist_ok=True)
+        subprocess.run(["open", target], check=True)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+

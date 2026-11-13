@@ -322,7 +322,7 @@
                           <strong>Managed Intake</strong>
                         </div>
                         <p class="track-mini-desc">Direct import + Privacy split</p>
-                        <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_managed_intake')">Run</button>
+                        <button class="btn btn-xs btn-outline" id="btn-open-managed-intake" onclick="window.openManagedIntakeModal()">Run</button>
                       </div>
                       <div class="track-mini-arrow">➜</div>
                       <div class="track-mini-step">
@@ -1533,6 +1533,74 @@
         </div>
         <div class="console-body" id="console-output">
           <div class="console-welcome">[SYSTEM] Live Execution Console Ready. Launch tasks from any pillar to monitor streaming outputs.</div>
+        </div>
+      </div>
+
+      <!-- Managed Device Intake Guidance & Dispatch Modal -->
+      <div class="modal-backdrop" id="modal-managed-intake">
+        <div class="modal-dialog" style="max-width: 580px;">
+          <div class="modal-header">
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <span class="badge badge-xs badge-purple font-mono">Step 050</span>
+              <h3 style="margin: 0; font-size: 1.05rem;">Managed Device Intake & Privacy Split</h3>
+            </div>
+            <button class="btn btn-xs btn-icon btn-close-modal">✕</button>
+          </div>
+          <div class="modal-body">
+            <div style="background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.25); border-radius: 8px; padding: 0.85rem; margin-bottom: 1rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem;">
+                <strong style="color: #c084fc; font-size: 0.88rem;">📲 Quick 2-Step Ingestion:</strong>
+                <button type="button" class="btn btn-xs btn-outline" id="btn-quick-open-image-capture" style="font-size: 0.72rem; padding: 0.2rem 0.5rem;">
+                  🖥️ Open Image Capture
+                </button>
+              </div>
+              <ol style="margin: 0 0 0 1.2rem; padding: 0; font-size: 0.82rem; line-height: 1.55; color: var(--text-secondary);">
+                <li>In <strong>Image Capture</strong>, select your connected iPhone in the sidebar.</li>
+                <li>Set <strong>Import To</strong> to the Priority 4 staging folder below.</li>
+                <li>Select the target month's new photos and click <strong>Download</strong>.</li>
+              </ol>
+            </div>
+
+            <div class="form-group mb-3">
+              <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.25rem;">
+                <label for="managed-intake-path" style="font-size: 0.78rem; font-weight: 600;">Priority 4 Staging Folder:</label>
+                <button type="button" class="btn btn-xs btn-outline" id="btn-reveal-intake-folder" style="font-size: 0.68rem; padding: 0.15rem 0.45rem;">
+                  📂 Reveal in Finder
+                </button>
+              </div>
+              <input type="text" id="managed-intake-path" class="form-control font-mono" style="font-size: 0.76rem;" value="/Volumes/LaCie/Storage/Priority 4/Media Preprocessing/ManagedIntake" />
+              <small class="form-hint" style="font-size: 0.7rem; color: var(--text-muted);">Auto-created if missing. Step 050 will scan, deduplicate against the 205,000+ DB, and route assets.</small>
+            </div>
+
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.8rem;">
+              <div style="flex: 1;">
+                <label for="managed-intake-month" style="font-size: 0.75rem; font-weight: 600;">Target Month:</label>
+                <input type="text" id="managed-intake-month" class="form-control font-mono" style="font-size: 0.76rem;" value="latest" placeholder="latest or YYYY-MM" />
+              </div>
+              <div style="flex: 1.2;">
+                <label for="managed-intake-device" style="font-size: 0.75rem; font-weight: 600;">Device Tag:</label>
+                <input type="text" id="managed-intake-device" class="form-control font-mono" style="font-size: 0.76rem;" value="iPhone 17 Pro Max" />
+              </div>
+            </div>
+
+            <div class="triage-partition-preview" style="gap: 0.4rem;">
+              <div class="partition-tier orange" style="padding: 0.45rem 0.65rem; font-size: 0.76rem;">
+                <strong>Exact Duplicates</strong> ➔ Skipped (0 re-import risk against 205,000+ catalog)
+              </div>
+              <div class="partition-tier purple" style="padding: 0.45rem 0.65rem; font-size: 0.76rem; background: rgba(168, 85, 247, 0.1); border-left: 3px solid #a855f7;">
+                <strong>Private Media / Scans</strong> ➔ Priority 4 ToBeImportedToMBP (Private library)
+              </div>
+              <div class="partition-tier green" style="padding: 0.45rem 0.65rem; font-size: 0.76rem;">
+                <strong>Main Family Media</strong> ➔ Apple Photos "Managed Imports / iPhone 17 Pro Max"
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline btn-close-modal">Cancel</button>
+            <button class="btn btn-primary" id="btn-confirm-managed-intake" style="background: linear-gradient(135deg, #9333ea, #6366f1); border: none;">
+              🚀 Proceed with Intake & Privacy Split
+            </button>
+          </div>
         </div>
       </div>
 
