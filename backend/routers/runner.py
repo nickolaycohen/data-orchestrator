@@ -42,6 +42,13 @@ TASK_DEFINITIONS = {
         "cwd_repo": "media-organizer-pipeline",
         "cmd": ["python3", "scripts/triage_media_intake.py"]
     },
+    "media_managed_intake": {
+        "name": "Managed Device Intake",
+        "pillar": "media-organizer-pipeline",
+        "description": "Pre-flight classification (Main vs Private) and direct album import into Managed Imports.",
+        "cwd_repo": "media-organizer-pipeline",
+        "cmd": ["python3", "scripts/managed_device_intake.py"]
+    },
     "media_verify": {
         "name": "Verify Export Album",
         "pillar": "media-organizer-pipeline",

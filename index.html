@@ -1006,7 +1006,7 @@
                 <div>
                   <h4 style="margin: 0; font-size: 0.88rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                     Track 1: Monthly Batch Ingest Reference (Mode [B])
-                    <span class="badge badge-xs badge-outline font-mono">100 ➜ 200 ➜ 210 ➜ 400 ➜ 600</span>
+                    <span class="badge badge-xs badge-outline font-mono">050 ➜ 100 ➜ 200 ➜ 210 ➜ 400 ➜ 600</span>
                   </h4>
                   <span class="text-muted" style="font-size: 0.72rem;">Manual step triggers &amp; pipeline stage architecture</span>
                 </div>
@@ -1017,6 +1017,15 @@
             </summary>
             <div class="track-1-body" style="padding: 0.75rem 1rem 0.9rem 1rem; border-top: 1px solid var(--border-subtle);">
               <div class="track-1-horizontal-strip">
+                <div class="track-mini-step">
+                  <div class="track-mini-header">
+                    <span class="step-num">050</span>
+                    <strong>Managed Intake</strong>
+                  </div>
+                  <p class="track-mini-desc">Direct import + Privacy split</p>
+                  <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_managed_intake')">Run</button>
+                </div>
+                <div class="track-mini-arrow">➜</div>
                 <div class="track-mini-step">
                   <div class="track-mini-header">
                     <span class="step-num">100</span>
