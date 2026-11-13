@@ -675,53 +675,55 @@
               </div>
             </div>
 
-            <!-- Two-Pane Master Detail: Left = Devices by Owner, Right = Candidates Table -->
+            <!-- Top Controls & Devices Strip + Full-Width Candidates Table -->
             <div class="cleanup-split-container">
-              <!-- Left Pane: Devices Master List -->
+              <!-- Top Pane: Device Filters & Horizontal Device Strip -->
               <div class="cleanup-devices-pane">
-                <div class="cleanup-pane-header">
-                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.55rem;">
-                    <strong style="font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-secondary);" id="cleanup-pane-scope-title">
-                      📱 Active Devices by Owner
-                    </strong>
-                    <span class="badge badge-xs badge-outline font-mono" id="cleanup-device-count-pill">0 Devices</span>
-                  </div>
+                <div class="cleanup-pane-header cleanup-top-filters-header">
+                  <div class="cleanup-top-filters-row">
+                    <div class="cleanup-top-title-group">
+                      <strong style="font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-secondary); white-space: nowrap;" id="cleanup-pane-scope-title">
+                        📱 Active Devices by Owner
+                      </strong>
+                      <span class="badge badge-xs badge-outline font-mono" id="cleanup-device-count-pill">0 Devices</span>
+                    </div>
 
-                  <!-- Family vs. All Owners & Active vs. All Devices Filter Toggles -->
-                  <div class="cleanup-scope-toggle mb-1" id="cleanup-family-scope-toggle">
-                    <button class="cleanup-scope-btn active" data-family-scope="family" id="btn-scope-family">
-                      👨‍👩‍👧‍👦 Family Only <span class="scope-count font-mono" id="scope-count-family">0</span>
-                    </button>
-                    <button class="cleanup-scope-btn" data-family-scope="all" id="btn-scope-owners-all">
-                      🌐 All Owners <span class="scope-count font-mono" id="scope-count-owners-all">0</span>
-                    </button>
-                  </div>
-                  <div class="cleanup-scope-toggle mb-2" id="cleanup-device-scope-toggle">
-                    <button class="cleanup-scope-btn active" data-device-scope="active" id="btn-scope-active">
-                      🟢 Active Devices <span class="scope-count font-mono" id="scope-count-active">2</span>
-                    </button>
-                    <button class="cleanup-scope-btn" data-device-scope="all" id="btn-scope-all">
-                      📚 All Devices <span class="scope-count font-mono" id="scope-count-all">116</span>
-                    </button>
-                  </div>
+                    <!-- Family vs. All Owners & Active vs. All Devices Filter Toggles -->
+                    <div class="cleanup-scope-toggle cleanup-scope-toggle-inline" id="cleanup-family-scope-toggle">
+                      <button class="cleanup-scope-btn active" data-family-scope="family" id="btn-scope-family">
+                        👨‍👩‍👧‍👦 Family Only <span class="scope-count font-mono" id="scope-count-family">0</span>
+                      </button>
+                      <button class="cleanup-scope-btn" data-family-scope="all" id="btn-scope-owners-all">
+                        🌐 All Owners <span class="scope-count font-mono" id="scope-count-owners-all">0</span>
+                      </button>
+                    </div>
+                    <div class="cleanup-scope-toggle cleanup-scope-toggle-inline" id="cleanup-device-scope-toggle">
+                      <button class="cleanup-scope-btn active" data-device-scope="active" id="btn-scope-active">
+                        🟢 Active Devices <span class="scope-count font-mono" id="scope-count-active">2</span>
+                      </button>
+                      <button class="cleanup-scope-btn" data-device-scope="all" id="btn-scope-all">
+                        📚 All Devices <span class="scope-count font-mono" id="scope-count-all">116</span>
+                      </button>
+                    </div>
 
-                  <div class="cleanup-search-bar mb-2">
-                    <input type="text" class="form-control form-control-sm" id="cleanup-device-search" placeholder="Search devices or owners..." />
-                  </div>
-                  <div class="cleanup-owner-filter-chips" id="cleanup-owner-chips">
-                    <button class="cleanup-chip active" data-owner="all">All Owners</button>
+                    <div class="cleanup-search-bar cleanup-search-inline">
+                      <input type="text" class="form-control form-control-sm" id="cleanup-device-search" placeholder="Search devices or owners..." />
+                    </div>
+                    <div class="cleanup-owner-filter-chips" id="cleanup-owner-chips">
+                      <button class="cleanup-chip active" data-owner="all">All Owners</button>
+                    </div>
                   </div>
                 </div>
 
                 <div class="cleanup-devices-list" id="cleanup-devices-list">
-                  <div class="text-muted text-center" style="padding: 2.5rem 1rem; font-size: 0.85rem;">
+                  <div class="text-muted text-center" style="padding: 1.5rem 1rem; font-size: 0.85rem; width: 100%;">
                     <div class="spinner-sm mb-2" style="margin: 0 auto;"></div>
                     Analyzing device quartiles &amp; storage gains...
                   </div>
                 </div>
               </div>
 
-              <!-- Right Pane: Candidates Detail View -->
+              <!-- Main Pane: Full-Width Candidates Detail View -->
               <div class="cleanup-candidates-pane">
                 <div class="cleanup-pane-header">
                   <div class="cleanup-detail-header-row">
@@ -733,7 +735,7 @@
                         <span class="badge badge-xs badge-cyan font-mono" id="cleanup-detail-snapshot-badge" style="display:none;">📲 Snapshot Synced</span>
                       </h4>
                       <p class="cleanup-detail-subtitle" id="cleanup-detail-subtitle">
-                        Click any camera model on the left to inspect its bottom 2 quartiles (Q1 &amp; Q2) ordered by size descending.
+                        Select any camera model above to inspect its bottom 2 quartiles (Q1 &amp; Q2) ordered by size descending.
                       </p>
                     </div>
                     <div class="cleanup-detail-kpis" id="cleanup-detail-kpis" style="display: none;">
@@ -784,10 +786,10 @@
                 <!-- Candidates Table Container -->
                 <div class="cleanup-candidates-table-wrap" id="cleanup-table-wrap">
                   <div class="text-muted text-center" id="cleanup-empty-placeholder" style="padding: 4.5rem 2rem; font-size: 0.9rem;">
-                    <div style="font-size: 2.2rem; margin-bottom: 0.5rem; opacity: 0.5;">👈</div>
+                    <div style="font-size: 2.2rem; margin-bottom: 0.5rem; opacity: 0.5;">👆</div>
                     <strong>No Device Selected</strong>
                     <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.25rem;">
-                      Choose an active device from the left panel to load its candidate files for cleanup.
+                      Choose a device from the strip above to load its candidate files for cleanup.
                     </p>
                   </div>
 

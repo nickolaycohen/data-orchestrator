@@ -2027,36 +2027,20 @@ body {
 }
 
 .cleanup-split-container {
-  display: grid;
-  grid-template-columns: 340px 1fr;
-  height: 680px;
-  max-height: 680px;
+  display: flex;
+  flex-direction: column;
+  height: auto;
   overflow: hidden;
   border-top: 1px solid var(--border-subtle);
   background: rgba(10, 14, 22, 0.4);
 }
 
-@media (max-width: 1024px) {
-  .cleanup-split-container {
-    grid-template-columns: 1fr;
-    height: auto;
-    max-height: none;
-  }
-  .cleanup-devices-pane {
-    max-height: 440px;
-  }
-  .cleanup-candidates-pane {
-    max-height: 680px;
-  }
-}
-
 .cleanup-devices-pane {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  max-height: 680px;
-  min-height: 0;
-  border-right: 1px solid var(--border-subtle);
+  width: 100%;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-subtle);
   background: rgba(13, 17, 26, 0.55);
   overflow: hidden;
 }
@@ -2068,6 +2052,29 @@ body {
   background: rgba(17, 22, 34, 0.5);
 }
 
+.cleanup-top-filters-header {
+  padding: 0.65rem 1rem;
+}
+
+.cleanup-top-filters-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.cleanup-top-title-group {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-right: 0.25rem;
+}
+
+.cleanup-search-inline {
+  width: 210px;
+  min-width: 160px;
+}
+
 /* Segmented Scope Toggle: Active Devices vs. All Devices */
 .cleanup-scope-toggle {
   display: grid;
@@ -2077,6 +2084,13 @@ body {
   background: rgba(8, 11, 18, 0.75);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
+}
+
+.cleanup-scope-toggle-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
 }
 
 .cleanup-scope-btn {
@@ -2116,9 +2130,12 @@ body {
 
 .cleanup-owner-filter-chips {
   display: flex;
+  align-items: center;
   gap: 0.35rem;
+  flex: 1 1 200px;
+  min-width: 160px;
   overflow-x: auto;
-  padding-bottom: 0.2rem;
+  padding-bottom: 0;
   scrollbar-width: thin;
 }
 
@@ -2147,25 +2164,40 @@ body {
 }
 
 .cleanup-devices-list {
-  flex: 1 1 0%;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 0.65rem;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0.85rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.6rem 1rem;
   scrollbar-width: thin;
 }
 
 .cleanup-owner-group {
-  margin-bottom: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0;
+  flex-shrink: 0;
 }
 
 .cleanup-owner-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.35rem 0.5rem;
-  margin-bottom: 0.35rem;
+  gap: 0.5rem;
+  padding: 0.22rem 0.45rem;
+  margin-bottom: 0;
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.cleanup-owner-devices {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0.5rem;
 }
 
 .cleanup-owner-name {
@@ -2181,9 +2213,12 @@ body {
 .cleanup-device-item {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  padding: 0.6rem 0.75rem;
-  margin-bottom: 0.4rem;
+  gap: 0.3rem;
+  min-width: 250px;
+  max-width: 300px;
+  flex-shrink: 0;
+  padding: 0.5rem 0.7rem;
+  margin-bottom: 0;
   background: var(--bg-card);
   border: 1px solid var(--border-card);
   border-radius: var(--radius-sm);
@@ -2257,9 +2292,9 @@ body {
 .cleanup-candidates-pane {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  max-height: 680px;
-  min-height: 0;
+  width: 100%;
+  height: clamp(800px, 78vh, 1120px);
+  min-height: 780px;
   overflow: hidden;
   background: rgba(11, 15, 23, 0.35);
 }
