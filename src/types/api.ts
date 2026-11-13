@@ -118,6 +118,8 @@ export interface CleanupCandidateAsset {
   height: number;
   fps: number;
   notes?: string;
+  duplicate_state?: number;
+  is_duplicate_copy?: boolean;
   actually_on_device?: boolean;
   device_location_filename?: string | null;
   device_match_tier?: string | null;
@@ -176,6 +178,7 @@ export interface PlannerUnassignedCluster {
   folder: string;
   group_type: string;
   asset_count: number;
+  duplicate_copy_count?: number;
   score_span: string;
   max_score: number;
   min_score: number;

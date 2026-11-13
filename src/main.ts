@@ -21,6 +21,8 @@ import {
 let activeExecutionId: string | null = null;
 let activeWebSocket: WebSocket | null = null;
 let mediaMonitorInterval: ReturnType<typeof setInterval> | null = null;
+let lastObservedBgRefreshUtc: string | null = null;
+let lastObservedBgSyncState: string | null = null;
 
 // Initialize on DOM load
 document.addEventListener('DOMContentLoaded', () => {
@@ -864,6 +866,37 @@ async function fetchExecutorMonitor(): Promise<void> {
           bgSyncPill.className = 'badge badge-xs badge-outline';
           bgSyncPill.textContent = '⚠️ Source Drive Offline';
         }
+      }
+
+      // Mirror sync status into Planner bar & auto-refresh planner when background Apple Photos sync completes
+      const plannerSyncPill = document.getElementById('planner-bg-sync-pill');
+      if (plannerSyncPill) {
+        if (bg.sync_state === 'REFRESHING') {
+          plannerSyncPill.style.display = 'inline-flex';
+          plannerSyncPill.className = 'badge badge-xs badge-purple pulse';
+          plannerSyncPill.textContent = '🔄 Syncing Photos changes…';
+        } else if (bg.sync_state === 'SYNC_PENDING') {
+          plannerSyncPill.style.display = 'inline-flex';
+          plannerSyncPill.className = 'badge badge-xs badge-amber';
+          plannerSyncPill.textContent = '⏳ Photos DB changed — sync pending';
+        } else {
+          plannerSyncPill.style.display = 'none';
+        }
+      }
+
+      const currentRefreshUtc = bg.latest_refresh_utc || null;
+      const syncJustCompleted =
+        (lastObservedBgRefreshUtc !== null &&
+          currentRefreshUtc !== null &&
+          currentRefreshUtc !== lastObservedBgRefreshUtc) ||
+        (lastObservedBgSyncState === 'REFRESHING' && bg.sync_state !== 'REFRESHING');
+
+      lastObservedBgRefreshUtc = currentRefreshUtc;
+      lastObservedBgSyncState = bg.sync_state || null;
+
+      if (syncJustCompleted) {
+        fetchPlannerOverview(true);
+        fetchMediaMetrics();
       }
 
       const procEl = document.getElementById('bg-metric-process');

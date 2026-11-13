@@ -11,6 +11,7 @@ let isFetchingPlannerOverview = false;
 let pendingPlannerRefresh = false;
 let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
+let hideDuplicateCopies = false;
 const expandedUnassignedFolders = new Set<string>();
 const clusterPreviewAssetIds = new Map<string, string[]>();
 let hasInitializedUnassignedExpansion = false;
@@ -87,6 +88,17 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
   if (unassignedSearchInput) {
     unassignedSearchInput.addEventListener('input', (e) => {
       unassignedSearchQuery = ((e.target as HTMLInputElement).value || '').trim().toLowerCase();
+      renderUnassignedClustersList();
+    });
+  }
+
+  // Toggle hiding secondary Apple Photos duplicate copies (ZDUPLICATEASSETVISIBILITYSTATE = 1)
+  const btnToggleDupCopies = document.getElementById('btn-toggle-hide-dup-copies');
+  if (btnToggleDupCopies) {
+    btnToggleDupCopies.addEventListener('click', () => {
+      hideDuplicateCopies = !hideDuplicateCopies;
+      btnToggleDupCopies.classList.toggle('btn-purple', hideDuplicateCopies);
+      btnToggleDupCopies.classList.toggle('btn-outline', !hideDuplicateCopies);
       renderUnassignedClustersList();
     });
   }
@@ -599,14 +611,51 @@ function renderUnassignedClustersList(): void {
   if (!listEl) return;
 
   const rawClusters = plannerOverviewData?.mode_m?.unassigned_clusters || [];
+  const totalDupCopies = rawClusters.reduce(
+    (sum, c) => sum + (c.assets || []).filter(a => a.is_duplicate_copy).length,
+    0
+  );
+  const btnToggleDupCopies = document.getElementById('btn-toggle-hide-dup-copies');
+  if (btnToggleDupCopies) {
+    if (totalDupCopies > 0) {
+      btnToggleDupCopies.style.display = 'inline-flex';
+      btnToggleDupCopies.textContent = hideDuplicateCopies
+        ? `♻️ Hiding ${totalDupCopies} Photos Dupes`
+        : `♻️ Hide Photos Dupes (${totalDupCopies})`;
+    } else {
+      btnToggleDupCopies.style.display = 'none';
+    }
+  }
+
   if (!rawClusters.length) {
     listEl.innerHTML = '<div class="text-center text-muted" style="padding: 1rem;">No unassigned high-rank asset clusters found.</div>';
     return;
   }
 
-  let filtered = rawClusters;
+  const normalizedClusters = rawClusters
+    .map(c => {
+      const allAssets = c.assets || [];
+      const dupCount = allAssets.filter(a => a.is_duplicate_copy).length;
+      const visibleAssets = hideDuplicateCopies ? allAssets.filter(a => !a.is_duplicate_copy) : allAssets;
+      const maxScore = visibleAssets.length ? Math.max(...visibleAssets.map(a => a.score_normalized)) : c.max_score;
+      const minScore = visibleAssets.length ? Math.min(...visibleAssets.map(a => a.score_normalized)) : c.min_score;
+      const scoreSpan =
+        visibleAssets.length <= 1 ? maxScore.toFixed(4) : `${maxScore.toFixed(4)} .. ${minScore.toFixed(4)}`;
+      return {
+        ...c,
+        assets: visibleAssets,
+        asset_count: visibleAssets.length,
+        duplicate_copy_count: dupCount,
+        max_score: maxScore,
+        min_score: minScore,
+        score_span: visibleAssets.length ? scoreSpan : c.score_span
+      };
+    })
+    .filter(c => c.assets.length > 0);
+
+  let filtered = normalizedClusters;
   if (unassignedSearchQuery) {
-    filtered = rawClusters.filter(c => {
+    filtered = normalizedClusters.filter(c => {
       if ((c.folder || '').toLowerCase().includes(unassignedSearchQuery)) return true;
       if ((c.group_type || '').toLowerCase().includes(unassignedSearchQuery)) return true;
       if ((c.months || '').toLowerCase().includes(unassignedSearchQuery)) return true;
@@ -636,7 +685,9 @@ function renderUnassignedClustersList(): void {
   });
 
   if (!sorted.length) {
-    listEl.innerHTML = `<div class="text-center text-muted" style="padding: 1rem;">No clusters match "${escapeHtml(unassignedSearchQuery)}".</div>`;
+    listEl.innerHTML = unassignedSearchQuery
+      ? `<div class="text-center text-muted" style="padding: 1rem;">No clusters match "${escapeHtml(unassignedSearchQuery)}".</div>`
+      : '<div class="text-center text-muted" style="padding: 1rem;">All visible assets in these clusters are secondary Photos duplicate copies.</div>';
     return;
   }
 
@@ -721,12 +772,16 @@ function renderUnassignedClustersList(): void {
             ? `<button class="btn btn-xs btn-outline btn-cleanup-preview" data-asset-id="${escapeHtml(a.asset_id)}" title="Preview full asset">👁️ Preview</button>`
             : `<span class="text-muted">—</span>`;
 
+          const dupBadgeHtml = a.is_duplicate_copy
+            ? `<span class="badge badge-xs badge-amber" style="font-size: 0.58rem; margin-left: 0.3rem;" title="Flagged as secondary duplicate copy in Apple Photos (ZDUPLICATEASSETVISIBILITYSTATE = 1)">♻️ Dup Copy</span>`
+            : '';
+
           return `
         <tr>
           <td class="text-muted font-mono" style="width: 28px;">${aIdx + 1}</td>
           <td style="width: 56px;">${thumbCell}</td>
           <td>
-            <div class="font-mono" style="font-weight: 600; color: var(--text-primary); font-size: 0.75rem;">${escapeHtml(a.original_filename)}</div>
+            <div class="font-mono" style="font-weight: 600; color: var(--text-primary); font-size: 0.75rem;">${escapeHtml(a.original_filename)}${dupBadgeHtml}</div>
             <div class="font-mono text-muted" style="font-size: 0.65rem;">
               ${escapeHtml([resStr, devStr].filter(Boolean).join(' · ') || a.month)}
             </div>
@@ -755,6 +810,11 @@ function renderUnassignedClustersList(): void {
                 <span class="unassigned-cluster-folder">📁 ${escapeHtml(cluster.folder)}</span>
                 <span class="badge badge-xs ${sizeBadgeClass} font-mono">${count} asset${count === 1 ? '' : 's'}</span>
                 <span class="badge badge-xs ${typeBadgeClass}" style="font-size: 0.64rem;">${escapeHtml(cluster.group_type)}</span>
+                ${
+                  !hideDuplicateCopies && (cluster.duplicate_copy_count || 0) > 0
+                    ? `<span class="badge badge-xs badge-amber font-mono" style="font-size: 0.62rem;" title="Secondary duplicate copies detected by Apple Photos (merge via Photos -> Duplicates)">♻️ ${cluster.duplicate_copy_count} Photos Dupes</span>`
+                    : ''
+                }
               </div>
               <div class="unassigned-cluster-meta-row font-mono">
                 <span>Score: <strong class="text-amber">${escapeHtml(cluster.score_span)}</strong></span>

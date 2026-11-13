@@ -1911,14 +1911,16 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     )
     excluded_aids = {r[0] for r in cur.fetchall()}
 
-    # 1. Dynamic threshold: top unassigned score among batches >= 600
+    # 1. Dynamic threshold: top unassigned score among batches >= 600 (excluding trashed)
     cur.execute(
         """
         SELECT v.asset_id, v.score_normalized
         FROM ranked_assets_view v
         JOIN month_batches mb ON v.month = mb.month
+        LEFT JOIN ZASSET za ON za.ZUUID = v.asset_id
         WHERE mb.status_code >= '600'
           AND (v.MomentsAlbumName IS NULL OR v.MomentsAlbumName = '')
+          AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
         ORDER BY v.score_normalized DESC
         LIMIT 250
         """
@@ -1954,7 +1956,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2),
             COALESCE(aaa.ZORIGINALFILESIZE, 0),
             COALESCE(ze.ZCAMERAMODEL, ast.carrier_device, 'Unknown'),
-            COALESCE(do.owner_name, 'Shared/Other')
+            COALESCE(do.owner_name, 'Shared/Other'),
+            COALESCE(za.ZDUPLICATEASSETVISIBILITYSTATE, 0)
         FROM ranked_assets_view v
         JOIN month_batches mb ON v.month = mb.month
         JOIN assets ast ON ast.asset_id = v.asset_id
@@ -1966,6 +1969,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
         WHERE mb.status_code >= '600'
           AND (v.MomentsAlbumName IS NULL OR v.MomentsAlbumName = '')
+          AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
           AND v.score_normalized > ?
         ORDER BY v.score_normalized DESC
         """,
@@ -2012,7 +2016,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     grouped_moments = {}
     for (
         aid, fn, score, month, dt_utc_str, imp_id, lat, lon,
-        zkind, dur_sec, width, height, fps, size_mb, size_bytes, cam_model, owner_name
+        zkind, dur_sec, width, height, fps, size_mb, size_bytes, cam_model, owner_name, dup_state
     ) in unassigned_rows:
         captured_str = _utc_to_local_str(dt_utc_str)
         captured_date = captured_str[:10] if captured_str != "—" else ((dt_utc_str or "")[:10] or month)
@@ -2079,6 +2083,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         grp["min_score"] = min(grp["min_score"], score)
         grp["months"].add(month)
         is_vid = zkind == 1 or (fn or "").lower().endswith((".mov", ".mp4", ".m4v", ".avi", ".mpg"))
+        dup_val = int(dup_state or 0)
         grp["assets"].append({
             "asset_id": aid,
             "original_filename": fn or "—",
@@ -2097,6 +2102,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             "primary_owner": owner_name or "Shared/Other",
             "assigned_moment": f"Proposed: {group_folder}",
             "notes": ", ".join(extra_notes),
+            "duplicate_state": dup_val,
+            "is_duplicate_copy": dup_val == 1,
         })
 
     # Rank clusters cleanly and format fields expected by frontend
@@ -2109,6 +2116,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         cnt = len(grp["assets"])
         grp["orig_rank"] = idx
         grp["asset_count"] = cnt
+        grp["duplicate_copy_count"] = sum(1 for a in grp["assets"] if a.get("is_duplicate_copy"))
         grp["months"] = ", ".join(sorted(grp["months"]))
         grp["score_span"] = f"{grp['max_score']:.4f}" if cnt == 1 else f"{grp['max_score']:.4f} .. {grp['min_score']:.4f}"
         unassigned_clusters.append(grp)
