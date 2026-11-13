@@ -63,6 +63,20 @@ TASK_DEFINITIONS = {
         "cwd_repo": "media-organizer-pipeline",
         "cmd": ["python3", "scripts/deduplicate_assets.py"]
     },
+    "media_create_moments": {
+        "name": "Sync ToBeCurated Moments (Option [1])",
+        "pillar": "media-organizer-pipeline",
+        "description": "Synchronizes qualified assets into ToBeCurated albums in Apple Photos (Option [1]).",
+        "cwd_repo": "media-organizer-pipeline",
+        "cmd": ["python3", "-u", "scripts/create_apple_moments_albums.py"]
+    },
+    "media_pipeline_planner": {
+        "name": "Media Pipeline Planner CLI",
+        "pillar": "media-organizer-pipeline",
+        "description": "Runs the Media Organizer pipeline planner script.",
+        "cwd_repo": "media-organizer-pipeline",
+        "cmd": ["python3", "-u", "scripts/pipeline_planner.py"]
+    },
     "drive_audit": {
         "name": "Drive Audit Finder & Classifier",
         "pillar": "drive-audit-cli",
