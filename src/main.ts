@@ -1857,69 +1857,108 @@ window.triggerTask = async function (
   }
 };
 
+let activePollInterval: any = null;
+
 function connectWebSocket(executionId: string): void {
   if (activeWebSocket) {
-    activeWebSocket.close();
+    try { activeWebSocket.close(); } catch {}
+    activeWebSocket = null;
+  }
+  if (activePollInterval) {
+    clearInterval(activePollInterval);
+    activePollInterval = null;
   }
 
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/ws/${executionId}`;
+  const renderedLogs = new Set<string>();
 
-  activeWebSocket = new WebSocket(wsUrl);
-
-  activeWebSocket.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      if (data.type === 'log') {
-        if (activeTaskCallbacks.openConsole) {
-          appendConsoleLog(data.text);
-        }
-        if (activeTaskCallbacks.onLog) {
-          activeTaskCallbacks.onLog(data.text);
-        }
-        const match = data.text && data.text.match(/\[COMPLETED\] Process exited with code (\d+)/);
-        if (match) {
-          const code = parseInt(match[1], 10);
-          if (activeTaskCallbacks.openConsole) {
-            const btnKill = document.getElementById('btn-kill-task');
-            const badgeActive = document.getElementById('active-task-badge');
-            const label = document.getElementById('console-task-label');
-            if (btnKill) btnKill.style.display = 'none';
-            if (badgeActive) badgeActive.style.display = 'none';
-            if (label) label.textContent = 'Completed';
-          }
-          if (activeTaskCallbacks.onDone) {
-            activeTaskCallbacks.onDone(code);
-          }
-        }
-      } else if (data.type === 'done') {
-        if (activeTaskCallbacks.openConsole) {
-          appendConsoleLog(`\n[COMPLETE] Task finished with exit code ${data.exit_code}\n`);
-          const btnKill = document.getElementById('btn-kill-task');
-          const badgeActive = document.getElementById('active-task-badge');
-          const label = document.getElementById('console-task-label');
-          if (btnKill) btnKill.style.display = 'none';
-          if (badgeActive) badgeActive.style.display = 'none';
-          if (label) label.textContent = 'Completed';
-        }
-        if (activeTaskCallbacks.onDone) {
-          activeTaskCallbacks.onDone(data.exit_code);
-        }
-        fetchAllMetrics();
-      }
-    } catch {
-      if (activeTaskCallbacks.openConsole) {
-        appendConsoleLog(event.data);
-      }
-      if (activeTaskCallbacks.onLog) {
-        activeTaskCallbacks.onLog(event.data);
-      }
+  const appendUniqueLog = (text: string) => {
+    if (!text || renderedLogs.has(text)) return;
+    renderedLogs.add(text);
+    if (activeTaskCallbacks.openConsole) {
+      appendConsoleLog(text);
+    }
+    if (activeTaskCallbacks.onLog) {
+      activeTaskCallbacks.onLog(text);
     }
   };
 
-  activeWebSocket.onerror = (err) => {
-    console.error('WebSocket error:', err);
+  const handleTaskDone = (exitCode: number) => {
+    if (activePollInterval) {
+      clearInterval(activePollInterval);
+      activePollInterval = null;
+    }
+    if (activeWebSocket) {
+      try { activeWebSocket.close(); } catch {}
+      activeWebSocket = null;
+    }
+    if (activeTaskCallbacks.openConsole) {
+      const btnKill = document.getElementById('btn-kill-task');
+      const badgeActive = document.getElementById('active-task-badge');
+      const label = document.getElementById('console-task-label');
+      if (btnKill) btnKill.style.display = 'none';
+      if (badgeActive) badgeActive.style.display = 'none';
+      if (label) label.textContent = exitCode === 0 ? 'Completed' : `Failed (${exitCode})`;
+    }
+    if (activeTaskCallbacks.onDone) {
+      activeTaskCallbacks.onDone(exitCode);
+    }
+    fetchAllMetrics();
   };
+
+  // 1. Robust polling fallback (every 350ms) guarantees logs stream even if WebSocket is blocked or fast-exits
+  activePollInterval = setInterval(async () => {
+    try {
+      const [logsRes, statusRes] = await Promise.all([
+        fetch(`/api/runner/logs/${executionId}`),
+        fetch(`/api/runner/status/${executionId}`)
+      ]);
+      if (logsRes.ok) {
+        const data = await logsRes.json();
+        const logs: string[] = data.logs || [];
+        for (const line of logs) {
+          appendUniqueLog(line);
+        }
+      }
+      if (statusRes.ok) {
+        const sdata = await statusRes.json();
+        if (!sdata.running && sdata.exit_code !== null) {
+          handleTaskDone(sdata.exit_code);
+        }
+      }
+    } catch {
+      // Ignore intermittent poll errors
+    }
+  }, 350);
+
+  // 2. Parallel WebSocket connection for ultra-low latency when available
+  try {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/${executionId}`;
+    activeWebSocket = new WebSocket(wsUrl);
+
+    activeWebSocket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'log') {
+          appendUniqueLog(data.text);
+          const match = data.text && data.text.match(/\[COMPLETED\] Process exited with code (\d+)/);
+          if (match) {
+            handleTaskDone(parseInt(match[1], 10));
+          }
+        } else if (data.type === 'done') {
+          handleTaskDone(data.exit_code);
+        }
+      } catch {
+        appendUniqueLog(event.data);
+      }
+    };
+
+    activeWebSocket.onerror = (err) => {
+      console.warn('WebSocket error, falling back to HTTP log polling:', err);
+    };
+  } catch (err) {
+    console.warn('WebSocket initialization failed, using polling:', err);
+  }
 }
 
 function appendConsoleLog(text: string): void {
