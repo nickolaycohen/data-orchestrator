@@ -2647,7 +2647,7 @@ body {
 
 .cleanup-preview-stage {
   width: 100%;
-  height: clamp(260px, 44vh, 380px);
+  height: clamp(240px, 40vh, 360px);
   background: #05070c;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -2721,6 +2721,28 @@ body {
   font-size: 0.72rem;
 }
 
+.cleanup-preview-series-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.9rem;
+  font-size: 0.69rem;
+  color: var(--text-secondary);
+}
+
+.cleanup-preview-series-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.14rem 0.48rem;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  color: var(--text-secondary);
+}
+
 .cleanup-preview-filmstrip {
   display: flex;
   align-items: center;
@@ -2754,20 +2776,21 @@ body {
 .cleanup-preview-thumb-item {
   position: relative;
   flex: 0 0 auto;
-  width: 68px;
-  height: 50px;
+  width: 88px;
+  display: flex;
+  flex-direction: column;
   border-radius: 6px;
   overflow: hidden;
   border: 2px solid rgba(255, 255, 255, 0.1);
   background: #080c15;
   padding: 0;
   cursor: pointer;
-  opacity: 0.7;
+  opacity: 0.75;
   transition: border-color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
 }
 
 .cleanup-preview-thumb-item:hover {
-  opacity: 0.96;
+  opacity: 0.98;
   border-color: rgba(167, 139, 250, 0.55);
 }
 
@@ -2777,11 +2800,38 @@ body {
   box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.32);
 }
 
-.cleanup-preview-thumb-item img {
+.cleanup-preview-thumb-media {
+  position: relative;
+  width: 100%;
+  height: 48px;
+  background: #05070c;
+  overflow: hidden;
+}
+
+.cleanup-preview-thumb-media img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.cleanup-preview-thumb-caption {
+  width: 100%;
+  padding: 0.16rem 0.3rem;
+  background: rgba(10, 14, 24, 0.92);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  line-height: 1.25;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cleanup-preview-thumb-item.active .cleanup-preview-thumb-caption {
+  color: #f8fafc;
+  background: rgba(124, 92, 255, 0.28);
 }
 
 .cleanup-preview-thumb-idx {

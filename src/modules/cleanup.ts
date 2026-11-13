@@ -997,15 +997,55 @@ function navigateCleanupPreview(delta: number): void {
   updatePreviewGroupControls();
 }
 
+function formatSeriesTimeRange(assetIds: string[]): string | null {
+  const timestamps: string[] = [];
+  for (const aid of assetIds) {
+    const meta = candidateAssetMeta.get(aid);
+    const ts = (meta?.capture_timestamp || meta?.date_created_utc || '').trim();
+    if (ts && ts !== '—') {
+      timestamps.push(ts);
+    }
+  }
+  if (timestamps.length === 0) return null;
+  timestamps.sort();
+  const earliest = timestamps[0];
+  const latest = timestamps[timestamps.length - 1];
+  if (earliest === latest) return earliest;
+  const eDate = earliest.slice(0, 10);
+  const lDate = latest.slice(0, 10);
+  if (eDate && eDate === lDate && earliest.length >= 19 && latest.length >= 19) {
+    return `${eDate} · ${earliest.slice(11, 19)} – ${latest.slice(11, 19)}`;
+  }
+  return `${earliest.slice(0, 16)} → ${latest.slice(0, 16)}`;
+}
+
+function formatSeriesFilenamesSummary(assetIds: string[]): string | null {
+  const uniqueNames = new Set<string>();
+  for (const aid of assetIds) {
+    const fn = candidateAssetMeta.get(aid)?.original_filename;
+    if (fn) uniqueNames.add(fn);
+  }
+  if (uniqueNames.size === 0) return null;
+  const sortedNames = Array.from(uniqueNames).sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+  );
+  if (sortedNames.length <= 3) {
+    return sortedNames.join(', ');
+  }
+  return `${sortedNames[0]} … ${sortedNames[sortedNames.length - 1]}`;
+}
+
 function renderPreviewFilmstrip(): void {
   const stripWrap = document.getElementById('cleanup-preview-filmstrip-wrap');
   const strip = document.getElementById('cleanup-preview-filmstrip');
   const labelEl = document.getElementById('cleanup-preview-group-label');
+  const seriesMetaEl = document.getElementById('cleanup-preview-series-meta');
   if (!stripWrap || !strip) return;
 
   if (previewGroupAssetIds.length <= 1) {
     stripWrap.style.display = 'none';
     strip.innerHTML = '';
+    if (seriesMetaEl) seriesMetaEl.innerHTML = '';
     return;
   }
 
@@ -1016,18 +1056,36 @@ function renderPreviewFilmstrip(): void {
       : `Group (${previewGroupAssetIds.length} assets)`;
   }
 
+  if (seriesMetaEl) {
+    const timeRange = formatSeriesTimeRange(previewGroupAssetIds);
+    const filenameRange = formatSeriesFilenamesSummary(previewGroupAssetIds);
+    const chips: string[] = [];
+    if (timeRange) {
+      chips.push(`<span class="cleanup-preview-series-chip" title="Capture time range across series">🕒 ${escapeHtml(timeRange)}</span>`);
+    }
+    if (filenameRange) {
+      chips.push(`<span class="cleanup-preview-series-chip" title="Filename span across series">📄 ${escapeHtml(filenameRange)}</span>`);
+    }
+    seriesMetaEl.innerHTML = chips.join('');
+  }
+
   strip.innerHTML = previewGroupAssetIds
     .map((aid, idx) => {
       const meta = candidateAssetMeta.get(aid);
       const isVideo = meta?.media_type === 'video';
       const thumbUrl = `/api/media/cleanup/thumbnail/${encodeURIComponent(aid)}`;
       const filename = meta?.original_filename || aid;
+      const captureTs = (meta?.capture_timestamp || meta?.date_created_utc || '').trim();
       const scoreLabel = typeof meta?.score_normalized === 'number' ? ` · ${meta.score_normalized.toFixed(4)}` : '';
+      const tooltipParts = [`#${idx + 1} ${filename}`, captureTs ? captureTs : '', scoreLabel].filter(Boolean).join(' ');
       return `
-        <button type="button" class="cleanup-preview-thumb-item${idx === previewGroupIndex ? ' active' : ''}" data-preview-index="${idx}" title="#${idx + 1} ${escapeHtml(filename)}${escapeHtml(scoreLabel)}">
-          <img src="${thumbUrl}" loading="lazy" alt="${escapeHtml(filename)}" onerror="this.style.display='none'" />
-          <span class="cleanup-preview-thumb-idx">#${idx + 1}</span>
-          ${isVideo ? '<span class="cleanup-preview-thumb-play">▶</span>' : ''}
+        <button type="button" class="cleanup-preview-thumb-item${idx === previewGroupIndex ? ' active' : ''}" data-preview-index="${idx}" title="${escapeHtml(tooltipParts)}">
+          <div class="cleanup-preview-thumb-media">
+            <img src="${thumbUrl}" loading="lazy" alt="${escapeHtml(filename)}" onerror="this.style.display='none'" />
+            <span class="cleanup-preview-thumb-idx">#${idx + 1}</span>
+            ${isVideo ? '<span class="cleanup-preview-thumb-play">▶</span>' : ''}
+          </div>
+          <span class="cleanup-preview-thumb-caption">${escapeHtml(filename)}</span>
         </button>
       `;
     })
@@ -1200,6 +1258,10 @@ export function closeCleanupPreviewModal(): void {
   const strip = document.getElementById('cleanup-preview-filmstrip');
   if (strip) {
     strip.innerHTML = '';
+  }
+  const seriesMetaEl = document.getElementById('cleanup-preview-series-meta');
+  if (seriesMetaEl) {
+    seriesMetaEl.innerHTML = '';
   }
   const stripWrap = document.getElementById('cleanup-preview-filmstrip-wrap');
   if (stripWrap) {
