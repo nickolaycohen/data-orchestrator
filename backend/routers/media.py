@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import math
 import json
 import time
 import errno
@@ -1730,146 +1731,650 @@ def mark_cleanup_assets_removed(req: MarkRemovedRequest):
         return {"ok": False, "error": str(e)}
 
 
-def _parse_mode_m_logs(log_dir: Path):
-    """Parse publishing_recommendations.log, publishing_candidates.log, and curation_threshold_status.log."""
+def _load_photos_moment_titles(asset_ids: list[str]) -> dict:
+    """Loads Apple Photos ZMOMENT title/subtitle for asset UUIDs from the local unlocked replica if present."""
+    if not asset_ids:
+        return {}
+    replica_candidates = [
+        Path("/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite"),
+        Path("/Volumes/Macintosh HD/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite"),
+    ]
+    replica_path = next((p for p in replica_candidates if p.exists()), None)
+    if not replica_path:
+        return {}
+
+    result = {}
+    try:
+        rconn = sqlite3.connect(f"file:{replica_path}?mode=ro&immutable=1", uri=True, timeout=3)
+        try:
+            rcur = rconn.cursor()
+            chunk_size = 450
+            for i in range(0, len(asset_ids), chunk_size):
+                chunk = asset_ids[i:i + chunk_size]
+                ph = ",".join("?" for _ in chunk)
+                rcur.execute(
+                    f"""
+                    SELECT a.ZUUID, m.ZTITLE, m.ZSUBTITLE
+                    FROM ZASSET a
+                    JOIN ZMOMENT m ON a.ZMOMENT = m.Z_PK
+                    WHERE a.ZUUID IN ({ph})
+                    """,
+                    chunk,
+                )
+                for uuid_val, title, subtitle in rcur.fetchall():
+                    if title or subtitle:
+                        result[uuid_val] = (title, subtitle)
+        finally:
+            rconn.close()
+    except Exception:
+        pass
+    return result
+
+
+def _parse_utc_dt(dt_str: Optional[str]) -> Optional[datetime]:
+    if not dt_str:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(dt_str.split(".")[0] if fmt == "%Y-%m-%d %H:%M:%S" else dt_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _utc_to_local_str(dt_str: Optional[str]) -> str:
+    dt_utc = _parse_utc_dt(dt_str)
+    if dt_utc:
+        try:
+            return dt_utc.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    return (dt_str or "—")[:19]
+
+
+def _extract_file_num(fname: Optional[str]) -> Optional[int]:
+    if not fname:
+        return None
+    m = re.search(r"(\d+)(?=\.[^.]+$|$)", fname)
+    return int(m.group(1)) if m else None
+
+
+def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1 - a)))
+
+
+def _match_closest_existing_moment(
+    fn: str,
+    dt_target: Optional[datetime],
+    imp_id,
+    lat: Optional[float],
+    lon: Optional[float],
+    assigned_by_import: dict,
+    assigned_with_gps: list,
+    assigned_all: list,
+):
+    """Finds nearest existing Moments album by import session, GPS, and timestamp proximity."""
+    if not dt_target:
+        return None
+    target_num = _extract_file_num(fn)
+    has_gps = lat is not None and lon is not None and lat != -180.0 and lon != -180.0
+    candidates = []
+
+    def _fmt_time_diff(sec: float) -> str:
+        if sec < 60:
+            return f"{int(sec)}s apart"
+        if sec < 3600:
+            return f"{sec / 60:.0f}m apart"
+        if sec < 86400:
+            return f"{sec / 3600:.1f}h apart"
+        return f"{sec / 86400:.1f}d apart"
+
+    # 1. Same import session proximity
+    if imp_id and imp_id in assigned_by_import:
+        best_imp = None
+        for m_alb, m_fn, m_dt, m_lat, m_lon in assigned_by_import[imp_id]:
+            diff_sec = abs((dt_target - m_dt).total_seconds())
+            is_dated = bool(re.match(r"^\d{4}(?:-\d{2})?(?:-\d{2})?\s*-\s*", m_alb))
+            if is_dated and diff_sec > 14 * 86400:
+                continue
+            m_num = _extract_file_num(m_fn)
+            fn_diff = abs(target_num - m_num) if (target_num is not None and m_num is not None) else None
+            fn_bonus = max(0.0, 10.0 - fn_diff * 0.5) if (fn_diff is not None and fn_diff <= 20) else 0.0
+            score = 10.0 + min(30.0, (diff_sec / 3600.0) * 2.0) - fn_bonus
+            reasons = [f"same import session {imp_id}"]
+            if fn_diff is not None and fn_diff <= 20:
+                reasons.append(f"frame {m_fn} (Δ{fn_diff})")
+            reasons.append(_fmt_time_diff(diff_sec))
+            if has_gps and m_lat is not None and m_lon is not None:
+                dist = _haversine_meters(lat, lon, m_lat, m_lon)
+                if dist < 50:
+                    score -= 8.0
+                    reasons.append(f"GPS {dist:.0f}m")
+                elif dist < 500:
+                    score -= 4.0
+                    reasons.append(f"GPS {dist:.0f}m")
+            if best_imp is None or score < best_imp[0]:
+                best_imp = (score, m_alb, ", ".join(reasons))
+        if best_imp:
+            candidates.append(best_imp)
+
+    # 2. GPS proximity (<1000m, within 14d for dated albums)
+    if has_gps:
+        best_gps = None
+        for m_alb, m_dt, m_lat, m_lon in assigned_with_gps:
+            if abs(m_lat - lat) >= 0.02 or abs(m_lon - lon) >= 0.02:
+                continue
+            diff_sec = abs((dt_target - m_dt).total_seconds())
+            is_dated = bool(re.match(r"^\d{4}(?:-\d{2})?(?:-\d{2})?\s*-\s*", m_alb))
+            if is_dated and diff_sec > 14 * 86400:
+                continue
+            dist = _haversine_meters(lat, lon, m_lat, m_lon)
+            if dist < 1000:
+                score = 15.0 + (dist / 100.0) + min(40.0, (diff_sec / 3600.0) * 1.5)
+                if best_gps is None or score < best_gps[0]:
+                    best_gps = (score, m_alb, f"GPS {dist:.0f}m, {_fmt_time_diff(diff_sec)}")
+        if best_gps:
+            candidates.append(best_gps)
+
+    # 3. Tight timestamp proximity (<4h)
+    best_time = None
+    for m_alb, m_dt in assigned_all:
+        diff_sec = abs((dt_target - m_dt).total_seconds())
+        if diff_sec < 4 * 3600:
+            score = 20.0 + (diff_sec / 3600.0) * 5.0
+            if best_time is None or score < best_time[0]:
+                best_time = (score, m_alb, _fmt_time_diff(diff_sec))
+    if best_time:
+        candidates.append(best_time)
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0][1], candidates[0][2]
+
+
+def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str]) -> dict:
+    """Computes live Mode [M] thresholds, unassigned high-rank clusters, sync needs, and recommendations from SQLite."""
+    # Excluded assets in Ignore / SkipPublishing / TopScore Excluded albums
+    cur.execute(
+        """
+        SELECT DISTINCT moaa.asset_id
+        FROM media_organizer_album_assets moaa
+        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+        """
+    )
+    excluded_aids = {r[0] for r in cur.fetchall()}
+
+    # 1. Dynamic threshold: top unassigned score among batches >= 600
+    cur.execute(
+        """
+        SELECT v.asset_id, v.score_normalized
+        FROM ranked_assets_view v
+        JOIN month_batches mb ON v.month = mb.month
+        WHERE mb.status_code >= '600'
+          AND (v.MomentsAlbumName IS NULL OR v.MomentsAlbumName = '')
+        ORDER BY v.score_normalized DESC
+        LIMIT 250
+        """
+    )
+    live_curr_th = None
+    for aid, sc in cur.fetchall():
+        if aid not in excluded_aids and sc is not None:
+            live_curr_th = float(sc)
+            break
+
+    hist_min_raw = db_hist_min if db_hist_min > 0 else 0.5315
+    curr_thresh = round(live_curr_th, 4) if live_curr_th is not None else round(hist_min_raw, 4)
+    hist_min = round(hist_min_raw, 4)
+    threshold_aligned = (live_curr_th is None) or (live_curr_th <= hist_min_raw + 1e-6)
+
+    # 2. Live Unassigned High-Rank Assets > historical_min
+    cur.execute(
+        """
+        SELECT
+            v.asset_id,
+            v.original_filename,
+            ROUND(v.score_normalized, 4),
+            v.month,
+            v.date_created_utc,
+            ast.import_id,
+            za.ZLATITUDE,
+            za.ZLONGITUDE,
+            COALESCE(za.ZKIND, 0),
+            ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
+            COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
+            COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
+            ROUND(COALESCE(ze.ZFPS, 0.0), 1),
+            ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2),
+            COALESCE(aaa.ZORIGINALFILESIZE, 0),
+            COALESCE(ze.ZCAMERAMODEL, ast.carrier_device, 'Unknown'),
+            COALESCE(do.owner_name, 'Shared/Other')
+        FROM ranked_assets_view v
+        JOIN month_batches mb ON v.month = mb.month
+        JOIN assets ast ON ast.asset_id = v.asset_id
+        LEFT JOIN ZASSET za ON za.ZUUID = v.asset_id
+        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+        LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+        LEFT JOIN device_owners do ON do.camera_model = COALESCE(ast.carrier_device, ze.ZCAMERAMODEL)
+            AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+            AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+        WHERE mb.status_code >= '600'
+          AND (v.MomentsAlbumName IS NULL OR v.MomentsAlbumName = '')
+          AND v.score_normalized > ?
+        ORDER BY v.score_normalized DESC
+        """,
+        (hist_min_raw,),
+    )
+    unassigned_rows = [r for r in cur.fetchall() if r[0] not in excluded_aids]
+
+    cur.execute("SELECT DISTINCT album_name FROM moments WHERE parent_folder_name = 'Moments'")
+    valid_moment_albums = {r[0] for r in cur.fetchall() if r[0]}
+
+    moment_titles = _load_photos_moment_titles([r[0] for r in unassigned_rows])
+
+    # Preload assigned assets index once for fast proximity matching
+    assigned_by_import = {}
+    assigned_with_gps = []
+    assigned_all = []
+    if unassigned_rows:
+        cur.execute(
+            """
+            SELECT a.MomentsAlbumName, a.original_filename, a.date_created_utc, a.import_id,
+                   za.ZLATITUDE, za.ZLONGITUDE
+            FROM assets a
+            LEFT JOIN ZASSET za ON a.asset_id = za.ZUUID
+            WHERE a.MomentsAlbumName IS NOT NULL AND a.MomentsAlbumName != ''
+              AND LOWER(a.MomentsAlbumName) NOT IN ('ignore', 'skippublishing', 'topscore excluded')
+              AND COALESCE(a.removed_from_source, 0) = 0
+            """
+        )
+        for m_alb, m_fn, m_dt_str, imp_id, m_lat, m_lon in cur.fetchall():
+            if valid_moment_albums and m_alb not in valid_moment_albums:
+                continue
+            m_dt = _parse_utc_dt(m_dt_str)
+            if not m_dt:
+                continue
+            valid_gps = m_lat is not None and m_lon is not None and m_lat != -180.0 and m_lon != -180.0
+            if imp_id:
+                assigned_by_import.setdefault(imp_id, []).append(
+                    (m_alb, m_fn, m_dt, m_lat if valid_gps else None, m_lon if valid_gps else None)
+                )
+            if valid_gps:
+                assigned_with_gps.append((m_alb, m_dt, m_lat, m_lon))
+            assigned_all.append((m_alb, m_dt))
+
+    grouped_moments = {}
+    for (
+        aid, fn, score, month, dt_utc_str, imp_id, lat, lon,
+        zkind, dur_sec, width, height, fps, size_mb, size_bytes, cam_model, owner_name
+    ) in unassigned_rows:
+        captured_str = _utc_to_local_str(dt_utc_str)
+        captured_date = captured_str[:10] if captured_str != "—" else ((dt_utc_str or "")[:10] or month)
+
+        m_title, m_subtitle = moment_titles.get(aid, (None, None))
+        moment_parts = []
+        if m_title:
+            moment_parts.append(m_title.replace("\xa0", " ").strip())
+        if m_subtitle:
+            moment_parts.append(m_subtitle.replace("\xa0", " ").strip())
+        suggested_new = f"{captured_date} - {' - '.join(moment_parts)}" if moment_parts else None
+
+        dt_target = _parse_utc_dt(dt_utc_str)
+        closest = _match_closest_existing_moment(
+            fn, dt_target, imp_id, lat, lon, assigned_by_import, assigned_with_gps, assigned_all
+        )
+        best_album_name, best_reason = closest if closest else (None, None)
+
+        is_tight_existing = bool(
+            best_album_name and (
+                not suggested_new
+                or "inside event span" in (best_reason or "")
+                or "s apart" in (best_reason or "")
+                or "m apart" in (best_reason or "")
+                or "h apart" in (best_reason or "")
+            )
+        )
+        if is_tight_existing:
+            group_folder = best_album_name
+            group_type = "Existing Moment Album"
+        elif suggested_new:
+            group_folder = suggested_new
+            group_type = "Existing Moment Album" if suggested_new in valid_moment_albums else "Proposed New Moment"
+        elif best_album_name:
+            group_folder = best_album_name
+            group_type = "Existing Moment Album"
+        else:
+            group_folder = f"{captured_date} - Uncategorized ({month})"
+            group_type = "Date Cluster (Needs Moment Name)"
+
+        extra_notes = []
+        if best_album_name:
+            if group_folder == best_album_name:
+                extra_notes.append(f"Match: {best_reason}")
+            else:
+                extra_notes.append(f'Nearest Existing: "{best_album_name}" [{best_reason}]')
+        if suggested_new and group_folder.lower() != suggested_new.lower():
+            extra_notes.append(f"Photos Moment: {suggested_new}")
+
+        if group_folder not in grouped_moments:
+            grouped_moments[group_folder] = {
+                "orig_rank": 0,
+                "folder": group_folder,
+                "group_type": group_type,
+                "asset_count": 0,
+                "score_span": f"{score:.4f}",
+                "max_score": score,
+                "min_score": score,
+                "months": set(),
+                "assets": [],
+            }
+        grp = grouped_moments[group_folder]
+        grp["max_score"] = max(grp["max_score"], score)
+        grp["min_score"] = min(grp["min_score"], score)
+        grp["months"].add(month)
+        is_vid = zkind == 1 or (fn or "").lower().endswith((".mov", ".mp4", ".m4v", ".avi", ".mpg"))
+        grp["assets"].append({
+            "asset_id": aid,
+            "original_filename": fn or "—",
+            "score_normalized": float(score),
+            "capture_timestamp": captured_str,
+            "date_created_utc": dt_utc_str or captured_str,
+            "month": month,
+            "media_type": "video" if is_vid else "photo",
+            "duration_sec": float(dur_sec or 0.0),
+            "width": int(width or 0),
+            "height": int(height or 0),
+            "fps": float(fps or 0.0),
+            "file_size_mb": float(size_mb or 0.0),
+            "file_size_bytes": int(size_bytes or 0),
+            "camera_model": cam_model or "Unknown",
+            "primary_owner": owner_name or "Shared/Other",
+            "assigned_moment": f"Proposed: {group_folder}",
+            "notes": ", ".join(extra_notes),
+        })
+
+    # Rank clusters cleanly and format fields expected by frontend
+    clusters_by_score = sorted(
+        grouped_moments.values(),
+        key=lambda g: (-g["max_score"], -len(g["assets"]), g["folder"]),
+    )
+    unassigned_clusters = []
+    for idx, grp in enumerate(clusters_by_score, 1):
+        cnt = len(grp["assets"])
+        grp["orig_rank"] = idx
+        grp["asset_count"] = cnt
+        grp["months"] = ", ".join(sorted(grp["months"]))
+        grp["score_span"] = f"{grp['max_score']:.4f}" if cnt == 1 else f"{grp['max_score']:.4f} .. {grp['min_score']:.4f}"
+        unassigned_clusters.append(grp)
+    unassigned_clusters.sort(key=lambda g: (-len(g["assets"]), -g["max_score"], g["folder"]))
+
+    # 3. Qualified Moment Stats -> needs_sync_moments + actionable/disjoint recommendations
+    cur.execute(
+        """
+        SELECT asset_id FROM media_organizer_album_assets moaa
+        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+        WHERE moa.full_path LIKE 'Media Organizer on LaCie/ToBeCurated/%'
+          AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore')
+        """
+    )
+    tbc_aids = {r[0] for r in cur.fetchall()}
+
+    cur.execute(
+        """
+        SELECT moa.album_name, moaa.asset_id
+        FROM media_organizer_album_assets moaa
+        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+        WHERE moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
+        """
+    )
+    curated_aids_by_album = {}
+    curated_aids_all = set()
+    for alb_name, aid in cur.fetchall():
+        curated_aids_all.add(aid)
+        if alb_name:
+            curated_aids_by_album.setdefault(alb_name.strip(), set()).add(aid)
+
+    cur.execute("SELECT asset_uuid, moment_name FROM publications")
+    published_assets_by_moment = {}
+    published_aids_all = set()
+    for aid, mom_name in cur.fetchall():
+        published_aids_all.add(aid)
+        if mom_name:
+            published_assets_by_moment.setdefault(mom_name, set()).add(aid)
+
+    cur.execute(
+        """
+        SELECT moment_name, memory_stage, COALESCE(curated_count, 0),
+               COALESCE(photos_to_be_curated_exists, 0), COALESCE(photos_curated_exists, 0)
+        FROM curated_moments
+        """
+    )
+    cm_meta = {
+        r[0]: {
+            "stage": r[1] or "M100",
+            "curated_count": r[2],
+            "tbc_exists": bool(r[3]),
+            "curated_exists": bool(r[4]),
+        }
+        for r in cur.fetchall()
+    }
+
+    cur.execute(
+        """
+        SELECT
+            p.moment_name,
+            MAX(p.published_at_utc),
+            COUNT(DISTINCT p.asset_uuid)
+        FROM publications p
+        GROUP BY p.moment_name
+        """
+    )
+    pub_info = {r[0]: {"last_pub_utc": r[1], "pub_count": r[2]} for r in cur.fetchall()}
+
+    cur.execute(
+        """
+        SELECT
+            v.asset_id,
+            v.MomentsAlbumName,
+            v.score_normalized,
+            v.original_filename,
+            v.date_created_utc
+        FROM ranked_assets_view v
+        JOIN month_batches mb ON v.month = mb.month
+        WHERE mb.status_code >= '600'
+          AND v.MomentsAlbumName IS NOT NULL AND v.MomentsAlbumName != ''
+          AND LOWER(v.MomentsAlbumName) NOT IN ('skippublishing', 'ignore')
+          AND v.score_normalized > ?
+        ORDER BY v.score_normalized DESC
+        """,
+        (hist_min_raw,),
+    )
+    moments_data = {}
+    for aid, m_name, sc, fn, dt_str in cur.fetchall():
+        if aid in excluded_aids:
+            continue
+        md = moments_data.setdefault(
+            m_name,
+            {
+                "total_qualified": 0,
+                "proposed_count": 0,
+                "curated_count": 0,
+                "unpublished_scores": [],
+                "curated_unpublished": [],
+                "all_dates": [],
+            },
+        )
+        md["total_qualified"] += 1
+        in_tbc = aid in tbc_aids
+        in_cur = aid in curated_aids_by_album.get(m_name.strip(), set()) or aid in curated_aids_all
+        if in_tbc:
+            md["proposed_count"] += 1
+        if in_cur:
+            md["curated_count"] += 1
+        is_pub = aid in published_assets_by_moment.get(m_name, set()) or aid in published_aids_all
+        if not is_pub and sc is not None:
+            md["unpublished_scores"].append(float(sc))
+            if in_cur:
+                base_name = os.path.splitext(fn or "")[0]
+                md["curated_unpublished"].append((aid, base_name, float(sc)))
+        dt_val = _parse_utc_dt(dt_str)
+        if dt_val:
+            md["all_dates"].append(dt_val)
+
+    # Compute needs_sync_moments, recommendations, and disjoint moments
+    needs_sync_moments = []
+    moment_midpoints = {}
+    for name, md in moments_data.items():
+        if md["all_dates"]:
+            timestamps = sorted(d.timestamp() for d in md["all_dates"])
+            mid_ts = (timestamps[0] + timestamps[-1]) / 2.0
+            moment_midpoints[name] = {
+                "mid": datetime.fromtimestamp(mid_ts),
+                "count": md["total_qualified"],
+            }
+
+        cm = cm_meta.get(name, {})
+        stage = cm.get("stage", "M100")
+        p_info = pub_info.get(name, {})
+        pub_count = p_info.get("pub_count", 0)
+        unpub = md["unpublished_scores"]
+        avg_score = sum(unpub) / len(unpub) if unpub else 0.0
+        rank_score = avg_score * math.log(md["total_qualified"] + 1)
+
+        if stage == "M500" or (pub_count >= md["total_qualified"] and md["total_qualified"] > 0):
+            display_stage = "M500"
+        elif stage == "M450" or pub_count > 0:
+            display_stage = "M450"
+        elif stage == "M400":
+            display_stage = "M400"
+        elif cm.get("curated_exists") or md["curated_count"] > 0:
+            display_stage = "M300"
+        elif cm.get("tbc_exists") or md["proposed_count"] > 0:
+            display_stage = "M200"
+        else:
+            display_stage = "M100"
+
+        if (md["proposed_count"] + md["curated_count"]) < md["total_qualified"]:
+            needs_sync_moments.append({
+                "idx": 0,
+                "moment_name": name,
+                "stage": display_stage,
+                "rank_score": round(rank_score, 4),
+                "avg_score": round(avg_score, 4),
+                "assets": md["total_qualified"],
+                "published": str(pub_count) if pub_count > 0 else "—",
+                "action": "Sync Option [1] to ToBeCurated",
+            })
+
+    needs_sync_moments.sort(key=lambda x: -x["rank_score"])
+    for idx, m in enumerate(needs_sync_moments, 1):
+        m["idx"] = idx
+
+    # Actionable & Disjoint publishing recommendations
     actionable_recs = []
     disjoint_recs = []
-    needs_sync_moments = []
-    unassigned_clusters = []
-    threshold_aligned = True
-    current_threshold = None
-    historical_min = None
+    now_local = datetime.now()
+    for name, md in moments_data.items():
+        cm = cm_meta.get(name, {})
+        p_info = pub_info.get(name, {})
+        pub_count = p_info.get("pub_count", 0)
+        last_pub_raw = p_info.get("last_pub_utc")
+        cur_files_cnt = max(cm.get("curated_count", 0), md["curated_count"], len(curated_aids_by_album.get(name.strip(), ())))
 
-    thresh_log = log_dir / "curation_threshold_status.log"
-    if thresh_log.exists():
-        try:
-            text = thresh_log.read_text(encoding="utf-8", errors="replace")
-            m_cur = re.search(r"Current dynamic threshold:\s+(\d+\.\d+)", text)
-            m_min = re.search(r"Historical minimum target:\s+(\d+\.\d+)", text)
-            if m_cur:
-                current_threshold = float(m_cur.group(1))
-            if m_min:
-                historical_min = float(m_min.group(1))
-            if "Threshold aligned" in text:
-                threshold_aligned = True
-            elif current_threshold is not None and historical_min is not None:
-                threshold_aligned = current_threshold <= (historical_min + 1e-4)
+        if md["total_qualified"] < 2 and pub_count == 0:
+            # Find nearest moment with >= 2 assets
+            merge_hint = "Merge candidate (<2 assets)"
+            if name in moment_midpoints:
+                t_mid = moment_midpoints[name]["mid"]
+                best_diff = None
+                best_other = None
+                for other_name, o_info in moment_midpoints.items():
+                    if other_name == name or o_info["count"] < 2:
+                        continue
+                    diff_days = (o_info["mid"] - t_mid).total_seconds() / 86400.0
+                    if best_diff is None or abs(diff_days) < abs(best_diff):
+                        best_diff = diff_days
+                        best_other = other_name
+                if best_other is not None:
+                    days_int = round(abs(best_diff))
+                    rel = f"+{days_int}d" if best_diff > 0 else (f"-{days_int}d" if best_diff < 0 else "0d")
+                    merge_hint = f"💡 Suggest merge with: '{best_other}' ({rel})"
 
-            cur_cluster = None
-            for raw_line in text.splitlines():
-                line = raw_line.strip()
-                if not line:
-                    continue
-                m_hdr = re.match(
-                    r"^\[\s*(\d+)\]\s*📁\s*(.+?)\s+\[(.+?)\]\s+—\s*(\d+)\s*asset\(s\)\s*\|\s*Score:\s*([^|]+?)\s*\|\s*Month\(s\):\s*(.+)$",
-                    line
-                )
-                if m_hdr:
-                    score_span_str = m_hdr.group(5).strip()
-                    score_parts = score_span_str.split()
-                    max_sc = float(score_parts[0]) if score_parts else 0.0
-                    min_sc = float(score_parts[-1]) if len(score_parts) >= 3 else max_sc
-                    cur_cluster = {
-                        "orig_rank": int(m_hdr.group(1)),
-                        "folder": m_hdr.group(2).strip(),
-                        "group_type": m_hdr.group(3).strip(),
-                        "asset_count": int(m_hdr.group(4)),
-                        "score_span": score_span_str,
-                        "max_score": max_sc,
-                        "min_score": min_sc,
-                        "months": m_hdr.group(6).strip(),
-                        "assets": []
-                    }
-                    unassigned_clusters.append(cur_cluster)
-                    continue
+            unpub = md["unpublished_scores"]
+            disjoint_recs.append({
+                "moment_name": name,
+                "avg_score": round(sum(unpub) / len(unpub), 4) if unpub else 0.0,
+                "files": md["total_qualified"],
+                "published": str(pub_count) if pub_count > 0 else "0",
+                "recommended": 0,
+                "action": "Disjoint: Merge needed (<2 assets)",
+                "details": merge_hint,
+            })
+            continue
 
-                if cur_cluster is not None and line.startswith("•"):
-                    m_ast = re.match(
-                        r"^•\s*(.+?)\s*\|\s*Score:\s*(\d+\.\d+)\s*\|\s*Captured:\s*([^|]+?)\s*\|\s*Month:\s*(\d{4}-\d{2})(?:\s+\((.+)\))?$",
-                        line
-                    )
-                    if m_ast:
-                        cur_cluster["assets"].append({
-                            "original_filename": m_ast.group(1).strip(),
-                            "score_normalized": float(m_ast.group(2)),
-                            "capture_timestamp": m_ast.group(3).strip(),
-                            "month": m_ast.group(4).strip(),
-                            "notes": (m_ast.group(5) or "").strip()
-                        })
-        except Exception:
-            pass
+        if not (cm.get("curated_exists") or md["curated_count"] > 0):
+            continue
 
-    rec_log = log_dir / "publishing_recommendations.log"
-    if rec_log.exists():
-        try:
-            in_disjoint = False
-            for raw_line in rec_log.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = raw_line.strip()
-                if not line:
-                    continue
-                if "Disjoint Moments (Need Merge)" in line:
-                    in_disjoint = True
-                    continue
-                m = re.match(
-                    r"^(\d+)\s+(.+?)\s+(\d+\.\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(Republish:.*?\)|Publish .*?\)|Publish Whole Album|Disjoint:.*?\))\s+(.+)$",
-                    line
-                )
-                if m:
-                    item = {
-                        "idx": int(m.group(1)),
-                        "moment_name": m.group(2).strip(),
-                        "avg_score": float(m.group(3)),
-                        "files": int(m.group(4)),
-                        "published": int(m.group(5)),
-                        "recommended": int(m.group(6)),
-                        "action": m.group(7).strip(),
-                        "details": m.group(8).strip()
-                    }
-                    if in_disjoint or item["action"].startswith("Disjoint"):
-                        disjoint_recs.append(item)
-                    else:
-                        actionable_recs.append(item)
-        except Exception:
-            pass
+        too_recent = False
+        if last_pub_raw:
+            pub_dt = _parse_utc_dt(last_pub_raw)
+            if pub_dt and (now_local - pub_dt).days < 30:
+                too_recent = True
+        if too_recent or cur_files_cnt <= pub_count:
+            continue
 
-    cand_log = log_dir / "publishing_candidates.log"
-    if cand_log.exists():
-        try:
-            in_needs_update = False
-            for raw_line in cand_log.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = raw_line.strip()
-                if "Moments Requiring Curation Updates" in line:
-                    in_needs_update = True
-                    continue
-                if "Up-To-Date Moments" in line:
-                    in_needs_update = False
-                    break
-                if in_needs_update:
-                    m = re.match(
-                        r"^(\d+)\s+(.+?)\s+(M\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+)\s+(\S+)",
-                        line
-                    )
-                    if m:
-                        needs_sync_moments.append({
-                            "idx": int(m.group(1)),
-                            "moment_name": m.group(2).strip(),
-                            "stage": m.group(3),
-                            "rank_score": float(m.group(4)),
-                            "avg_score": float(m.group(5)),
-                            "assets": int(m.group(8)),
-                            "published": m.group(9)
-                        })
-        except Exception:
-            pass
+        # Curated unpublished assets ready to publish
+        cur_unpub = sorted(md["curated_unpublished"], key=lambda x: (-x[2], x[1]))
+        if not cur_unpub:
+            continue
+
+        rec_batch = cur_unpub[:9]
+        rec_avg = sum(x[2] for x in rec_batch) / len(rec_batch)
+        if pub_count == 0:
+            if cur_files_cnt <= 9:
+                action = "Publish Whole Album"
+            else:
+                action = f"Publish Top 9 Assets (out of {cur_files_cnt})"
+        else:
+            action = f"Republish: Next {len(rec_batch)} Assets (regulation passed)"
+
+        bases = [x[1] for x in rec_batch if x[1]]
+        if len(bases) <= 5:
+            details_str = ", ".join(bases)
+        else:
+            details_str = ", ".join(bases[:4]) + f" (+{len(bases) - 4} more)"
+
+        actionable_recs.append({
+            "idx": 0,
+            "moment_name": name,
+            "avg_score": round(rec_avg, 4),
+            "files": cur_files_cnt,
+            "published": str(pub_count),
+            "recommended": len(rec_batch),
+            "action": action,
+            "details": details_str or "—",
+        })
+
+    actionable_recs.sort(key=lambda x: -x["avg_score"])
+    for idx, rec in enumerate(actionable_recs, 1):
+        rec["idx"] = idx
+    disjoint_recs.sort(key=lambda x: -x["avg_score"])
 
     return {
         "threshold_aligned": threshold_aligned,
-        "current_threshold": current_threshold,
-        "historical_min": historical_min,
+        "current_threshold": curr_thresh,
+        "historical_min": hist_min,
+        "last_checked_utc": last_th_utc,
         "actionable_recs": actionable_recs,
         "disjoint_recs": disjoint_recs,
         "needs_sync_moments": needs_sync_moments,
-        "unassigned_clusters": unassigned_clusters
+        "unassigned_clusters": unassigned_clusters,
     }
 
 
@@ -2202,13 +2707,11 @@ def get_planner_overview():
             # -----------------------------------------------------------------
             cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
             min_th_row = cur.fetchone()
-            db_hist_min = round(min_th_row[0], 4) if min_th_row and min_th_row[0] else 0.5315
+            db_hist_min = float(min_th_row[0]) if min_th_row and min_th_row[0] else 0.5315
 
-            cur.execute("SELECT threshold_score, threshold_met, recorded_at_utc FROM threshold_history ORDER BY id DESC LIMIT 1")
+            cur.execute("SELECT recorded_at_utc FROM threshold_history ORDER BY id DESC LIMIT 1")
             last_th_row = cur.fetchone()
-            db_curr_th = round(last_th_row[0], 4) if last_th_row and last_th_row[0] else db_hist_min
-            db_th_met = bool(last_th_row[1]) if last_th_row and last_th_row[1] is not None else True
-            last_th_utc = last_th_row[2] if last_th_row else None
+            last_th_utc = last_th_row[0] if last_th_row else None
 
             cur.execute("SELECT memory_stage, COUNT(*) FROM curated_moments GROUP BY memory_stage")
             moment_stage_counts = {r[0]: r[1] for r in cur.fetchall()}
@@ -2218,102 +2721,12 @@ def get_planner_overview():
             published_moments_total = pub_totals[0] if pub_totals else 0
             published_assets_total = pub_totals[1] if pub_totals else 0
 
-            log_dir = MEDIA_DB_PATH.resolve().parent.parent / "logs"
-            parsed_logs = _parse_mode_m_logs(log_dir)
+            mode_m_live = _compute_mode_m_from_db(cur, db_hist_min, last_th_utc)
 
-            curr_thresh = parsed_logs["current_threshold"] if parsed_logs["current_threshold"] is not None else db_curr_th
-            hist_min = parsed_logs["historical_min"] if parsed_logs["historical_min"] is not None else db_hist_min
-            thresh_aligned = parsed_logs["threshold_aligned"] if parsed_logs["current_threshold"] is not None else db_th_met
-
-            # Enrich unassigned high-rank clusters with asset_id and ZASSET metadata for previews
-            unassigned_clusters = parsed_logs.get("unassigned_clusters", [])
-            if unassigned_clusters:
-                floor_sc = max(0.50, (hist_min or 0.5315) - 0.01)
-                cur.execute("""
-                    SELECT v.asset_id, v.original_filename, ROUND(v.score_normalized, 4) as score, v.month, v.date_created_utc
-                    FROM ranked_assets_view v
-                    JOIN month_batches mb ON v.month = mb.month
-                    WHERE mb.status_code >= '600'
-                      AND (v.MomentsAlbumName IS NULL OR v.MomentsAlbumName = '')
-                      AND v.score_normalized >= ?
-                    ORDER BY v.score_normalized DESC
-                """, (floor_sc,))
-                base_unassigned = cur.fetchall()
-                u_aids = [r[0] for r in base_unassigned]
-                u_meta = {}
-                if u_aids:
-                    ph_u = ",".join("?" for _ in u_aids)
-                    cur.execute(f"""
-                        SELECT 
-                            za.ZUUID,
-                            COALESCE(za.ZKIND, 0),
-                            ROUND(COALESCE(za.ZDURATION, zea.ZDURATION, 0.0), 2),
-                            COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
-                            COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
-                            ROUND(COALESCE(zea.ZFPS, 0.0), 1),
-                            ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2),
-                            COALESCE(aaa.ZORIGINALFILESIZE, 0),
-                            COALESCE(zea.ZCAMERAMODEL, 'Unknown'),
-                            COALESCE(do.owner_name, 'Shared/Other')
-                        FROM ZASSET za
-                        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
-                        LEFT JOIN ZEXTENDEDATTRIBUTES zea ON zea.Z_PK = za.ZEXTENDEDATTRIBUTES
-                        LEFT JOIN device_owners do ON do.camera_model = zea.ZCAMERAMODEL
-                            AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                            AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                        WHERE za.ZUUID IN ({ph_u})
-                    """, u_aids)
-                    for mr in cur.fetchall():
-                        u_meta[mr[0]] = mr
-
-                by_fn_month = {}
-                by_month = {}
-                for aid, fn, sc, mo, dt in base_unassigned:
-                    key = ((fn or "").lower(), mo)
-                    by_fn_month.setdefault(key, []).append((aid, fn, sc, mo, dt))
-                    by_month.setdefault(mo, []).append((aid, fn, sc, mo, dt))
-
-                used_aids = set()
-                for c in unassigned_clusters:
-                    for a in c["assets"]:
-                        fn_lower = (a["original_filename"] or "").lower()
-                        key = (fn_lower, a["month"])
-                        cands = by_fn_month.get(key, [])
-                        chosen = None
-                        if cands:
-                            unused = [x for x in cands if x[0] not in used_aids]
-                            pool = unused if unused else cands
-                            pool.sort(key=lambda x: abs(x[2] - a["score_normalized"]))
-                            chosen = pool[0]
-                        else:
-                            m_cands = by_month.get(a["month"], [])
-                            if m_cands:
-                                m_cands.sort(key=lambda x: abs(x[2] - a["score_normalized"]))
-                                chosen = m_cands[0]
-
-                        if chosen:
-                            aid, full_fn, _, _, dt_utc = chosen
-                            used_aids.add(aid)
-                            m_info = u_meta.get(aid)
-                            zkind = m_info[1] if m_info else 0
-                            is_vid = zkind == 1 or full_fn.lower().endswith((".mov", ".mp4", ".m4v", ".avi", ".mpg"))
-                            a["asset_id"] = aid
-                            a["original_filename"] = full_fn
-                            a["date_created_utc"] = dt_utc or a["capture_timestamp"]
-                            a["media_type"] = "video" if is_vid else "photo"
-                            a["duration_sec"] = m_info[2] if m_info else 0.0
-                            a["width"] = m_info[3] if m_info else 0
-                            a["height"] = m_info[4] if m_info else 0
-                            a["fps"] = m_info[5] if m_info else 0.0
-                            a["file_size_mb"] = m_info[6] if m_info else 0.0
-                            a["file_size_bytes"] = m_info[7] if m_info else 0
-                            a["camera_model"] = m_info[8] if m_info else "Unknown"
-                            a["primary_owner"] = m_info[9] if m_info else "Shared/Other"
-                            a["assigned_moment"] = f"Proposed: {c['folder']}"
-
-                # Sort clusters by cluster size descending, then max_score descending
-                unassigned_clusters.sort(key=lambda g: (-len(g["assets"]), -g["max_score"], g["folder"]))
-
+            curr_thresh = mode_m_live["current_threshold"]
+            hist_min = mode_m_live["historical_min"]
+            thresh_aligned = mode_m_live["threshold_aligned"]
+            unassigned_clusters = mode_m_live["unassigned_clusters"]
             total_unassigned_assets = sum(len(c["assets"]) for c in unassigned_clusters)
 
             # Enrich candidate batches with device summary vs active family devices
@@ -2350,17 +2763,17 @@ def get_planner_overview():
                         "M400": moment_stage_counts.get("M400", 0),
                         "M450": moment_stage_counts.get("M450", 0),
                         "M500": moment_stage_counts.get("M500", 0),
-                        "needs_sync": len(parsed_logs["needs_sync_moments"]),
+                        "needs_sync": len(mode_m_live["needs_sync_moments"]),
                         "total_moments": sum(moment_stage_counts.values()),
                         "published_moments_total": published_moments_total,
                         "published_assets_total": published_assets_total
                     },
-                    "needs_sync_moments": parsed_logs["needs_sync_moments"],
+                    "needs_sync_moments": mode_m_live["needs_sync_moments"],
                     "unassigned_total_assets": total_unassigned_assets,
                     "unassigned_total_clusters": len(unassigned_clusters),
                     "unassigned_clusters": unassigned_clusters,
-                    "actionable_recommendations": parsed_logs["actionable_recs"][:12],
-                    "disjoint_recommendations": parsed_logs["disjoint_recs"][:10]
+                    "actionable_recommendations": mode_m_live["actionable_recs"][:12],
+                    "disjoint_recommendations": mode_m_live["disjoint_recs"][:10]
                 }
             }
         finally:

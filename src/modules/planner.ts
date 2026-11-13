@@ -517,7 +517,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   if (recTbody) {
     if (!recs.length) {
       recTbody.innerHTML =
-        '<tr><td colspan="6" class="text-center text-muted">No actionable publishing recommendations found in log.</td></tr>';
+        '<tr><td colspan="6" class="text-center text-muted">No actionable publishing recommendations currently ready.</td></tr>';
     } else {
       recTbody.innerHTML = recs
         .map(r => {
