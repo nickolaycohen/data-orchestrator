@@ -16,6 +16,7 @@ let selectedCleanupDevice: any = null;
 let activeFamilyScope = 'family'; // 'family' (default) | 'all'
 let activeDeviceScope = 'active'; // 'active' (default) | 'all'
 let activeOwnerFilter = 'all';
+let activeLocationFilter = 'possibly'; // 'possibly' | 'actually'
 let activeQuartileFilter = 'all';
 let activeTypeFilter = 'all';
 const cleanupPageLimit = 50;
@@ -95,6 +96,50 @@ export function setupMediaCleanup(): void {
   // 2. Refresh button
   document.getElementById('btn-refresh-cleanup')?.addEventListener('click', () => {
     fetchCleanupDevices(true);
+  });
+
+  // 2b. Sync Physical Device Inventory button (ManagedIntake ImageCapture snapshots)
+  document.getElementById('btn-sync-device-inventory')?.addEventListener('click', async () => {
+    const syncBtn = document.getElementById('btn-sync-device-inventory') as HTMLButtonElement | null;
+    const origText = syncBtn?.textContent || '📲 Sync Snapshot';
+    if (syncBtn) {
+      syncBtn.disabled = true;
+      syncBtn.textContent = '⏳ Syncing...';
+    }
+    try {
+      const res = await fetch('/api/media/cleanup/sync-inventory', { method: 'POST' });
+      const data = await res.json();
+      if (data.ok) {
+        await fetchCleanupDevices(false);
+        if (selectedCleanupDevice) {
+          await fetchCleanupCandidates();
+        }
+      } else {
+        alert(`Failed to sync device inventory: ${data.error || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      console.error('Error syncing device inventory:', err);
+      alert(`Network error syncing device inventory: ${err.message || 'Unknown error'}`);
+    } finally {
+      if (syncBtn) {
+        syncBtn.disabled = false;
+        syncBtn.textContent = origText;
+      }
+    }
+  });
+
+  // 2c. Device location status filter buttons ('possibly' vs 'actually')
+  document.querySelectorAll<HTMLElement>('#cleanup-location-filter-group .cleanup-location-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll<HTMLElement>('#cleanup-location-filter-group .cleanup-location-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeLocationFilter = btn.dataset.location || 'possibly';
+      cleanupPageOffset = 0;
+      if (selectedCleanupDevice) {
+        updateSelectedDeviceKPIs(selectedCleanupDevice);
+        fetchCleanupCandidates();
+      }
+    });
   });
 
   // 3. Quartile filter buttons (scoped to cleanup toolbar so it doesn't collide with unassigned sort buttons)
@@ -434,6 +479,14 @@ function renderCleanupDevicesList(): void {
         ? `<span class="cleanup-device-active-dot" title="Active Device (since ${escapeHtml(d.start_date || 'current')})"></span>`
         : '';
 
+      const snapshotLine = d.has_actual_snapshot
+        ? `<div class="cleanup-device-subrow" style="margin-top: 2px;">
+             <span class="badge badge-xs badge-green font-mono" style="font-size: 0.65rem; padding: 1px 5px;" title="ManagedIntake snapshot '${escapeHtml(d.snapshot_folder || '')}'">
+               📲 ${(d.actual_low_count ?? 0).toLocaleString()} low / ${(d.actual_total_count ?? 0).toLocaleString()} on device (${(d.actual_low_gb ?? 0).toFixed(1)} GB)
+             </span>
+           </div>`
+        : '';
+
       html += `
         <div class="cleanup-device-item ${isSelected ? 'active' : ''}" data-model="${escapeHtml(d.camera_model)}" data-owner="${escapeHtml(d.owner)}">
           <div class="cleanup-device-header-row">
@@ -447,6 +500,7 @@ function renderCleanupDevicesList(): void {
             <span>${d.low_count.toLocaleString()} / ${d.total_count.toLocaleString()} files (${pct}%)</span>
             <span class="font-mono">Q2 ≤ ${d.q2_max_score.toFixed(4)}</span>
           </div>
+          ${snapshotLine}
           <div class="cleanup-device-progress-bg">
             <div class="cleanup-device-progress-fill" style="width: ${pct}%;"></div>
           </div>
@@ -496,11 +550,47 @@ function updateSelectedDeviceKPIs(device: any): void {
   const kpiGb = document.getElementById('cleanup-kpi-device-gb');
   const kpiCount = document.getElementById('cleanup-kpi-device-count');
   const kpiMaxScore = document.getElementById('cleanup-kpi-device-max-score');
+  const snapshotBadge = document.getElementById('cleanup-detail-snapshot-badge');
+  const subtitle = document.getElementById('cleanup-detail-subtitle');
+
+  const isActualView = activeLocationFilter === 'actually' && Boolean(device.has_actual_snapshot);
+  const lowGb = isActualView ? (device.actual_low_gb ?? 0) : (device.low_gb ?? 0);
+  const lowCount = isActualView ? (device.actual_low_count ?? 0) : (device.low_count ?? 0);
 
   if (kpisContainer) kpisContainer.style.display = 'flex';
-  if (kpiGb) kpiGb.textContent = `${device.low_gb.toFixed(2)} GB`;
-  if (kpiCount) kpiCount.textContent = `${device.low_count.toLocaleString()} files`;
-  if (kpiMaxScore) kpiMaxScore.textContent = `≤ ${device.q2_max_score.toFixed(4)}`;
+  if (kpiGb) kpiGb.textContent = `${lowGb.toFixed(2)} GB`;
+  if (kpiCount) kpiCount.textContent = `${lowCount.toLocaleString()} files`;
+  if (kpiMaxScore) kpiMaxScore.textContent = `≤ ${(device.q2_max_score ?? 0).toFixed(4)}`;
+
+  if (snapshotBadge) {
+    if (device.has_actual_snapshot) {
+      snapshotBadge.style.display = 'inline-block';
+      snapshotBadge.className = 'badge badge-xs badge-cyan font-mono';
+      const syncedStr = device.snapshot_synced_at
+        ? ` · Synced ${formatCaptureTimestampParts(device.snapshot_synced_at).dateLine}`
+        : '';
+      snapshotBadge.textContent = `📲 Snapshot: ${(device.actual_total_count ?? 0).toLocaleString()} on device (${device.snapshot_folder || 'ManagedIntake'})`;
+      snapshotBadge.title = `ManagedIntake ImageCapture folder '${device.snapshot_folder || ''}' (${(device.snapshot_total_files ?? 0).toLocaleString()} media files)${syncedStr}`;
+    } else {
+      snapshotBadge.style.display = 'inline-block';
+      snapshotBadge.className = 'badge badge-xs badge-outline font-mono';
+      snapshotBadge.textContent = 'No ImageCapture Snapshot';
+      snapshotBadge.title = `No ManagedIntake ImageCapture snapshot folder mapped for ${device.camera_model}`;
+    }
+  }
+
+  if (subtitle) {
+    const dateSpan = device.start_date
+      ? ` (Active since ${device.start_date}${device.end_date ? ` to ${device.end_date}` : ''})`
+      : '';
+    if (activeLocationFilter === 'actually') {
+      subtitle.textContent = device.has_actual_snapshot
+        ? `Showing assets verified on physical device via ManagedIntake ('${device.snapshot_folder}') — ordered largest-to-smallest.`
+        : `No ManagedIntake ImageCapture snapshot found for ${device.camera_model} — toggle "Possibly Located" to inspect DB records.`;
+    } else {
+      subtitle.textContent = `Reviewing candidates for ${device.owner}${dateSpan} — ordered largest-to-smallest.`;
+    }
+  }
 }
 
 function selectCleanupDevice(device: any): void {
@@ -517,7 +607,6 @@ function selectCleanupDevice(device: any): void {
   const titleName = document.getElementById('cleanup-detail-device-name');
   const ownerBadge = document.getElementById('cleanup-detail-owner-badge');
   const activeBadge = document.getElementById('cleanup-detail-active-badge');
-  const subtitle = document.getElementById('cleanup-detail-subtitle');
   const toolbar = document.getElementById('cleanup-toolbar');
   const placeholder = document.getElementById('cleanup-empty-placeholder');
   const table = document.getElementById('cleanup-candidates-table');
@@ -530,12 +619,6 @@ function selectCleanupDevice(device: any): void {
   }
   if (activeBadge) {
     activeBadge.style.display = device.is_active ? 'inline-block' : 'none';
-  }
-  if (subtitle) {
-    const dateSpan = device.start_date
-      ? ` (Active since ${device.start_date}${device.end_date ? ` to ${device.end_date}` : ''})`
-      : '';
-    subtitle.textContent = `Reviewing bottom 2 quartiles (Q1 & Q2) for ${device.owner}${dateSpan} — ordered largest-to-smallest.`;
   }
 
   updateSelectedDeviceKPIs(device);
@@ -566,9 +649,9 @@ export async function fetchCleanupCandidates(): Promise<void> {
   if (tbody) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="11" class="text-center text-muted" style="padding: 3rem 1rem;">
+        <td colspan="12" class="text-center text-muted" style="padding: 3rem 1rem;">
           <div class="spinner-sm mb-2" style="margin: 0 auto;"></div>
-          Scanning bottom 2 quartiles for <strong>${escapeHtml(selectedCleanupDevice.camera_model)}</strong>...
+          Scanning ${activeLocationFilter === 'actually' ? 'on-device snapshot' : 'database candidates'} for <strong>${escapeHtml(selectedCleanupDevice.camera_model)}</strong>...
         </td>
       </tr>
     `;
@@ -580,6 +663,7 @@ export async function fetchCleanupCandidates(): Promise<void> {
       owner: selectedCleanupDevice.owner || 'all',
       quartile: activeQuartileFilter,
       media_type: activeTypeFilter,
+      location_status: activeLocationFilter,
       limit: cleanupPageLimit.toString(),
       offset: cleanupPageOffset.toString()
     });
@@ -591,7 +675,7 @@ export async function fetchCleanupCandidates(): Promise<void> {
       if (tbody) {
         tbody.innerHTML = `
           <tr>
-            <td colspan="11" class="text-center text-muted" style="padding: 2.5rem 1rem;">
+            <td colspan="12" class="text-center text-muted" style="padding: 2.5rem 1rem;">
               ⚠️ Error loading candidates: ${escapeHtml(data.error || 'Unknown error')}
             </td>
           </tr>
@@ -599,6 +683,22 @@ export async function fetchCleanupCandidates(): Promise<void> {
       }
       return;
     }
+
+    const locCountPossEl = document.getElementById('loc-count-possibly');
+    const locCountActEl = document.getElementById('loc-count-actually');
+    if (locCountPossEl) {
+      locCountPossEl.textContent = typeof data.possibly_total_count === 'number'
+        ? `(${data.possibly_total_count.toLocaleString()})`
+        : '';
+    }
+    if (locCountActEl) {
+      locCountActEl.textContent = typeof data.actually_total_count === 'number'
+        ? `(${data.actually_total_count.toLocaleString()})`
+        : '';
+    }
+
+    const hasSnapshot = Boolean(data.has_device_snapshot);
+    const snapshotFolder = data.snapshot_folder || '';
 
     currentCandidateList = data.candidates || [];
     currentCandidateList.forEach(c => {
@@ -616,7 +716,7 @@ export async function fetchCleanupCandidates(): Promise<void> {
       if (tbody) {
         tbody.innerHTML = `
           <tr>
-            <td colspan="11" class="text-center text-muted" style="padding: 3.5rem 1rem;">
+            <td colspan="12" class="text-center text-muted" style="padding: 3.5rem 1rem;">
               <span style="font-size: 1.5rem; display: block; margin-bottom: 0.4rem;">🎉</span>
               No candidate assets found for <strong>${escapeHtml(selectedCleanupDevice.camera_model)}</strong> with current filters.
             </td>
@@ -659,6 +759,33 @@ export async function fetchCleanupCandidates(): Promise<void> {
             </div>`
           : '';
 
+        let onDeviceHtml = '';
+        if (c.actually_on_device) {
+          const folderTitle = c.device_source_folder || snapshotFolder || 'ManagedIntake';
+          const altFile =
+            c.device_location_filename && c.device_location_filename !== c.original_filename
+              ? `<div class="candidate-res-sub" style="margin-top: 2px;" title="File on device: ${escapeHtml(c.device_location_filename)}">↳ ${escapeHtml(c.device_location_filename)}</div>`
+              : '';
+          onDeviceHtml = `
+            <span class="badge badge-xs badge-green font-mono" title="Verified on physical device via ManagedIntake '${escapeHtml(folderTitle)}' (${escapeHtml(c.device_match_tier || 'exact')})">
+              📱 Actually on Device
+            </span>
+            ${altFile}
+          `;
+        } else if (hasSnapshot) {
+          onDeviceHtml = `
+            <span class="badge badge-xs badge-outline font-mono" style="opacity: 0.8;" title="Attributed to ${escapeHtml(c.camera_model)} in DB, not present in ManagedIntake snapshot '${escapeHtml(snapshotFolder)}'">
+              ❓ Possibly Located
+            </span>
+          `;
+        } else {
+          onDeviceHtml = `
+            <span class="badge badge-xs badge-outline font-mono" style="opacity: 0.65;" title="No ManagedIntake ImageCapture snapshot available for ${escapeHtml(c.camera_model)}">
+              ❓ Possibly (No Snap)
+            </span>
+          `;
+        }
+
         const tsParts = formatCaptureTimestampParts(c.capture_timestamp || c.date_created_utc);
         const captureTsHtml = `
           <div class="candidate-capture-ts" title="Exact capture timestamp: ${escapeHtml(c.capture_timestamp || c.date_created_utc)}">
@@ -679,7 +806,13 @@ export async function fetchCleanupCandidates(): Promise<void> {
         const quartileBadge =
           c.score_quartile === 1
             ? `<span class="badge badge-xs cleanup-badge-q1 font-mono">Q1 (Lowest)</span>`
-            : `<span class="badge badge-xs cleanup-badge-q2 font-mono">Q2 (Low)</span>`;
+            : c.score_quartile === 2
+              ? `<span class="badge badge-xs cleanup-badge-q2 font-mono">Q2 (Low)</span>`
+              : c.score_quartile === 3
+                ? `<span class="badge badge-xs badge-blue font-mono">Q3 (Good)</span>`
+                : c.score_quartile === 4
+                  ? `<span class="badge badge-xs badge-green font-mono">Q4 (Best)</span>`
+                  : `<span class="badge badge-xs badge-outline font-mono">—</span>`;
 
         let momentHtml = '<span class="text-muted">—</span>';
         if (c.last_asset_pub) {
@@ -702,6 +835,7 @@ export async function fetchCleanupCandidates(): Promise<void> {
               ${originBadgeHtml}
               ${resSub}
             </td>
+            <td>${onDeviceHtml}</td>
             <td>${captureTsHtml}</td>
             <td style="text-align: right;">${durationHtml}</td>
             <td style="text-align: right;">
@@ -780,7 +914,7 @@ export async function fetchCleanupCandidates(): Promise<void> {
     if (tbody) {
       tbody.innerHTML = `
         <tr>
-          <td colspan="11" class="text-center text-muted" style="padding: 2.5rem 1rem;">
+          <td colspan="12" class="text-center text-muted" style="padding: 2.5rem 1rem;">
             ❌ Network error loading candidates.
           </td>
         </tr>
@@ -852,10 +986,13 @@ export function openCleanupPreviewModal(assetId: string): void {
         : '—';
   }
   if (devEl) {
+    const locStatusText = c.actually_on_device
+      ? `📱 Actually on Device${c.device_source_folder ? ` (${c.device_source_folder})` : ''}`
+      : '❓ Possibly Located';
     if (c.origin_camera_model && c.origin_camera_model !== c.camera_model && c.origin_camera_model !== 'Unknown') {
-      devEl.textContent = `${c.camera_model || 'Unknown Device'} (${c.primary_owner || 'Unassigned'}) · Origin: ${c.origin_camera_model}`;
+      devEl.textContent = `${c.camera_model || 'Unknown Device'} (${c.primary_owner || 'Unassigned'}) · Origin: ${c.origin_camera_model} · ${locStatusText}`;
     } else {
-      devEl.textContent = `${c.camera_model || 'Unknown Device'} (${c.primary_owner || 'Unassigned'})`;
+      devEl.textContent = `${c.camera_model || 'Unknown Device'} (${c.primary_owner || 'Unassigned'}) · ${locStatusText}`;
     }
   }
   if (scoreEl) {

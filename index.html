@@ -662,6 +662,9 @@
               </div>
               <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                 <span style="font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono);" id="cleanup-last-updated">—</span>
+                <button class="btn btn-xs btn-outline" id="btn-sync-device-inventory" title="Scan Priority 4 ManagedIntake folders and map actual device files to media_organizer.db">
+                  📲 Sync Device Snapshot
+                </button>
                 <button class="btn btn-xs btn-outline" id="btn-refresh-cleanup" title="Refresh Device Summary &amp; Reclaimable Stats">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
                   Refresh
@@ -727,6 +730,7 @@
                         <span id="cleanup-detail-device-name">Select a Device</span>
                         <span class="badge badge-xs badge-purple" id="cleanup-detail-owner-badge" style="display:none;">Owner</span>
                         <span class="badge badge-xs badge-green" id="cleanup-detail-active-badge" style="display:none;">🟢 Active Device</span>
+                        <span class="badge badge-xs badge-cyan font-mono" id="cleanup-detail-snapshot-badge" style="display:none;">📲 Snapshot Synced</span>
                       </h4>
                       <p class="cleanup-detail-subtitle" id="cleanup-detail-subtitle">
                         Click any camera model on the left to inspect its bottom 2 quartiles (Q1 &amp; Q2) ordered by size descending.
@@ -742,11 +746,22 @@
                   <!-- Candidate Filters & Bulk Action Toolbar -->
                   <div class="cleanup-toolbar" id="cleanup-toolbar" style="display: none;">
                     <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                      <div class="cleanup-filter-group" id="cleanup-location-filter-group">
+                        <span class="cleanup-filter-label">On Device:</span>
+                        <button class="cleanup-location-btn active" data-location="possibly" id="btn-loc-possibly" title="All DB assets attributed to this device (possibly still on device)">
+                          ❓ Possibly Located <span class="font-mono" id="loc-count-possibly"></span>
+                        </button>
+                        <button class="cleanup-location-btn" data-location="actually" id="btn-loc-actually" title="Strictly assets verified on physical device via ManagedIntake ImageCapture snapshot">
+                          📱 Actually on Device <span class="font-mono" id="loc-count-actually"></span>
+                        </button>
+                      </div>
+
                       <div class="cleanup-filter-group">
                         <span class="cleanup-filter-label">Quartile:</span>
                         <button class="cleanup-filter-btn active" data-quartile="all">All (Q1+Q2)</button>
                         <button class="cleanup-filter-btn" data-quartile="1">Q1 Only (Bottom 25%)</button>
                         <button class="cleanup-filter-btn" data-quartile="2">Q2 Only (25%-50%)</button>
+                        <button class="cleanup-filter-btn" data-quartile="all_quartiles" title="Show all 4 quartiles (Q1-Q4)">All (Q1–Q4)</button>
                       </div>
 
                       <div class="cleanup-filter-group">
@@ -785,6 +800,7 @@
                         <th style="width: 36px; text-align: center;">#</th>
                         <th style="width: 78px;">Preview</th>
                         <th>Filename &amp; Info</th>
+                        <th style="width: 148px;">On Device</th>
                         <th style="width: 155px;">Capture Timestamp</th>
                         <th style="width: 88px; text-align: right;">Length</th>
                         <th style="width: 92px; text-align: right;">Size</th>

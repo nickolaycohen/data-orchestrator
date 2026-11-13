@@ -55,6 +55,14 @@ export interface CleanupDevice {
   reclaimable_files: number;
   reclaimable_gb: number;
   removed_files: number;
+  has_actual_snapshot?: boolean;
+  snapshot_folder?: string | null;
+  snapshot_total_files?: number;
+  snapshot_synced_at?: string | null;
+  actual_low_count?: number;
+  actual_low_gb?: number;
+  actual_total_count?: number;
+  actual_total_gb?: number;
 }
 
 export interface CleanupOwnerGroup {
@@ -110,6 +118,10 @@ export interface CleanupCandidateAsset {
   height: number;
   fps: number;
   notes?: string;
+  actually_on_device?: boolean;
+  device_location_filename?: string | null;
+  device_match_tier?: string | null;
+  device_source_folder?: string | null;
 }
 
 export interface CleanupCandidatesResponse {

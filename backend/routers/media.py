@@ -43,7 +43,7 @@ _cleanup_devices_cache = {
 
 
 def _ensure_carrier_device_schema(conn: sqlite3.Connection) -> None:
-    """Ensures carrier_device column and index exist on assets table."""
+    """Ensures carrier_device column and device inventory snapshot tables exist."""
     try:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(assets);")
@@ -52,8 +52,51 @@ def _ensure_carrier_device_schema(conn: sqlite3.Connection) -> None:
             cur.execute("ALTER TABLE assets ADD COLUMN carrier_device TEXT DEFAULT NULL;")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_assets_carrier_device ON assets(carrier_device);")
             conn.commit()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS device_actual_assets (
+                camera_model TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                device_filename TEXT NOT NULL,
+                device_file_size INTEGER DEFAULT 0,
+                match_tier TEXT DEFAULT 'exact',
+                source_folder TEXT,
+                synced_at_utc TEXT NOT NULL,
+                PRIMARY KEY (camera_model, asset_id)
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_device_actual_asset_id ON device_actual_assets(asset_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_device_actual_model ON device_actual_assets(camera_model);")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS device_inventory_snapshots (
+                camera_model TEXT PRIMARY KEY,
+                folder_path TEXT NOT NULL,
+                total_files_on_device INTEGER DEFAULT 0,
+                matched_in_db INTEGER DEFAULT 0,
+                unmatched_files INTEGER DEFAULT 0,
+                synced_at_utc TEXT NOT NULL
+            );
+        """)
+        conn.commit()
     except Exception as e:
-        logger.warning(f"Failed to ensure carrier_device schema on assets: {e}")
+        pass
+
+
+def _run_device_inventory_sync(target_device: Optional[str] = None) -> dict:
+    """Invokes scripts/sync_device_inventory.py to refresh ManagedIntake -> DB device mapping."""
+    import importlib.util
+    script_candidates = [
+        REPOS["media-organizer-pipeline"] / "scripts" / "sync_device_inventory.py",
+        Path("/Users/nickolaycohen/dev/media-organizer-pipeline/scripts/sync_device_inventory.py"),
+    ]
+    script_path = next((p for p in script_candidates if p.exists()), None)
+    if not script_path or not MEDIA_DB_PATH:
+        return {"ok": False, "error": "sync_device_inventory.py not found", "devices": []}
+    spec = importlib.util.spec_from_file_location("sync_device_inventory", str(script_path))
+    if not spec or not spec.loader:
+        return {"ok": False, "error": "Unable to load sync_device_inventory module", "devices": []}
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.sync_intake_to_db(db_path=MEDIA_DB_PATH, target_device=target_device)
 
 
 def _infer_origin(camera_model: Optional[str], camera_make: Optional[str], filename: str) -> tuple[str, str]:
@@ -953,6 +996,19 @@ def update_published_moment_urls(req: PublishedUrlUpdateRequest):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+@router.post("/cleanup/sync-inventory")
+def sync_cleanup_device_inventory(camera_model: Optional[str] = None):
+    """Scans Priority 4 ManagedIntake folders and maps assets physically present on devices to media_organizer.db."""
+    try:
+        res = _run_device_inventory_sync(target_device=camera_model)
+        if res.get("ok"):
+            _cleanup_devices_cache["timestamp"] = 0.0
+            _cleanup_devices_cache["payload"] = None
+        return res
+    except Exception as e:
+        return {"ok": False, "error": str(e), "devices": []}
+
+
 @router.get("/cleanup/devices")
 def get_cleanup_devices(refresh: bool = False):
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
@@ -967,6 +1023,12 @@ def get_cleanup_devices(refresh: bool = False):
     if not refresh and _cleanup_devices_cache["payload"] and (now - _cleanup_devices_cache["timestamp"] < 300):
         return _cleanup_devices_cache["payload"]
 
+    if refresh:
+        try:
+            _run_device_inventory_sync()
+        except Exception:
+            pass
+
     try:
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
@@ -976,6 +1038,7 @@ def get_cleanup_devices(refresh: bool = False):
             cur.execute("""
                 WITH scored_assets AS (
                     SELECT 
+                        a.asset_id,
                         COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
                         COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
                         COALESCE(do.is_active, 0) AS is_active,
@@ -1003,23 +1066,48 @@ def get_cleanup_devices(refresh: bool = False):
                     LEFT JOIN owners o ON o.name = do.owner_name
                     LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
                     WHERE COALESCE(a.removed_from_source, 0) = 0
+                ),
+                actual_stats AS (
+                    SELECT
+                        daa.camera_model,
+                        COUNT(*) AS actual_total_count,
+                        ROUND(SUM(sa.file_size_bytes) / 1073741824.0, 2) AS actual_total_gb,
+                        COUNT(CASE WHEN sa.score_quartile IN (1, 2) THEN 1 END) AS actual_low_count,
+                        ROUND(SUM(CASE WHEN sa.score_quartile IN (1, 2) THEN sa.file_size_bytes ELSE 0 END) / 1073741824.0, 2) AS actual_low_gb
+                    FROM device_actual_assets daa
+                    JOIN scored_assets sa ON sa.asset_id = daa.asset_id
+                    GROUP BY daa.camera_model
+                ),
+                dev_agg AS (
+                    SELECT 
+                        primary_owner,
+                        camera_model,
+                        COUNT(CASE WHEN score_quartile IN (1, 2) THEN 1 END) AS low_quality_count,
+                        ROUND(SUM(CASE WHEN score_quartile IN (1, 2) THEN file_size_bytes ELSE 0 END) / 1073741824.0, 2) AS low_quality_gb,
+                        COUNT(*) AS total_assets,
+                        ROUND(SUM(file_size_bytes) / 1073741824.0, 2) AS total_gb,
+                        ROUND(MIN(score_normalized), 4) AS min_score,
+                        ROUND(MAX(CASE WHEN score_quartile = 2 THEN score_normalized END), 4) AS q2_max_score,
+                        MAX(is_active) AS is_active,
+                        MIN(owner_start_date) AS start_date,
+                        MAX(owner_end_date) AS end_date,
+                        MAX(is_family) AS is_family
+                    FROM scored_assets
+                    GROUP BY primary_owner, camera_model
                 )
-                SELECT 
-                    primary_owner,
-                    camera_model,
-                    COUNT(CASE WHEN score_quartile IN (1, 2) THEN 1 END) AS low_quality_count,
-                    ROUND(SUM(CASE WHEN score_quartile IN (1, 2) THEN file_size_bytes ELSE 0 END) / 1073741824.0, 2) AS low_quality_gb,
-                    COUNT(*) AS total_assets,
-                    ROUND(SUM(file_size_bytes) / 1073741824.0, 2) AS total_gb,
-                    ROUND(MIN(score_normalized), 4) AS min_score,
-                    ROUND(MAX(CASE WHEN score_quartile = 2 THEN score_normalized END), 4) AS q2_max_score,
-                    MAX(is_active) AS is_active,
-                    MIN(owner_start_date) AS start_date,
-                    MAX(owner_end_date) AS end_date,
-                    MAX(is_family) AS is_family
-                FROM scored_assets
-                GROUP BY primary_owner, camera_model
-                ORDER BY primary_owner ASC, low_quality_gb DESC, low_quality_count DESC;
+                SELECT
+                    da.*,
+                    dis.folder_path,
+                    dis.total_files_on_device,
+                    dis.synced_at_utc,
+                    COALESCE(act.actual_low_count, 0),
+                    COALESCE(act.actual_low_gb, 0.0),
+                    COALESCE(act.actual_total_count, 0),
+                    COALESCE(act.actual_total_gb, 0.0)
+                FROM dev_agg da
+                LEFT JOIN device_inventory_snapshots dis ON dis.camera_model = da.camera_model
+                LEFT JOIN actual_stats act ON act.camera_model = da.camera_model
+                ORDER BY da.primary_owner ASC, da.low_quality_gb DESC, da.low_quality_count DESC;
             """)
             rows = cur.fetchall()
 
@@ -1048,6 +1136,14 @@ def get_cleanup_devices(refresh: bool = False):
                 s_date = r[9]
                 e_date = r[10]
                 is_fam = bool(r[11]) if len(r) > 11 else False
+                snap_folder = r[12]
+                snap_total_files = r[13] or 0
+                snap_synced_at = r[14]
+                act_low_cnt = r[15] or 0
+                act_low_gb = r[16] or 0.0
+                act_tot_cnt = r[17] or 0
+                act_tot_gb = r[18] or 0.0
+                has_snap = bool(snap_synced_at)
 
                 if p_owner not in owner_dict:
                     owner_dict[p_owner] = {
@@ -1097,7 +1193,15 @@ def get_cleanup_devices(refresh: bool = False):
                     "q2_max_score": max_s,
                     "is_active": is_act,
                     "start_date": s_date,
-                    "end_date": e_date
+                    "end_date": e_date,
+                    "has_actual_snapshot": has_snap,
+                    "snapshot_folder": snap_folder,
+                    "snapshot_total_files": snap_total_files,
+                    "snapshot_synced_at": snap_synced_at,
+                    "actual_low_count": act_low_cnt,
+                    "actual_low_gb": act_low_gb,
+                    "actual_total_count": act_tot_cnt,
+                    "actual_total_gb": act_tot_gb
                 })
 
                 grand_low_count += l_cnt
@@ -1146,8 +1250,9 @@ def get_cleanup_devices(refresh: bool = False):
 def get_cleanup_candidates(
     camera_model: str,
     owner: Optional[str] = None,
-    quartile: str = "all",       # "all" (Q1+Q2), "1", "2"
-    media_type: str = "all",     # "all", "video", "photo"
+    quartile: str = "all",          # "all" (Q1+Q2), "1", "2", "all_quartiles" (Q1-Q4)
+    media_type: str = "all",        # "all", "video", "photo"
+    location_status: str = "possibly",  # "possibly" | "actually"
     limit: int = 50,
     offset: int = 0
 ):
@@ -1156,12 +1261,17 @@ def get_cleanup_candidates(
 
     limit = max(1, min(limit, 250))
     offset = max(0, offset)
+    location_status = (location_status or "possibly").lower().strip()
+    if location_status not in ("possibly", "actually"):
+        location_status = "possibly"
 
     quartile_cond = "score_quartile IN (1, 2)"
     if quartile == "1":
         quartile_cond = "score_quartile = 1"
     elif quartile == "2":
         quartile_cond = "score_quartile = 2"
+    elif quartile == "all_quartiles":
+        quartile_cond = "score_quartile IN (1, 2, 3, 4)"
 
     media_cond = ""
     if media_type == "video":
@@ -1173,7 +1283,9 @@ def get_cleanup_candidates(
     if owner and owner != "all":
         owner_cond = "AND primary_owner = ?"
 
-    query = f"""
+    loc_cond = "AND daa_asset_id IS NOT NULL" if location_status == "actually" else ""
+
+    base_cte = f"""
         WITH all_assets_with_moments AS (
             SELECT 
                 a.asset_id,
@@ -1214,15 +1326,21 @@ def get_cleanup_candidates(
                 aaa.ZORIGINALFILESIZE AS file_size_bytes,
                 ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2) AS file_size_mb,
                 ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1073741824.0, 3) AS file_size_gb,
+                daa.asset_id AS daa_asset_id,
+                daa.device_filename AS device_filename,
+                daa.match_tier AS device_match_tier,
+                daa.source_folder AS device_source_folder,
                 NTILE(4) OVER (
-                    PARTITION BY COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown')
+                    PARTITION BY 1
                     ORDER BY COALESCE(v.score_normalized, 0.0) ASC
                 ) AS score_quartile
             FROM assets a
+            LEFT JOIN device_actual_assets daa
+                ON daa.asset_id = a.asset_id AND daa.camera_model = ?
             LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
             LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON za.ZADDITIONALATTRIBUTES = aaa.Z_PK
             LEFT JOIN ZEXTENDEDATTRIBUTES zea ON za.ZEXTENDEDATTRIBUTES = zea.Z_PK
-            LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, zea.ZCAMERAMODEL)
+            LEFT JOIN device_owners do ON do.camera_model = COALESCE(daa.camera_model, a.carrier_device, zea.ZCAMERAMODEL)
                 AND (
                     do.is_active = 1
                     OR (
@@ -1236,11 +1354,11 @@ def get_cleanup_candidates(
                 GROUP BY asset_uuid
             ) ps ON ps.asset_uuid = a.asset_id
             LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
-            WHERE COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') = ?
+            WHERE (COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') = ? OR daa.asset_id IS NOT NULL)
               AND COALESCE(a.removed_from_source, 0) = 0
         ),
-        filtered AS (
-            SELECT 
+        base_filtered AS (
+            SELECT
                 score_quartile,
                 original_filename,
                 month,
@@ -1261,19 +1379,40 @@ def get_cleanup_candidates(
                 height,
                 fps,
                 exif_timestamp_raw,
-                COUNT(*) OVER () as filtered_total_count,
-                ROUND(SUM(file_size_bytes) OVER () / 1048576.0, 2) as filtered_total_mb
+                daa_asset_id,
+                device_filename,
+                device_match_tier,
+                device_source_folder,
+                COUNT(*) OVER () AS possibly_total_count,
+                SUM(CASE WHEN daa_asset_id IS NOT NULL THEN 1 ELSE 0 END) OVER () AS actually_total_count
             FROM all_assets_with_moments
             WHERE {quartile_cond} {media_cond} {owner_cond}
+        ),
+        filtered AS (
+            SELECT
+                *,
+                COUNT(*) OVER () AS filtered_total_count,
+                ROUND(SUM(file_size_bytes) OVER () / 1048576.0, 2) AS filtered_total_mb
+            FROM base_filtered
+            WHERE 1=1 {loc_cond}
         )
-        SELECT * FROM filtered
+    """
+
+    query = base_cte + """
+        SELECT
+            score_quartile, original_filename, month, file_size_mb, score_normalized,
+            assigned_moment, media_type, date_created_utc, primary_owner, carrier_device,
+            origin_camera_model, origin_camera_make, asset_id, file_size_bytes, last_asset_pub,
+            duration_sec, width, height, fps, exif_timestamp_raw,
+            daa_asset_id, device_filename, device_match_tier, device_source_folder,
+            possibly_total_count, actually_total_count, filtered_total_count, filtered_total_mb
+        FROM filtered
         ORDER BY file_size_bytes DESC
         LIMIT ? OFFSET ?;
     """
 
     def _normalize_timestamp(exif_ts: Optional[str], utc_ts: Optional[str]) -> str:
         if exif_ts and len(exif_ts) >= 19:
-            # Convert EXIF '2025:02:16 14:20:06' -> '2025-02-16 14:20:06'
             date_part = exif_ts[:10].replace(":", "-")
             time_part = exif_ts[11:19]
             return f"{date_part} {time_part}"
@@ -1288,7 +1427,20 @@ def get_cleanup_candidates(
         try:
             _ensure_carrier_device_schema(conn)
             cur = conn.cursor()
-            params = [camera_model]
+
+            # Fetch snapshot metadata for this device
+            cur.execute("""
+                SELECT folder_path, total_files_on_device, matched_in_db, synced_at_utc
+                FROM device_inventory_snapshots
+                WHERE camera_model = ?
+            """, (camera_model,))
+            snap_row = cur.fetchone()
+            has_device_snapshot = bool(snap_row)
+            snapshot_folder = snap_row[0] if snap_row else None
+            snapshot_total_files = snap_row[1] if snap_row else 0
+            snapshot_synced_at = snap_row[3] if snap_row else None
+
+            params = [camera_model, camera_model]
             if owner and owner != "all":
                 params.append(owner)
             params.extend([limit, offset])
@@ -1298,11 +1450,15 @@ def get_cleanup_candidates(
 
             total_count = 0
             total_mb = 0.0
+            possibly_total_count = 0
+            actually_total_count = 0
             candidates = []
 
             for r in rows:
-                total_count = r[20] or 0
-                total_mb = r[21] or 0.0
+                possibly_total_count = r[24] or 0
+                actually_total_count = r[25] or 0
+                total_count = r[26] or 0
+                total_mb = r[27] or 0.0
                 utc_raw = r[7]
                 carrier_dev = r[9]
                 origin_raw_cam = r[10]
@@ -1319,6 +1475,7 @@ def get_cleanup_candidates(
                 capture_ts = _normalize_timestamp(exif_raw, utc_raw)
 
                 origin_cam, origin_make = _infer_origin(origin_raw_cam, origin_raw_make, filename)
+                is_actual = r[20] is not None
 
                 candidates.append({
                     "score_quartile": r[0],
@@ -1341,56 +1498,31 @@ def get_cleanup_candidates(
                     "duration_sec": dur_sec,
                     "width": w,
                     "height": h,
-                    "fps": fps_val
+                    "fps": fps_val,
+                    "actually_on_device": is_actual,
+                    "device_location_filename": r[21],
+                    "device_match_tier": r[22],
+                    "device_source_folder": r[23]
                 })
 
-            if not rows and offset > 0:
-                count_params = [camera_model]
+            if not rows:
+                count_params = [camera_model, camera_model]
                 if owner and owner != "all":
                     count_params.append(owner)
-                cur.execute(f"""
-                    WITH all_assets_with_moments AS (
-                        SELECT 
-                            a.asset_id,
-                            COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
-                            COALESCE(aaa.ZORIGINALFILESIZE, 0) AS file_size_bytes,
-                            CASE 
-                                WHEN COALESCE(za.ZKIND, 0) = 1 
-                                     OR lower(a.original_filename) LIKE '%.mov' 
-                                     OR lower(a.original_filename) LIKE '%.mp4' 
-                                     OR lower(a.original_filename) LIKE '%.m4v' 
-                                     OR lower(a.original_filename) LIKE '%.avi' 
-                                THEN 'video' 
-                                ELSE 'photo' 
-                            END AS media_type,
-                            NTILE(4) OVER (
-                                PARTITION BY COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown')
-                                ORDER BY COALESCE(v.score_normalized, 0.0) ASC
-                            ) AS score_quartile
-                        FROM assets a
-                        LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
-                        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON za.ZADDITIONALATTRIBUTES = aaa.Z_PK
-                        LEFT JOIN ZEXTENDEDATTRIBUTES zea ON za.ZEXTENDEDATTRIBUTES = zea.Z_PK
-                        LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, zea.ZCAMERAMODEL)
-                            AND (
-                                do.is_active = 1
-                                OR (
-                                    (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                                    AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                                )
-                            )
-                        LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
-                        WHERE COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') = ?
-                          AND COALESCE(a.removed_from_source, 0) = 0
-                    )
-                    SELECT COUNT(*), ROUND(SUM(file_size_bytes) / 1048576.0, 2)
-                    FROM all_assets_with_moments
-                    WHERE {quartile_cond} {media_cond} {owner_cond}
+                cur.execute(base_cte + """
+                    SELECT
+                        COALESCE(MAX(possibly_total_count), 0),
+                        COALESCE(MAX(actually_total_count), 0),
+                        COUNT(*),
+                        ROUND(COALESCE(SUM(file_size_bytes), 0) / 1048576.0, 2)
+                    FROM filtered
                 """, tuple(count_params))
                 c_row = cur.fetchone()
                 if c_row:
-                    total_count = c_row[0] or 0
-                    total_mb = c_row[1] or 0.0
+                    possibly_total_count = c_row[0] or 0
+                    actually_total_count = c_row[1] or 0
+                    total_count = c_row[2] or 0
+                    total_mb = c_row[3] or 0.0
 
             total_gb = round(total_mb / 1024.0, 2)
 
@@ -1400,6 +1532,13 @@ def get_cleanup_candidates(
                 "owner": owner,
                 "quartile": quartile,
                 "media_type": media_type,
+                "location_status": location_status,
+                "has_device_snapshot": has_device_snapshot,
+                "snapshot_folder": snapshot_folder,
+                "snapshot_total_files": snapshot_total_files,
+                "snapshot_synced_at": snapshot_synced_at,
+                "possibly_total_count": possibly_total_count,
+                "actually_total_count": actually_total_count,
                 "limit": limit,
                 "offset": offset,
                 "total_count": total_count,
