@@ -290,10 +290,88 @@
                       <span class="badge badge-xs badge-green font-mono" id="mode-b-completed-pill">67 Finalized (650)</span>
                     </h3>
                     <p class="card-subtitle">
-                      Overview of next steps if <code>[B] Batch Management</code> is selected — evaluates Manual Curation (<code>400➜500</code>), Favorites Pull &amp; Ranking (<code>500➜650</code>), and Batch Ingest (<code>000➜399</code>).
+                      Overview of next steps if <code>[B] Batch Management</code> is selected — evaluates Batch Ingest (<code>000➜399</code>), Manual Curation (<code>400➜500</code>), and Favorites Pull &amp; Ranking (<code>500➜650</code>).
                     </p>
                   </div>
                 </div>
+              </div>
+
+              <!-- Track 1: Monthly Batch Ingest Reference (At the top of Mode [B]) -->
+              <div style="padding: 0 1rem; margin-bottom: 0.75rem;">
+                <details class="card track-1-compact-card" id="track-1-reference-card" open>
+                  <summary class="card-header" style="cursor: pointer; user-select: none; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.55rem 0.85rem;">
+                    <div style="display: flex; align-items: center; gap: 0.65rem;">
+                      <span style="font-size: 1rem;">⚙️</span>
+                      <div>
+                        <h4 style="margin: 0; font-size: 0.86rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                          Track 1: Monthly Batch Ingest (Mode [B])
+                          <span class="badge badge-xs badge-outline font-mono">050 ➜ 100 ➜ 200 ➜ 210 ➜ 400 ➜ 600</span>
+                        </h4>
+                        <span class="text-muted" style="font-size: 0.71rem;">Step-by-step pipeline execution sequence</span>
+                      </div>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                      <span class="badge badge-xs badge-purple font-mono">Steps</span>
+                    </div>
+                  </summary>
+                  <div class="track-1-body" style="padding: 0.65rem 0.85rem 0.8rem 0.85rem; border-top: 1px solid var(--border-subtle);">
+                    <div class="track-1-horizontal-strip">
+                      <div class="track-mini-step">
+                        <div class="track-mini-header">
+                          <span class="step-num">050</span>
+                          <strong>Managed Intake</strong>
+                        </div>
+                        <p class="track-mini-desc">Direct import + Privacy split</p>
+                        <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_managed_intake')">Run</button>
+                      </div>
+                      <div class="track-mini-arrow">➜</div>
+                      <div class="track-mini-step">
+                        <div class="track-mini-header">
+                          <span class="step-num">100</span>
+                          <strong>Verify Export</strong>
+                        </div>
+                        <p class="track-mini-desc">Readiness check in DB</p>
+                        <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_verify')">Run</button>
+                      </div>
+                      <div class="track-mini-arrow">➜</div>
+                      <div class="track-mini-step">
+                        <div class="track-mini-header">
+                          <span class="step-num">200</span>
+                          <strong>Export Wrapper</strong>
+                        </div>
+                        <p class="track-mini-desc">O(1) originals + Live Photos</p>
+                        <span class="badge badge-xs badge-outline">Step</span>
+                      </div>
+                      <div class="track-mini-arrow">➜</div>
+                      <div class="track-mini-step">
+                        <div class="track-mini-header">
+                          <span class="step-num">210</span>
+                          <strong>Deduplicate</strong>
+                        </div>
+                        <p class="track-mini-desc">Dedupe staging files</p>
+                        <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_dedupe')">Run</button>
+                      </div>
+                      <div class="track-mini-arrow">➜</div>
+                      <div class="track-mini-step" style="cursor: pointer;" onclick="document.getElementById('upload-throughput-panel')?.scrollIntoView({behavior: 'smooth'})" title="Click to view Upload Throughput Timeline">
+                        <div class="track-mini-header">
+                          <span class="step-num">400</span>
+                          <strong>Google Upload</strong>
+                        </div>
+                        <p class="track-mini-desc">Sync to 5TB archive</p>
+                        <span class="badge badge-xs badge-outline" id="step-400-badge">Step</span>
+                      </div>
+                      <div class="track-mini-arrow">➜</div>
+                      <div class="track-mini-step">
+                        <div class="track-mini-header">
+                          <span class="step-num">600</span>
+                          <strong>AI Ranking</strong>
+                        </div>
+                        <p class="track-mini-desc">CLIP aesthetic scoring</p>
+                        <span class="badge badge-xs badge-outline">Step</span>
+                      </div>
+                    </div>
+                  </div>
+                </details>
               </div>
 
               <!-- Primary Suggested Action Banner for Mode [B] -->
@@ -333,10 +411,35 @@
 
               <!-- Step-by-Step Candidate Queues for Mode [B] -->
               <div class="planner-steps-body">
-                <!-- Step 1: Manual Curation Candidates (400 -> 500) -->
+                <!-- Step 1: Next Unprocessed Batches for Ingest & Upload (000 -> 100 -> 200 -> 210 -> 399) -->
                 <div class="planner-subblock">
                   <div class="planner-subblock-header">
-                    <span><strong>1️⃣ Manual Transition Candidates (<code>400 ➜ 500</code>)</strong> · Google Photos Curation &amp; Best-of Album</span>
+                    <span><strong>1️⃣ Next Unprocessed Batches for Ingest &amp; Google Upload (<code>000 ➜ 100 ➜ 200 ➜ 210 ➜ 399</code>)</strong></span>
+                    <span class="badge badge-xs badge-outline font-mono" id="mode-b-000-badge">0 batches</span>
+                  </div>
+                  <div class="planner-table-wrap">
+                    <table class="cleanup-table planner-compact-table">
+                      <thead>
+                        <tr>
+                          <th>Batch</th>
+                          <th>Status</th>
+                          <th style="text-align: right;">Assets</th>
+                          <th>Devices &amp; Family Coverage</th>
+                          <th>Pipeline Path</th>
+                          <th style="text-align: right;">Queue Action</th>
+                        </tr>
+                      </thead>
+                      <tbody id="mode-b-000-tbody">
+                        <tr><td colspan="6" class="text-center text-muted">Loading 000 batches...</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Step 2: Manual Curation Candidates (400 -> 500) -->
+                <div class="planner-subblock">
+                  <div class="planner-subblock-header">
+                    <span><strong>2️⃣ Manual Transition Candidates (<code>400 ➜ 500</code>)</strong> · Google Photos Curation &amp; Best-of Album</span>
                     <span class="badge badge-xs badge-amber font-mono" id="mode-b-400-badge">0 batches</span>
                   </div>
                   <div class="planner-table-wrap">
@@ -358,10 +461,10 @@
                   </div>
                 </div>
 
-                <!-- Step 2: Pipeline Ranking & Finalization Candidates (500 -> 550 -> 600 -> 650) -->
+                <!-- Step 3: Pipeline Ranking & Finalization Candidates (500 -> 550 -> 600 -> 650) -->
                 <div class="planner-subblock">
                   <div class="planner-subblock-header">
-                    <span><strong>2️⃣ Ready for Favorites Pull, Ranking &amp; Cleanup (<code>500 ➜ 550 ➜ 600 ➜ 650</code>)</strong></span>
+                    <span><strong>3️⃣ Ready for Favorites Pull, Ranking &amp; Cleanup (<code>500 ➜ 550 ➜ 600 ➜ 650</code>)</strong></span>
                     <span class="badge badge-xs badge-purple font-mono" id="mode-b-500-badge">0 batches</span>
                   </div>
                   <div class="planner-table-wrap">
@@ -378,31 +481,6 @@
                       </thead>
                       <tbody id="mode-b-500-tbody">
                         <tr><td colspan="6" class="text-center text-muted">Loading 500 batches...</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <!-- Step 3: Next Unprocessed Batches Ready for Ingest & Upload (000 -> 100 -> 200 -> 210 -> 399) -->
-                <div class="planner-subblock">
-                  <div class="planner-subblock-header">
-                    <span><strong>3️⃣ Next Unprocessed Batches for Ingest &amp; Google Upload (<code>000 ➜ 100 ➜ 200 ➜ 210 ➜ 399</code>)</strong></span>
-                    <span class="badge badge-xs badge-outline font-mono" id="mode-b-000-badge">0 batches</span>
-                  </div>
-                  <div class="planner-table-wrap">
-                    <table class="cleanup-table planner-compact-table">
-                      <thead>
-                        <tr>
-                          <th>Batch</th>
-                          <th>Status</th>
-                          <th style="text-align: right;">Assets</th>
-                          <th>Devices &amp; Family Coverage</th>
-                          <th>Pipeline Path</th>
-                          <th style="text-align: right;">Queue Action</th>
-                        </tr>
-                      </thead>
-                      <tbody id="mode-b-000-tbody">
-                        <tr><td colspan="6" class="text-center text-muted">Loading 000 batches...</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -998,81 +1076,6 @@
             </div>
           </div>
 
-          <!-- Track 1: Monthly Batch Ingest Reference (Compact Collapsible Card) -->
-          <details class="card mb-4 track-1-compact-card" id="track-1-reference-card">
-            <summary class="card-header" style="cursor: pointer; user-select: none; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.65rem 1rem;">
-              <div style="display: flex; align-items: center; gap: 0.65rem;">
-                <span style="font-size: 1rem;">⚙️</span>
-                <div>
-                  <h4 style="margin: 0; font-size: 0.88rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                    Track 1: Monthly Batch Ingest Reference (Mode [B])
-                    <span class="badge badge-xs badge-outline font-mono">050 ➜ 100 ➜ 200 ➜ 210 ➜ 400 ➜ 600</span>
-                  </h4>
-                  <span class="text-muted" style="font-size: 0.72rem;">Manual step triggers &amp; pipeline stage architecture</span>
-                </div>
-              </div>
-              <div style="display: flex; align-items: center; gap: 0.5rem;">
-                <span class="badge badge-xs badge-purple font-mono">Click to Toggle Steps</span>
-              </div>
-            </summary>
-            <div class="track-1-body" style="padding: 0.75rem 1rem 0.9rem 1rem; border-top: 1px solid var(--border-subtle);">
-              <div class="track-1-horizontal-strip">
-                <div class="track-mini-step">
-                  <div class="track-mini-header">
-                    <span class="step-num">050</span>
-                    <strong>Managed Intake</strong>
-                  </div>
-                  <p class="track-mini-desc">Direct import + Privacy split</p>
-                  <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_managed_intake')">Run</button>
-                </div>
-                <div class="track-mini-arrow">➜</div>
-                <div class="track-mini-step">
-                  <div class="track-mini-header">
-                    <span class="step-num">100</span>
-                    <strong>Verify Export</strong>
-                  </div>
-                  <p class="track-mini-desc">Readiness check in DB</p>
-                  <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_verify')">Run</button>
-                </div>
-                <div class="track-mini-arrow">➜</div>
-                <div class="track-mini-step">
-                  <div class="track-mini-header">
-                    <span class="step-num">200</span>
-                    <strong>Export Wrapper</strong>
-                  </div>
-                  <p class="track-mini-desc">O(1) originals + Live Photos</p>
-                  <span class="badge badge-xs badge-outline">Step</span>
-                </div>
-                <div class="track-mini-arrow">➜</div>
-                <div class="track-mini-step">
-                  <div class="track-mini-header">
-                    <span class="step-num">210</span>
-                    <strong>Deduplicate</strong>
-                  </div>
-                  <p class="track-mini-desc">Dedupe staging files</p>
-                  <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_dedupe')">Run</button>
-                </div>
-                <div class="track-mini-arrow">➜</div>
-                <div class="track-mini-step" style="cursor: pointer;" onclick="document.getElementById('upload-throughput-panel')?.scrollIntoView({behavior: 'smooth'})" title="Click to view Upload Throughput Timeline">
-                  <div class="track-mini-header">
-                    <span class="step-num">400</span>
-                    <strong>Google Upload</strong>
-                  </div>
-                  <p class="track-mini-desc">Sync to 5TB archive</p>
-                  <span class="badge badge-xs badge-outline" id="step-400-badge">Step</span>
-                </div>
-                <div class="track-mini-arrow">➜</div>
-                <div class="track-mini-step">
-                  <div class="track-mini-header">
-                    <span class="step-num">600</span>
-                    <strong>AI Ranking</strong>
-                  </div>
-                  <p class="track-mini-desc">CLIP aesthetic scoring</p>
-                  <span class="badge badge-xs badge-outline">Step</span>
-                </div>
-              </div>
-            </div>
-          </details>
 
           <!-- Recent Pipeline Executions (Compact at Very Bottom) -->
           <div class="card mb-4 compact-executions-card" id="card-recent-executions">
