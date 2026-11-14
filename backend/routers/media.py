@@ -1935,22 +1935,29 @@ DEFAULT_GROUPING_RULES = [
         "default_enabled": True,
     },
     {
-        "id": "multiday_gps",
+        "id": "misdated_duplicate_triage",
         "priority": 4,
+        "name": "Misdated / Duplicate Triage",
+        "description": "Quarantine assets with zero EXIF dates (0000:00:00), recovery/duplicate filenames (Dupl~, ~001, f########), or duplicate-heavy corrupt import batches instead of treating them as Moment events.",
+        "default_enabled": True,
+    },
+    {
+        "id": "multiday_gps",
+        "priority": 5,
         "name": "Multi-Day GPS Location",
         "description": "Merge non-home unassigned events captured across nearby days (≤5d gap) when GPS metadata is within ≤3 km into a multi-day event.",
         "default_enabled": True,
     },
     {
         "id": "time_gps_session",
-        "priority": 5,
+        "priority": 6,
         "name": "Time & GPS Session Clustering",
         "description": "Group remaining uncategorized assets within ≤2h and ≤500m GPS into finer sub-event sessions instead of full-day buckets.",
         "default_enabled": False,
     },
     {
         "id": "same_date",
-        "priority": 6,
+        "priority": 7,
         "name": "Same-Date Fallback Grouping",
         "description": "Imply remaining uncategorized assets captured on the same calendar date belong together (YYYY-MM-DD - Uncategorized). Refuse to keep individual.",
         "default_enabled": True,
@@ -1961,6 +1968,7 @@ _RULE_LABELS = {
     "existing_proximity": "Existing Moment Proximity",
     "photos_moment": "Apple Photos Moment Title",
     "photos_gps_guard": "Photos GPS & Time Guard",
+    "misdated_duplicate_triage": "Misdated / Duplicate Triage",
     "multiday_gps": "Multi-Day GPS Location",
     "time_gps_session": "Time & GPS Session",
     "same_date": "Same-Date Grouping",
@@ -2213,6 +2221,141 @@ def _apply_multiday_gps_rule(
     return merged_result
 
 
+_LEGACY_CAM_MODELS = {"E5700", "Canon EOS DIGITAL REBEL", "COOLPIX 5700"}
+_RECOVERY_FN_RE = re.compile(r"^(?:dupl~|~\d+|f\d{6,}\.)", re.IGNORECASE)
+_LEGACY_MOV_DSCN_RE = re.compile(r"^(?:mov|dscn)\d+", re.IGNORECASE)
+
+
+def _detect_misdated_duplicate_assets(
+    cur,
+    unassigned_rows: list,
+    row_pre_meta: dict,
+    asset_splits: dict,
+    intake_dup_ids: set[str],
+) -> tuple[dict[str, str], dict[str, dict]]:
+    """Identify misdated/zero-EXIF/recovery-filename assets and duplicate-heavy corrupt import batches."""
+    aids = [r[0] for r in unassigned_rows if r[0] not in asset_splits]
+    if not aids:
+        return {}, {}
+
+    exif_ts_by_aid: dict[str, str] = {}
+    legacy_fn_candidates: set[str] = set()
+    for r in unassigned_rows:
+        aid, fn = r[0], (r[1] or "")
+        if aid in asset_splits:
+            continue
+        if _LEGACY_MOV_DSCN_RE.match(fn):
+            legacy_fn_candidates.add(fn.lower())
+
+    for i in range(0, len(aids), 450):
+        chunk = aids[i:i + 450]
+        ph = ",".join("?" for _ in chunk)
+        cur.execute(
+            f"""
+            SELECT za.ZUUID, aaa.ZEXIFTIMESTAMPSTRING
+            FROM ZASSET za
+            LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+            WHERE za.ZUUID IN ({ph})
+            """,
+            chunk,
+        )
+        for z_uuid, ex_ts in cur.fetchall():
+            if ex_ts:
+                exif_ts_by_aid[z_uuid] = str(ex_ts)
+
+    pre2015_legacy_fns: set[str] = set()
+    if legacy_fn_candidates:
+        fn_list = list(legacy_fn_candidates)
+        for i in range(0, len(fn_list), 450):
+            chunk = fn_list[i:i + 450]
+            ph = ",".join("?" for _ in chunk)
+            cur.execute(
+                f"""
+                SELECT DISTINCT LOWER(original_filename)
+                FROM assets
+                WHERE LOWER(original_filename) IN ({ph})
+                  AND date_created_utc < '2015-01-01'
+                """,
+                chunk,
+            )
+            for (lfn,) in cur.fetchall():
+                if lfn:
+                    pre2015_legacy_fns.add(lfn)
+
+    direct_reasons: dict[str, list[str]] = {}
+    direct_kinds: dict[str, set[str]] = {}
+    batch_groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
+
+    for row_tuple in unassigned_rows:
+        aid, fn, imp_id, cam_model = row_tuple[0], (row_tuple[1] or ""), row_tuple[5], (row_tuple[15] or "")
+        if aid in asset_splits:
+            continue
+        captured_date = row_pre_meta[aid][1]
+        cap_year = int(captured_date[:4]) if captured_date[:4].isdigit() else 0
+        exif_ts = (exif_ts_by_aid.get(aid) or "").strip()
+
+        reasons: list[str] = []
+        kinds: set[str] = set()
+        if exif_ts.startswith("0000"):
+            reasons.append("Zero EXIF date (0000:00:00)")
+            kinds.add("zero_exif")
+        if _RECOVERY_FN_RE.match(fn) or "~" in fn.rsplit(".", 1)[0]:
+            reasons.append("Recovery/duplicate filename")
+            kinds.add("recovery_fn")
+        if cap_year >= 2018 and (
+            cam_model in _LEGACY_CAM_MODELS
+            or (_LEGACY_MOV_DSCN_RE.match(fn) and fn.lower() in pre2015_legacy_fns)
+        ):
+            reasons.append(f"Legacy 2000s media dated {cap_year}")
+            kinds.add("legacy_misdate")
+
+        if reasons:
+            direct_reasons[aid] = reasons
+            direct_kinds[aid] = kinds
+        if imp_id:
+            batch_groups.setdefault((captured_date, str(imp_id)), []).append((aid, fn))
+
+    quarantined_reason: dict[str, str] = {}
+    triage_stats: dict[str, dict] = {}
+
+    # Propagate across corrupt bulk-import batches on the same date (e.g. legacy recovery folder imported on 2020-10-19)
+    propagated_batch_info: dict[str, str] = {}
+    for (c_date, imp_str), members in batch_groups.items():
+        if len(members) < 4:
+            continue
+        n_direct = sum(1 for a_id, _fn in members if a_id in direct_reasons)
+        n_dup = sum(1 for a_id, _fn in members if a_id in intake_dup_ids)
+        if (n_direct >= 3 or n_direct / len(members) >= 0.4) and (
+            n_dup / len(members) >= 0.35 or n_direct / len(members) >= 0.5
+        ):
+            for a_id, _fn in members:
+                if a_id not in direct_reasons:
+                    propagated_batch_info[a_id] = f"Corrupt/duplicate bulk import #{imp_str} ({n_direct}/{len(members)} misdated)"
+
+    for row_tuple in unassigned_rows:
+        aid = row_tuple[0]
+        if aid not in direct_reasons and aid not in propagated_batch_info:
+            continue
+        captured_date = row_pre_meta[aid][1]
+        folder_key = f"{captured_date} - Misdated / Duplicate Triage"
+        st = triage_stats.setdefault(folder_key, {"zero_exif": 0, "recovery": 0, "dup_copies": 0, "total": 0})
+        st["total"] += 1
+        kinds = direct_kinds.get(aid, set())
+        if "zero_exif" in kinds:
+            st["zero_exif"] += 1
+        if "recovery_fn" in kinds or "legacy_misdate" in kinds:
+            st["recovery"] += 1
+        if aid in intake_dup_ids:
+            st["dup_copies"] += 1
+
+        if aid in direct_reasons:
+            quarantined_reason[aid] = "; ".join(direct_reasons[aid])
+        else:
+            quarantined_reason[aid] = propagated_batch_info[aid]
+
+    return quarantined_reason, triage_stats
+
+
 def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str]) -> dict:
     """Computes live Mode [M] thresholds, unassigned high-rank clusters, sync needs, and recommendations from SQLite."""
     # Excluded assets in Ignore / SkipPublishing / TopScore Excluded albums
@@ -2361,6 +2504,17 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         if suggested_new and has_gps and aid not in asset_splits:
             moment_gps_points.setdefault(suggested_new, []).append((dt_target, float(lat), float(lon)))
 
+    triage_aid_reasons: dict[str, str] = {}
+    triage_stats: dict[str, dict] = {}
+    if unassigned_rows and rules_map.get("misdated_duplicate_triage", True):
+        triage_aid_reasons, triage_stats = _detect_misdated_duplicate_assets(
+            cur,
+            unassigned_rows,
+            row_pre_meta,
+            asset_splits,
+            intake_dup_ids,
+        )
+
     # Pick primary dense GPS sub-cluster for each suggested_new (in case GPS itself spans >5 km)
     moment_primary_anchors: dict[str, list[tuple[Optional[datetime], float, float]]] = {}
     for s_key, pts in moment_gps_points.items():
@@ -2484,6 +2638,36 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                     None,
                     refused_from_group=src_group,
                 )
+            continue
+
+        if aid in triage_aid_reasons:
+            triage_folder = f"{captured_date} - Misdated / Duplicate Triage"
+            st = triage_stats.get(triage_folder, {})
+            summary_parts = []
+            if st.get("zero_exif"):
+                summary_parts.append(f"{st['zero_exif']} zero-EXIF (0000:00:00)")
+            if st.get("recovery"):
+                summary_parts.append(f"{st['recovery']} recovery/legacy names")
+            if st.get("dup_copies"):
+                summary_parts.append(f"{st['dup_copies']} dup copies")
+            triage_group_reason = (
+                f"Quarantined non-Moment triage ({', '.join(summary_parts)})"
+                if summary_parts
+                else "Misdated / duplicate import triage"
+            )
+            _add_asset_to_group(
+                triage_folder,
+                "Misdated / Duplicate Triage",
+                "misdated_duplicate_triage",
+                triage_group_reason,
+                row_tuple,
+                captured_str,
+                suggested_new,
+                None,
+                None,
+            )
+            # Surface the asset-specific triage signal in notes rather than overwriting with group summary
+            grouped_moments[triage_folder]["assets"][-1]["notes"] = triage_aid_reasons[aid]
             continue
 
         # Check Photos Moment GPS & Time Guard when Apple Photos Moment Title applies
@@ -2771,7 +2955,14 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         rule_cluster_counts[rid] = rule_cluster_counts.get(rid, 0) + 1
         rule_asset_counts[rid] = rule_asset_counts.get(rid, 0) + cnt
         unassigned_clusters.append(grp)
-    unassigned_clusters.sort(key=lambda g: (-len(g["assets"]), -g["max_score"], g["folder"]))
+    unassigned_clusters.sort(
+        key=lambda g: (
+            1 if g.get("rule_id") == "misdated_duplicate_triage" else 0,
+            -len(g["assets"]),
+            -g["max_score"],
+            g["folder"],
+        )
+    )
 
     custom_split_groups = sorted({tgt for tgt, _src in asset_splits.values() if tgt and tgt != "__INDIVIDUAL__"})
     grouping_rules_payload = {

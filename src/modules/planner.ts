@@ -884,11 +884,15 @@ function renderUnassignedClustersList(): void {
   const sorted = [...filtered].sort((a, b) => {
     const cntA = (a.assets || []).length || a.asset_count || 0;
     const cntB = (b.assets || []).length || b.asset_count || 0;
+    const isTriageA = a.rule_id === 'misdated_duplicate_triage' ? 1 : 0;
+    const isTriageB = b.rule_id === 'misdated_duplicate_triage' ? 1 : 0;
     if (unassignedSortMode === 'size') {
+      if (isTriageA !== isTriageB) return isTriageA - isTriageB;
       if (cntB !== cntA) return cntB - cntA;
       if (b.max_score !== a.max_score) return b.max_score - a.max_score;
       return (a.folder || '').localeCompare(b.folder || '');
     } else if (unassignedSortMode === 'score') {
+      if (isTriageA !== isTriageB) return isTriageA - isTriageB;
       if (b.max_score !== a.max_score) return b.max_score - a.max_score;
       if (cntB !== cntA) return cntB - cntA;
       return (a.folder || '').localeCompare(b.folder || '');
@@ -918,7 +922,9 @@ function renderUnassignedClustersList(): void {
       );
 
       let typeBadgeClass = 'badge-amber';
-      if ((cluster.group_type || '').includes('Proposed New')) {
+      if (cluster.rule_id === 'misdated_duplicate_triage') {
+        typeBadgeClass = 'badge-red';
+      } else if ((cluster.group_type || '').includes('Proposed New')) {
         typeBadgeClass = 'badge-purple';
       } else if ((cluster.group_type || '').includes('Existing')) {
         typeBadgeClass = 'badge-green';
@@ -1063,6 +1069,15 @@ function renderUnassignedClustersList(): void {
             </button>
             <button
               type="button"
+              class="btn btn-xs btn-danger btn-ignore-selected-assets"
+              data-split-source="${escapeHtml(cluster.folder)}"
+              title="Move checked assets directly to Apple Photos Ignore album"
+              ${selectedInCluster.size === 0 ? 'disabled' : ''}
+            >
+              🗑️ Move Selected to Ignore
+            </button>
+            <button
+              type="button"
               class="btn btn-xs btn-purple btn-create-moment-selected"
               data-split-source="${escapeHtml(cluster.folder)}"
               title="Create an Apple Photos Moment directly from only the checked assets"
@@ -1149,6 +1164,18 @@ function renderUnassignedClustersList(): void {
             </button>`
                   : ''
             }
+            ${
+              cluster.rule_id === 'misdated_duplicate_triage'
+                ? `<button
+              class="btn btn-xs btn-danger btn-ignore-triage-cluster"
+              data-ignore-cluster="${escapeHtml(cluster.folder)}"
+              title="Move all ${count} quarantined misdated/duplicate assets into Apple Photos Ignore album"
+              style="white-space: nowrap; flex-shrink: 0;"
+            >
+              🗑️ Ignore All (${count})
+            </button>`
+                : ''
+            }
             <button
               class="btn btn-xs btn-purple btn-create-moment-from-cluster"
               data-cluster-folder="${escapeHtml(cluster.folder)}"
@@ -1187,7 +1214,7 @@ function renderUnassignedClustersList(): void {
 
   listEl.querySelectorAll<HTMLElement>('[data-toggle-cluster]').forEach(headerEl => {
     headerEl.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).closest('[data-preview-asset-id], .btn-create-moment-from-cluster, .btn-refuse-cluster-group, .btn-restore-cluster-group, .btn-clear-split-group')) return;
+      if ((e.target as HTMLElement).closest('[data-preview-asset-id], .btn-create-moment-from-cluster, .btn-refuse-cluster-group, .btn-restore-cluster-group, .btn-clear-split-group, .btn-ignore-triage-cluster')) return;
       const folder = headerEl.dataset.toggleCluster;
       if (!folder) return;
       if (expandedUnassignedFolders.has(folder)) {
@@ -1208,7 +1235,7 @@ function renderUnassignedClustersList(): void {
       countBadge.textContent = `${sel.size} selected`;
       countBadge.className = `badge badge-xs ${sel.size > 0 ? 'badge-purple' : 'badge-outline'} font-mono cluster-selected-count`;
     }
-    cardEl.querySelectorAll<HTMLButtonElement>('.btn-split-selected-assets, .btn-remove-selected-assets, .btn-create-moment-selected').forEach(b => {
+    cardEl.querySelectorAll<HTMLButtonElement>('.btn-split-selected-assets, .btn-remove-selected-assets, .btn-ignore-selected-assets, .btn-create-moment-selected').forEach(b => {
       b.disabled = sel.size === 0;
     });
   };
@@ -1273,6 +1300,31 @@ function renderUnassignedClustersList(): void {
         split_target_group: '__INDIVIDUAL__',
         split_source_group: folder
       });
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ignore-selected-assets').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const folder = btn.dataset.splitSource || '';
+      const sel = Array.from(clusterAssetSelection.get(folder) || []);
+      if (!folder || !sel.length) return;
+      if (!window.confirm(`Move ${sel.length} selected asset(s) from "${folder}" to Apple Photos 'Ignore' album?`)) return;
+      clusterAssetSelection.delete(folder);
+      void moveAssetsToIgnoreAlbum(sel, btn);
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ignore-triage-cluster').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const folder = btn.dataset.ignoreCluster || '';
+      const cluster = (plannerOverviewData?.mode_m?.unassigned_clusters || []).find(c => c.folder === folder);
+      if (!cluster) return;
+      const allIds = (cluster.assets || []).map(a => a.asset_id).filter(Boolean);
+      if (!allIds.length) return;
+      if (!window.confirm(`Move all ${allIds.length} quarantined misdated/duplicate asset(s) in "${folder}" to Apple Photos 'Ignore' album?`)) return;
+      clusterAssetSelection.delete(folder);
+      void moveAssetsToIgnoreAlbum(allIds, btn);
     });
   });
 
@@ -1363,6 +1415,36 @@ function renderUnassignedClustersList(): void {
       );
     });
   });
+}
+
+async function moveAssetsToIgnoreAlbum(assetIds: string[], triggerBtn?: HTMLButtonElement | null): Promise<void> {
+  if (!assetIds.length) return;
+  const prevText = triggerBtn?.textContent || '';
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+    triggerBtn.textContent = `Ignoring ${assetIds.length}...`;
+  }
+  try {
+    const res = await fetch('/api/media/mode-m/dedup-apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asset_ids: assetIds })
+    });
+    const data: ModeMDedupApplyResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      window.alert(`Failed moving assets to Ignore album: ${data.error || `HTTP ${res.status}`}`);
+      return;
+    }
+    await fetchPlannerOverview(true, 'm');
+    if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
+  } catch (err) {
+    window.alert(`Failed moving assets to Ignore album: ${String(err)}`);
+  } finally {
+    if (triggerBtn) {
+      triggerBtn.disabled = false;
+      triggerBtn.textContent = prevText;
+    }
+  }
 }
 
 async function openIntakeDedupModal(): Promise<void> {
