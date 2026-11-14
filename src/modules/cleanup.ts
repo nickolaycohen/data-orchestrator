@@ -245,10 +245,8 @@ export function setupMediaCleanup(): void {
 
   document.querySelectorAll<HTMLElement>('.cleanup-preview-sort-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      const nextSort = btn.dataset.previewSort === 'score' ? 'score' : 'timestamp';
-      if (nextSort === previewSortMode) return;
-      previewSortMode = nextSort;
-      applyPreviewSortOrder();
+      previewSortMode = btn.dataset.previewSort === 'score' ? 'score' : 'timestamp';
+      applyPreviewSortOrder(true);
     });
   });
 
@@ -1443,18 +1441,19 @@ function syncPreviewSortButtons(): void {
   });
 }
 
-function applyPreviewSortOrder(): void {
+function applyPreviewSortOrder(focusFirst = false): void {
   syncPreviewSortButtons();
   if (!previewGroupAssetIds.length) return;
 
   const comparator = previewSortMode === 'score' ? compareAssetsByScore : compareAssetsByCaptureDate;
   previewGroupAssetIds.sort(comparator);
 
-  if (previewModalAssetId) {
+  if (focusFirst || !previewModalAssetId) {
+    previewGroupIndex = 0;
+    renderCleanupPreviewAsset(previewGroupAssetIds[0]);
+  } else {
     const newIdx = previewGroupAssetIds.indexOf(previewModalAssetId);
     previewGroupIndex = newIdx >= 0 ? newIdx : 0;
-  } else {
-    previewGroupIndex = 0;
   }
 
   renderPreviewFilmstrip();
