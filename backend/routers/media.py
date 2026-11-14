@@ -1811,6 +1811,12 @@ def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
     return 2 * r * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1 - a)))
 
 
+def _is_dated_moment_album(album_name: str) -> bool:
+    if not album_name:
+        return False
+    return bool(re.search(r"\b(?:19|20)\d{2}\b", album_name))
+
+
 def _match_closest_existing_moment(
     fn: str,
     dt_target: Optional[datetime],
@@ -1837,13 +1843,19 @@ def _match_closest_existing_moment(
             return f"{sec / 3600:.1f}h apart"
         return f"{sec / 86400:.1f}d apart"
 
-    # 1. Same import session proximity
+    # 1. Same import session proximity (same day / <24h, or GPS <500m within 3d)
     if imp_id and imp_id in assigned_by_import:
         best_imp = None
         for m_alb, m_fn, m_dt, m_lat, m_lon in assigned_by_import[imp_id]:
             diff_sec = abs((dt_target - m_dt).total_seconds())
-            is_dated = bool(re.match(r"^\d{4}(?:-\d{2})?(?:-\d{2})?\s*-\s*", m_alb))
-            if is_dated and diff_sec > 14 * 86400:
+            is_dated = _is_dated_moment_album(m_alb)
+            dist = None
+            if has_gps and m_lat is not None and m_lon is not None:
+                dist = _haversine_meters(lat, lon, m_lat, m_lon)
+            if is_dated:
+                if diff_sec > 24 * 3600 and not (dist is not None and dist < 500 and diff_sec <= 3 * 86400):
+                    continue
+            elif diff_sec > 14 * 86400 and not (dist is not None and dist < 500):
                 continue
             m_num = _extract_file_num(m_fn)
             fn_diff = abs(target_num - m_num) if (target_num is not None and m_num is not None) else None
@@ -1853,8 +1865,7 @@ def _match_closest_existing_moment(
             if fn_diff is not None and fn_diff <= 20:
                 reasons.append(f"frame {m_fn} (Δ{fn_diff})")
             reasons.append(_fmt_time_diff(diff_sec))
-            if has_gps and m_lat is not None and m_lon is not None:
-                dist = _haversine_meters(lat, lon, m_lat, m_lon)
+            if dist is not None:
                 if dist < 50:
                     score -= 8.0
                     reasons.append(f"GPS {dist:.0f}m")
@@ -1866,15 +1877,15 @@ def _match_closest_existing_moment(
         if best_imp:
             candidates.append(best_imp)
 
-    # 2. GPS proximity (<1000m, within 14d for dated albums)
+    # 2. GPS proximity (<1000m, within 3d for dated albums)
     if has_gps:
         best_gps = None
         for m_alb, m_dt, m_lat, m_lon in assigned_with_gps:
             if abs(m_lat - lat) >= 0.02 or abs(m_lon - lon) >= 0.02:
                 continue
             diff_sec = abs((dt_target - m_dt).total_seconds())
-            is_dated = bool(re.match(r"^\d{4}(?:-\d{2})?(?:-\d{2})?\s*-\s*", m_alb))
-            if is_dated and diff_sec > 14 * 86400:
+            is_dated = _is_dated_moment_album(m_alb)
+            if is_dated and diff_sec > 3 * 86400:
                 continue
             dist = _haversine_meters(lat, lon, m_lat, m_lon)
             if dist < 1000:
@@ -2039,13 +2050,17 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         )
         best_album_name, best_reason = closest if closest else (None, None)
 
+        reason_str = best_reason or ""
+        is_tight_reason = bool(
+            "inside event span" in reason_str
+            or "s apart" in reason_str
+            or "m apart" in reason_str
+            or "h apart" in reason_str
+        )
         is_tight_existing = bool(
             best_album_name and (
-                not suggested_new
-                or "inside event span" in (best_reason or "")
-                or "s apart" in (best_reason or "")
-                or "m apart" in (best_reason or "")
-                or "h apart" in (best_reason or "")
+                is_tight_reason
+                or (not suggested_new and (not _is_dated_moment_album(best_album_name) or "GPS " in reason_str))
             )
         )
         if is_tight_existing:
@@ -2862,9 +2877,9 @@ _intake_dedup_cache = {
 
 
 def _get_intake_duplicate_ids(force: bool = False) -> set[str]:
-    """Computes duplicate unassigned asset IDs via Media-Intake dedup (cached 30s) instead of Photos Merge."""
+    """Computes duplicate unassigned asset IDs via Media-Intake dedup (cached 5m) instead of Photos Merge."""
     now = time.time()
-    if not force and (now - _intake_dedup_cache["timestamp"] < 30.0) and _intake_dedup_cache["dup_ids"]:
+    if not force and (now - _intake_dedup_cache["timestamp"] < 300.0) and _intake_dedup_cache["dup_ids"]:
         return set(_intake_dedup_cache["dup_ids"])
     scripts_dir = str(REPOS["media-organizer-pipeline"] / "scripts")
     if scripts_dir not in sys.path:
@@ -2943,6 +2958,7 @@ class CreateMomentRequest(BaseModel):
     moment_name: str
     parent_folder: str = "Moments"
     asset_ids: list[str] = []
+    ignore_asset_ids: list[str] = []
     allow_existing: bool = True
 
 
@@ -3398,8 +3414,37 @@ def create_moment_via_applescript(req: CreateMomentRequest):
             "db_error": str(e),
         }
 
-    _intake_dedup_cache["timestamp"] = 0.0
-    _intake_dedup_cache["dup_ids"] = set()
+    ignored_photos_added = 0
+    ignored_db_updated = 0
+    clean_ignore_ids = []
+    seen_ignore = set(clean_ids)
+    for aid in (req.ignore_asset_ids or []):
+        s = (aid or "").strip()
+        if s and s not in seen_ignore:
+            seen_ignore.add(s)
+            clean_ignore_ids.append(s)
+
+    if clean_ignore_ids:
+        python_bin, script_path = _get_pipeline_python_and_dedup_script()
+        if script_path.exists():
+            try:
+                proc_ign = subprocess.run(
+                    [python_bin, str(script_path), "--apply", "--json", "--asset-ids", *clean_ignore_ids],
+                    cwd=str(REPOS["media-organizer-pipeline"]),
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if proc_ign.returncode == 0 and proc_ign.stdout.strip():
+                    ign_data = json.loads(proc_ign.stdout)
+                    ignored_photos_added = int(ign_data.get("photos_added") or 0)
+                    ignored_db_updated = int(ign_data.get("db_updated") or 0)
+            except Exception:
+                pass
+
+    # Keep pHash duplicate cache warm for remaining unassigned items (just drop processed IDs)
+    if _intake_dedup_cache["dup_ids"]:
+        _intake_dedup_cache["dup_ids"] -= set(clean_ids) | set(clean_ignore_ids)
 
     return {
         "ok": True,
@@ -3412,4 +3457,6 @@ def create_moment_via_applescript(req: CreateMomentRequest):
         "photos_added": total_photos_added,
         "db_inserted_assets": db_inserted_assets,
         "db_updated_assets": db_updated_moments_col,
+        "ignored_photos_added": ignored_photos_added,
+        "ignored_db_updated": ignored_db_updated,
     }

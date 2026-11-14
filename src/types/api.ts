@@ -355,6 +355,8 @@ export interface CreateMomentResponse {
   photos_added?: number;
   db_inserted_assets?: number;
   db_updated_assets?: number;
+  ignored_photos_added?: number;
+  ignored_db_updated?: number;
 }
 
 export type TriggerTaskFn = (

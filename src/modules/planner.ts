@@ -18,8 +18,9 @@ import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../
 import { openCleanupPreviewModal } from './cleanup.ts';
 
 let plannerOverviewData: PlannerOverviewResponse | null = null;
-let isFetchingPlannerOverview = false;
+let activePlannerFetchPromise: Promise<void> | null = null;
 let pendingPlannerRefresh = false;
+let queuedPlannerFetchPromise: Promise<void> | null = null;
 let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
 const expandedUnassignedFolders = new Set<string>();
@@ -260,6 +261,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
   }
 
   document.getElementById('create-moment-exclude-dups')?.addEventListener('change', () => updateCreateMomentAssetsUI());
+  document.getElementById('create-moment-ignore-dups')?.addEventListener('change', () => updateCreateMomentAssetsUI());
   document.getElementById('create-moment-empty-only')?.addEventListener('change', () => updateCreateMomentAssetsUI());
   document.getElementById('btn-submit-create-moment')?.addEventListener('click', () => {
     void submitCreateMoment();
@@ -291,35 +293,50 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
 }
 
 export async function fetchPlannerOverview(force = false): Promise<void> {
-  if (isFetchingPlannerOverview) {
-    if (force) pendingPlannerRefresh = true;
-    return;
-  }
-  isFetchingPlannerOverview = true;
-
-  try {
-    const res = await fetch('/api/media/planner-overview');
-    const data: PlannerOverviewResponse = await res.json();
-
-    if (!data.connected) return;
-    plannerOverviewData = data;
-
-    const updatedEl = document.getElementById('planner-overview-updated');
-    if (updatedEl) {
-      updatedEl.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+  if (activePlannerFetchPromise) {
+    if (!force) {
+      return activePlannerFetchPromise;
     }
-
-    renderModeBOverview((data.mode_b || {}) as PlannerModeB);
-    renderModeMOverview((data.mode_m || {}) as PlannerModeM);
-  } catch (err) {
-    console.error('Error fetching planner overview:', err);
-  } finally {
-    isFetchingPlannerOverview = false;
-    if (pendingPlannerRefresh) {
-      pendingPlannerRefresh = false;
-      void fetchPlannerOverview();
+    pendingPlannerRefresh = true;
+    if (!queuedPlannerFetchPromise) {
+      queuedPlannerFetchPromise = activePlannerFetchPromise
+        .catch(() => {})
+        .then(() => {
+          queuedPlannerFetchPromise = null;
+          pendingPlannerRefresh = false;
+          return fetchPlannerOverview(false);
+        });
     }
+    return queuedPlannerFetchPromise;
   }
+
+  activePlannerFetchPromise = (async () => {
+    try {
+      const res = await fetch('/api/media/planner-overview');
+      const data: PlannerOverviewResponse = await res.json();
+
+      if (!data.connected) return;
+      plannerOverviewData = data;
+
+      const updatedEl = document.getElementById('planner-overview-updated');
+      if (updatedEl) {
+        updatedEl.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+      }
+
+      renderModeBOverview((data.mode_b || {}) as PlannerModeB);
+      renderModeMOverview((data.mode_m || {}) as PlannerModeM);
+    } catch (err) {
+      console.error('Error fetching planner overview:', err);
+    } finally {
+      activePlannerFetchPromise = null;
+      if (pendingPlannerRefresh && !queuedPlannerFetchPromise) {
+        pendingPlannerRefresh = false;
+        void fetchPlannerOverview();
+      }
+    }
+  })();
+
+  return activePlannerFetchPromise;
 }
 
 function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
@@ -1521,6 +1538,7 @@ function openCreateMomentModal(opts?: {
   const parentSelect = document.getElementById('create-moment-parent-select') as HTMLSelectElement | null;
   const statusEl = document.getElementById('create-moment-status');
   const excludeDupsCb = document.getElementById('create-moment-exclude-dups') as HTMLInputElement | null;
+  const ignoreDupsCb = document.getElementById('create-moment-ignore-dups') as HTMLInputElement | null;
   const emptyOnlyCb = document.getElementById('create-moment-empty-only') as HTMLInputElement | null;
 
   createMomentCtx = {
@@ -1546,6 +1564,7 @@ function openCreateMomentModal(opts?: {
     nameInput.value = opts?.prefillName ?? '';
   }
   if (excludeDupsCb) excludeDupsCb.checked = true;
+  if (ignoreDupsCb) ignoreDupsCb.checked = false;
   if (emptyOnlyCb) emptyOnlyCb.checked = false;
   if (statusEl) {
     statusEl.style.display = 'none';
@@ -1582,12 +1601,24 @@ function getSelectedAssetIdsForCreateMoment(): string[] {
   return createMomentCtx.allAssetIds;
 }
 
+function getExcludedDuplicateIdsForCreateMoment(): string[] {
+  const emptyOnlyCb = document.getElementById('create-moment-empty-only') as HTMLInputElement | null;
+  const excludeDupsCb = document.getElementById('create-moment-exclude-dups') as HTMLInputElement | null;
+  const ignoreDupsCb = document.getElementById('create-moment-ignore-dups') as HTMLInputElement | null;
+  if (emptyOnlyCb?.checked || !excludeDupsCb?.checked || !ignoreDupsCb?.checked) return [];
+  const uniqueSet = new Set(createMomentCtx.uniqueAssetIds);
+  return createMomentCtx.allAssetIds.filter(id => !uniqueSet.has(id));
+}
+
 function updateCreateMomentAssetsUI(): void {
   const box = document.getElementById('create-moment-assets-box');
   const summaryEl = document.getElementById('create-moment-cluster-summary');
   const countPill = document.getElementById('create-moment-asset-count-pill');
   const dupLabel = document.getElementById('create-moment-exclude-dups-label');
   const excludeDupsCb = document.getElementById('create-moment-exclude-dups') as HTMLInputElement | null;
+  const ignoreDupsRow = document.getElementById('create-moment-ignore-dups-row');
+  const ignoreDupsCb = document.getElementById('create-moment-ignore-dups') as HTMLInputElement | null;
+  const ignoreDupsLabel = document.getElementById('create-moment-ignore-dups-label');
   const emptyOnlyCb = document.getElementById('create-moment-empty-only') as HTMLInputElement | null;
   if (!box) return;
 
@@ -1614,6 +1645,14 @@ function updateCreateMomentAssetsUI(): void {
   }
   if (excludeDupsCb) {
     excludeDupsCb.disabled = Boolean(emptyOnlyCb?.checked);
+  }
+  if (ignoreDupsRow) {
+    const showIgnore = dupCount > 0 && Boolean(excludeDupsCb?.checked) && !emptyOnlyCb?.checked;
+    ignoreDupsRow.style.display = showIgnore ? 'flex' : 'none';
+    if (ignoreDupsCb) ignoreDupsCb.disabled = !showIgnore;
+    if (ignoreDupsLabel) {
+      ignoreDupsLabel.textContent = `Also move ${dupCount} excluded duplicate(s) to Apple Photos Ignore album`;
+    }
   }
 
   const willAdd = getSelectedAssetIdsForCreateMoment().length;
@@ -1678,6 +1717,30 @@ async function checkExistingMemoriesMatch(query: string): Promise<void> {
   }
 }
 
+function applyOptimisticClusterRemoval(removedIds: Set<string>): void {
+  if (!removedIds.size || !plannerOverviewData?.mode_m?.unassigned_clusters) return;
+  const clusters = plannerOverviewData.mode_m.unassigned_clusters;
+  const nextClusters = [];
+  for (const c of clusters) {
+    const remainingAssets = (c.assets || []).filter(a => !removedIds.has(a.asset_id));
+    if (!remainingAssets.length) continue;
+    const dupCnt = remainingAssets.filter(a => a.is_duplicate_copy).length;
+    nextClusters.push({
+      ...c,
+      assets: remainingAssets,
+      asset_count: remainingAssets.length,
+      duplicate_copy_count: dupCnt
+    });
+  }
+  plannerOverviewData.mode_m.unassigned_clusters = nextClusters;
+  plannerOverviewData.mode_m.unassigned_total_clusters = nextClusters.length;
+  plannerOverviewData.mode_m.unassigned_total_assets = nextClusters.reduce(
+    (sum, c) => sum + (c.assets?.length || c.asset_count || 0),
+    0
+  );
+  renderModeMOverview(plannerOverviewData.mode_m);
+}
+
 async function submitCreateMoment(): Promise<void> {
   if (isSubmittingCreateMoment) return;
   const nameInput = document.getElementById('create-moment-name-input') as HTMLInputElement | null;
@@ -1690,6 +1753,7 @@ async function submitCreateMoment(): Promise<void> {
   const parentFolder = (parentSelect?.value || 'Moments').trim() || 'Moments';
   const allowExisting = allowExistingCb ? allowExistingCb.checked : true;
   const assetIds = getSelectedAssetIdsForCreateMoment();
+  const ignoreAssetIds = getExcludedDuplicateIdsForCreateMoment();
 
   if (!momentName) {
     if (statusEl) {
@@ -1707,7 +1771,8 @@ async function submitCreateMoment(): Promise<void> {
   }
   if (statusEl) {
     statusEl.style.display = 'flex';
-    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Creating Moment <code>${escapeHtml(momentName)}</code> in Apple Photos via AppleScript${assetIds.length ? ` and adding ${assetIds.length} asset(s)` : ''}...</span>`;
+    const ignNote = ignoreAssetIds.length ? ` and moving ${ignoreAssetIds.length} duplicate(s) to Ignore` : '';
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Creating Moment <code>${escapeHtml(momentName)}</code> in Apple Photos via AppleScript${assetIds.length ? ` and adding ${assetIds.length} asset(s)` : ''}${escapeHtml(ignNote)}...</span>`;
   }
 
   try {
@@ -1718,6 +1783,7 @@ async function submitCreateMoment(): Promise<void> {
         moment_name: momentName,
         parent_folder: parentFolder,
         asset_ids: assetIds,
+        ignore_asset_ids: ignoreAssetIds,
         allow_existing: allowExisting
       })
     });
@@ -1731,20 +1797,38 @@ async function submitCreateMoment(): Promise<void> {
       return;
     }
 
+    // Immediately update UI cluster list optimistically while authoritative DB refresh runs
+    applyOptimisticClusterRemoval(new Set([...assetIds, ...ignoreAssetIds]));
+
     if (statusEl) {
       statusEl.style.display = 'flex';
       statusEl.innerHTML = `
-        <span class="text-green">
-          ✅ AppleScript <strong>${escapeHtml(data.action || 'created')}</strong>
-          <code>${escapeHtml(data.full_path || momentName)}</code>
-          — added <strong>${data.photos_added ?? 0}</strong> asset(s) in Photos
-          (synced ${data.db_inserted_assets ?? 0} album links in DB).
+        <div class="spinner-sm"></div>
+        <span>
+          AppleScript <strong>${escapeHtml(data.action || 'created')}</strong>
+          <code>${escapeHtml(data.full_path || momentName)}</code> (+${data.photos_added ?? 0} in Photos) — refreshing Moments Organizer list...
         </span>
       `;
     }
 
     await Promise.all([fetchMemoriesFolders(), fetchPlannerOverview(true)]);
     if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
+
+    if (statusEl) {
+      const ignSummary =
+        (data.ignored_photos_added ?? 0) > 0 || (data.ignored_db_updated ?? 0) > 0
+          ? `; moved ${data.ignored_photos_added ?? 0} duplicate(s) to Ignore`
+          : '';
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `
+        <span class="text-green">
+          ✅ AppleScript <strong>${escapeHtml(data.action || 'created')}</strong>
+          <code>${escapeHtml(data.full_path || momentName)}</code>
+          — added <strong>${data.photos_added ?? 0}</strong> asset(s) in Photos
+          (synced ${data.db_inserted_assets ?? 0} album links in DB${escapeHtml(ignSummary)}). Moments Organizer list refreshed.
+        </span>
+      `;
+    }
   } catch (err: any) {
     console.error('Error creating Moment via AppleScript:', err);
     if (statusEl) {
