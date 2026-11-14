@@ -628,6 +628,28 @@
 
                   <!-- Expanded Unassigned High-Rank Assets Above Threshold (Clustered by Proposed Moment & Sorted by Cluster Size) -->
                   <div id="mode-m-unassigned-section" class="unassigned-clusters-section" style="display: none;">
+                    <!-- Transparent Grouping Rule Set & Per-Rule Accept/Refuse Controls -->
+                    <div id="mode-m-rules-panel" class="grouping-rules-panel">
+                      <div class="grouping-rules-header">
+                        <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                          <span style="font-size: 0.78rem; font-weight: 600; color: var(--text-primary);">⚖️ Grouping Rule Set</span>
+                          <span class="badge badge-xs badge-purple font-mono" id="mode-m-rules-summary-badge">4 rules</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                          <button class="btn btn-xs btn-outline" id="btn-reset-grouping-rules" title="Restore all default grouping rules and clear refused clusters" style="display: none;">
+                            ↺ Reset Defaults
+                          </button>
+                          <button class="btn btn-xs btn-outline" id="btn-toggle-grouping-rules-panel" title="Show or hide rule details">
+                            ▴ Hide Rules
+                          </button>
+                        </div>
+                      </div>
+                      <div id="mode-m-rules-body" class="grouping-rules-body">
+                        <div id="mode-m-rules-grid" class="grouping-rules-grid"></div>
+                        <div id="mode-m-refused-clusters-bar" class="grouping-refused-bar" style="display: none;"></div>
+                      </div>
+                    </div>
+
                     <div class="unassigned-clusters-toolbar">
                       <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
                         <span class="cleanup-filter-label" style="padding-right: 0.1rem;">Sort Clusters:</span>

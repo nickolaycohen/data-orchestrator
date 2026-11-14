@@ -47,6 +47,8 @@ interface CreateMomentContext {
 let createMomentCtx: CreateMomentContext = { uniqueAssetIds: [], allAssetIds: [], duplicateCount: 0 };
 let isSubmittingCreateMoment = false;
 let createMomentCheckTimer: number | null = null;
+let groupingRulesPanelCollapsed = false;
+let isUpdatingGroupingRules = false;
 
 function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(t => {
@@ -265,6 +267,19 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
   document.getElementById('create-moment-empty-only')?.addEventListener('change', () => updateCreateMomentAssetsUI());
   document.getElementById('btn-submit-create-moment')?.addEventListener('click', () => {
     void submitCreateMoment();
+  });
+
+  // Grouping Rules Panel toggle & reset
+  const btnToggleRulesPanel = document.getElementById('btn-toggle-grouping-rules-panel');
+  if (btnToggleRulesPanel) {
+    btnToggleRulesPanel.addEventListener('click', () => {
+      groupingRulesPanelCollapsed = !groupingRulesPanelCollapsed;
+      document.getElementById('mode-m-rules-body')?.classList.toggle('collapsed', groupingRulesPanelCollapsed);
+      btnToggleRulesPanel.textContent = groupingRulesPanelCollapsed ? '▾ Show Rules' : '▴ Hide Rules';
+    });
+  }
+  document.getElementById('btn-reset-grouping-rules')?.addEventListener('click', () => {
+    void updateGroupingRules({ reset_defaults: true });
   });
 
   window.runPlannerBatchAction = async function (month: string, action: string): Promise<void> {
@@ -697,6 +712,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       unassignedTitleEl.textContent = `⚠️ Unassigned High-Rank Assets Above Threshold > ${(th.historical_min || 0.5315).toFixed(4)} (${totalUniqueAssets} Unique / ${totalUnassignedAssets} Total Grouped into ${totalUnassignedClusters} Proposed Moment Folder(s))`;
     }
 
+    renderGroupingRulesPanel();
     renderUnassignedClustersList();
   } else {
     if (unassignedSummaryBadge) unassignedSummaryBadge.style.display = 'none';
@@ -797,6 +813,8 @@ function renderUnassignedClustersList(): void {
     filtered = normalizedClusters.filter(c => {
       if ((c.folder || '').toLowerCase().includes(unassignedSearchQuery)) return true;
       if ((c.group_type || '').toLowerCase().includes(unassignedSearchQuery)) return true;
+      if ((c.rule_label || '').toLowerCase().includes(unassignedSearchQuery)) return true;
+      if ((c.rule_reason || '').toLowerCase().includes(unassignedSearchQuery)) return true;
       if ((c.months || '').toLowerCase().includes(unassignedSearchQuery)) return true;
       return (c.assets || []).some(
         a =>
@@ -946,10 +964,15 @@ function renderUnassignedClustersList(): void {
             <span class="unassigned-cluster-rank font-mono">#${idx + 1}</span>
             <div class="unassigned-cluster-info">
               <div class="unassigned-cluster-title-row">
-                <span class="unassigned-cluster-folder">📁 ${escapeHtml(cluster.folder)}</span>
+                <span class="unassigned-cluster-folder">${count === 1 && (cluster.rule_id === 'ungrouped' || cluster.rule_id === 'refused_cluster') ? '🖼️' : '📁'} ${escapeHtml(cluster.folder)}</span>
                 <span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Unique files identified after Media-Intake dedup (${count} total - ${cluster.duplicate_copy_count || 0} dup flagged)">✓ ${Math.max(0, count - (cluster.duplicate_copy_count || 0))} unique</span>
                 <span class="badge badge-xs ${sizeBadgeClass} font-mono">${count} asset${count === 1 ? '' : 's'}</span>
                 <span class="badge badge-xs ${typeBadgeClass}" style="font-size: 0.64rem;">${escapeHtml(cluster.group_type)}</span>
+                ${
+                  cluster.rule_label
+                    ? `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.61rem;" title="${escapeHtml(cluster.rule_reason || cluster.rule_label)}">⚖️ ${escapeHtml(cluster.rule_label)}</span>`
+                    : ''
+                }
                 ${
                   (cluster.duplicate_copy_count || 0) > 0
                     ? `<span class="badge badge-xs badge-amber font-mono" style="font-size: 0.62rem;" title="Potential duplicate copy flagged — review via Intake Dedup & Ignore">♻️ ${cluster.duplicate_copy_count} Dup Flagged</span>`
@@ -960,6 +983,11 @@ function renderUnassignedClustersList(): void {
                 <span>Score: <strong class="text-amber">${escapeHtml(cluster.score_span)}</strong></span>
                 <span>•</span>
                 <span>Month(s): <strong>${escapeHtml(cluster.months)}</strong></span>
+                ${
+                  cluster.rule_reason
+                    ? `<span>•</span><span class="text-secondary">${escapeHtml(cluster.rule_reason)}</span>`
+                    : ''
+                }
                 <span>•</span>
                 <span>Log #[${cluster.orig_rank}]</span>
               </div>
@@ -969,6 +997,27 @@ function renderUnassignedClustersList(): void {
             <div class="unassigned-thumb-strip">
               ${thumbStripHtml}
             </div>
+            ${
+              count > 1
+                ? `<button
+              class="btn btn-xs btn-outline btn-refuse-cluster-group"
+              data-refuse-cluster="${escapeHtml(cluster.folder)}"
+              title="Refuse '${escapeHtml(cluster.rule_label || 'grouping')}' rule for this group and split into individual assets"
+              style="white-space: nowrap; flex-shrink: 0; color: #fca5a5; border-color: rgba(239,68,68,0.35);"
+            >
+              🚫 Refuse Group
+            </button>`
+                : cluster.refused_from_group
+                  ? `<button
+              class="btn btn-xs btn-outline btn-restore-cluster-group"
+              data-restore-cluster="${escapeHtml(cluster.refused_from_group)}"
+              title="Restore grouping for '${escapeHtml(cluster.refused_from_group)}'"
+              style="white-space: nowrap; flex-shrink: 0;"
+            >
+              ↩️ Re-group
+            </button>`
+                  : ''
+            }
             <button
               class="btn btn-xs btn-purple btn-create-moment-from-cluster"
               data-cluster-folder="${escapeHtml(cluster.folder)}"
@@ -1005,7 +1054,7 @@ function renderUnassignedClustersList(): void {
 
   listEl.querySelectorAll<HTMLElement>('[data-toggle-cluster]').forEach(headerEl => {
     headerEl.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).closest('[data-preview-asset-id], .btn-create-moment-from-cluster')) return;
+      if ((e.target as HTMLElement).closest('[data-preview-asset-id], .btn-create-moment-from-cluster, .btn-refuse-cluster-group, .btn-restore-cluster-group')) return;
       const folder = headerEl.dataset.toggleCluster;
       if (!folder) return;
       if (expandedUnassignedFolders.has(folder)) {
@@ -1015,6 +1064,26 @@ function renderUnassignedClustersList(): void {
       }
       const card = headerEl.closest('.unassigned-cluster-card');
       card?.classList.toggle('expanded', expandedUnassignedFolders.has(folder));
+    });
+  });
+
+  listEl.querySelectorAll<HTMLElement>('.btn-refuse-cluster-group').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const clusterKey = btn.dataset.refuseCluster;
+      if (clusterKey) {
+        void updateGroupingRules({ refuse_cluster: clusterKey });
+      }
+    });
+  });
+
+  listEl.querySelectorAll<HTMLElement>('.btn-restore-cluster-group').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const clusterKey = btn.dataset.restoreCluster;
+      if (clusterKey) {
+        void updateGroupingRules({ restore_cluster: clusterKey });
+      }
     });
   });
 
@@ -1841,6 +1910,135 @@ async function submitCreateMoment(): Promise<void> {
       btnSubmit.disabled = false;
       btnSubmit.textContent = '🍎 Create Moment via AppleScript';
     }
+  }
+}
+
+function renderGroupingRulesPanel(): void {
+  const gr = plannerOverviewData?.mode_m?.grouping_rules;
+  const gridEl = document.getElementById('mode-m-rules-grid');
+  const summaryBadge = document.getElementById('mode-m-rules-summary-badge');
+  const resetBtn = document.getElementById('btn-reset-grouping-rules') as HTMLButtonElement | null;
+  const refusedBar = document.getElementById('mode-m-refused-clusters-bar');
+  if (!gridEl || !gr) return;
+
+  const rules = gr.rules || [];
+  const refusedClusters = gr.refused_clusters || [];
+  const activeCount = rules.filter(r => r.enabled).length;
+  const refusedRuleCount = rules.length - activeCount;
+
+  if (summaryBadge) {
+    const parts = [`${activeCount}/${rules.length} active`];
+    if (refusedRuleCount > 0) parts.push(`${refusedRuleCount} rule refused`);
+    if (refusedClusters.length > 0) parts.push(`${refusedClusters.length} group split`);
+    summaryBadge.textContent = parts.join(' · ');
+  }
+
+  const hasNonDefault =
+    rules.some(r => {
+      const def = r.id === 'time_gps_session' ? false : true;
+      return r.enabled !== def;
+    }) || refusedClusters.length > 0;
+  if (resetBtn) {
+    resetBtn.style.display = hasNonDefault ? 'inline-flex' : 'none';
+  }
+
+  gridEl.innerHTML = rules
+    .map(r => {
+      const stateBadge = r.enabled
+        ? `<span class="badge badge-xs badge-green font-mono" style="font-size: 0.6rem;">ACTIVE</span>`
+        : `<span class="badge badge-xs badge-red font-mono" style="font-size: 0.6rem;">REFUSED</span>`;
+      const actionBtn = r.enabled
+        ? `<button class="btn btn-xs btn-outline btn-toggle-grouping-rule" data-rule-id="${escapeHtml(r.id)}" data-next-enabled="0" title="Refuse this rule and re-evaluate groupings" style="color: #fca5a5; border-color: rgba(239,68,68,0.35);">🚫 Refuse Rule</button>`
+        : `<button class="btn btn-xs btn-outline btn-toggle-grouping-rule" data-rule-id="${escapeHtml(r.id)}" data-next-enabled="1" title="Accept / enable this grouping rule" style="color: #6ee7b7; border-color: rgba(16,185,129,0.35);">✅ Enable Rule</button>`;
+      const matchSummary =
+        r.enabled && r.asset_count > 0
+          ? `${r.cluster_count} group${r.cluster_count === 1 ? '' : 's'} · ${r.asset_count} assets`
+          : r.enabled
+            ? '0 matches'
+            : 'Refused (disabled)';
+
+      return `
+        <div class="grouping-rule-card ${r.enabled ? 'rule-enabled' : 'rule-refused'}">
+          <div>
+            <div class="grouping-rule-top">
+              <span class="grouping-rule-name">
+                <span class="font-mono text-muted" style="font-size: 0.68rem;">#${r.priority}</span>
+                ${escapeHtml(r.name)}
+              </span>
+              ${stateBadge}
+            </div>
+            <div class="grouping-rule-desc">${escapeHtml(r.description)}</div>
+          </div>
+          <div class="grouping-rule-footer">
+            <span class="font-mono text-muted" style="font-size: 0.66rem;">${escapeHtml(matchSummary)}</span>
+            ${actionBtn}
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  gridEl.querySelectorAll<HTMLButtonElement>('.btn-toggle-grouping-rule').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ruleId = btn.dataset.ruleId;
+      const nextEnabled = btn.dataset.nextEnabled === '1';
+      if (!ruleId) return;
+      void updateGroupingRules({ rules: { [ruleId]: nextEnabled } });
+    });
+  });
+
+  if (refusedBar) {
+    if (!refusedClusters.length) {
+      refusedBar.style.display = 'none';
+      refusedBar.innerHTML = '';
+    } else {
+      refusedBar.style.display = 'flex';
+      refusedBar.innerHTML =
+        `<span class="text-muted">Refused Cluster Groups (split to individual):</span>` +
+        refusedClusters
+          .map(
+            ck =>
+              `<button type="button" class="grouping-refused-chip" data-restore-refused="${escapeHtml(ck)}" title="Click to restore grouping for ${escapeHtml(ck)}">🚫 ${escapeHtml(ck)} ✕</button>`
+          )
+          .join('');
+      refusedBar.querySelectorAll<HTMLElement>('[data-restore-refused]').forEach(chip => {
+        chip.addEventListener('click', () => {
+          const ck = chip.dataset.restoreRefused;
+          if (ck) void updateGroupingRules({ restore_cluster: ck });
+        });
+      });
+    }
+  }
+}
+
+async function updateGroupingRules(payload: {
+  rules?: Record<string, boolean>;
+  refuse_cluster?: string;
+  restore_cluster?: string;
+  reset_defaults?: boolean;
+}): Promise<void> {
+  if (isUpdatingGroupingRules) return;
+  isUpdatingGroupingRules = true;
+  const badge = document.getElementById('mode-m-rules-summary-badge');
+  if (badge) badge.textContent = 'Updating rules...';
+
+  try {
+    const res = await fetch('/api/media/mode-m/grouping-rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      alert(`Failed updating grouping rules: ${data.error || `HTTP ${res.status}`}`);
+      return;
+    }
+    await fetchPlannerOverview(true);
+  } catch (err: any) {
+    console.error('Error updating grouping rules:', err);
+    alert(`Network error updating grouping rules: ${err?.message || 'Unknown error'}`);
+  } finally {
+    isUpdatingGroupingRules = false;
   }
 }
 

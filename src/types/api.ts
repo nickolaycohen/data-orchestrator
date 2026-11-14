@@ -173,10 +173,30 @@ export interface PlannerBatchCandidate {
   device_summary?: BatchDeviceSummary | null;
 }
 
+export interface GroupingRuleItem {
+  id: string;
+  priority: number;
+  name: string;
+  description: string;
+  enabled: boolean;
+  cluster_count: number;
+  asset_count: number;
+}
+
+export interface GroupingRulesState {
+  rules: GroupingRuleItem[];
+  refused_clusters: string[];
+  ungrouped_count?: number;
+}
+
 export interface PlannerUnassignedCluster {
   orig_rank: number;
   folder: string;
   group_type: string;
+  rule_id?: string;
+  rule_label?: string;
+  rule_reason?: string;
+  refused_from_group?: string | null;
   asset_count: number;
   duplicate_copy_count?: number;
   score_span: string;
@@ -252,6 +272,7 @@ export interface PlannerModeM {
   unassigned_total_assets: number;
   unassigned_total_clusters: number;
   unassigned_clusters: PlannerUnassignedCluster[];
+  grouping_rules?: GroupingRulesState;
 }
 
 export interface PlannerOverviewResponse {

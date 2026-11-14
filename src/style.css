@@ -3785,4 +3785,117 @@ body {
   background: rgba(245, 158, 11, 0.26);
 }
 
+/* ==========================================================================
+   Transparent Grouping Rules Panel & Decision Controls
+   ========================================================================== */
+
+.grouping-rules-panel {
+  margin-bottom: 0.65rem;
+  padding: 0.6rem 0.75rem;
+  background: rgba(12, 16, 28, 0.72);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  border-radius: var(--radius-sm);
+}
+
+.grouping-rules-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.grouping-rules-body {
+  margin-top: 0.55rem;
+}
+
+.grouping-rules-body.collapsed {
+  display: none;
+}
+
+.grouping-rules-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(255px, 1fr));
+  gap: 0.5rem;
+}
+
+.grouping-rule-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.5rem 0.65rem;
+  background: rgba(17, 24, 39, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.grouping-rule-card.rule-enabled {
+  border-color: rgba(16, 185, 129, 0.32);
+}
+
+.grouping-rule-card.rule-refused {
+  border-color: rgba(239, 68, 68, 0.35);
+  opacity: 0.85;
+}
+
+.grouping-rule-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.grouping-rule-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.grouping-rule-desc {
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.grouping-rule-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.grouping-refused-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.55rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed rgba(245, 158, 11, 0.3);
+  font-size: 0.71rem;
+}
+
+.grouping-refused-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.32);
+  color: #fca5a5;
+  font-size: 0.67rem;
+  font-family: var(--font-mono, monospace);
+  cursor: pointer;
+}
+
+.grouping-refused-chip:hover {
+  background: rgba(239, 68, 68, 0.26);
+}
+
+
 

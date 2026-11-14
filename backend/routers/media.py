@@ -1912,6 +1912,90 @@ def _match_closest_existing_moment(
     return candidates[0][1], candidates[0][2]
 
 
+DEFAULT_GROUPING_RULES = [
+    {
+        "id": "existing_proximity",
+        "priority": 1,
+        "name": "Existing Moment Proximity",
+        "description": "Attach unassigned assets into an existing Moment album when captured <4h apart, GPS <1000m (≤3d), or same bulk import (<24h).",
+        "default_enabled": True,
+    },
+    {
+        "id": "photos_moment",
+        "priority": 2,
+        "name": "Apple Photos Moment Title",
+        "description": "Group assets that share an Apple Photos generated Moment title/subtitle and calendar date (YYYY-MM-DD - Title).",
+        "default_enabled": True,
+    },
+    {
+        "id": "time_gps_session",
+        "priority": 3,
+        "name": "Time & GPS Session Clustering",
+        "description": "Group remaining uncategorized assets within ≤2h and ≤500m GPS into finer sub-event sessions instead of full-day buckets.",
+        "default_enabled": False,
+    },
+    {
+        "id": "same_date",
+        "priority": 4,
+        "name": "Same-Date Fallback Grouping",
+        "description": "Imply remaining uncategorized assets captured on the same calendar date belong together (YYYY-MM-DD - Uncategorized). Refuse to keep individual.",
+        "default_enabled": True,
+    },
+]
+
+_RULE_LABELS = {
+    "existing_proximity": "Existing Moment Proximity",
+    "photos_moment": "Apple Photos Moment Title",
+    "time_gps_session": "Time & GPS Session",
+    "same_date": "Same-Date Grouping",
+    "ungrouped": "Ungrouped (Date Rule Refused)",
+    "refused_cluster": "Individual (Grouping Refused)",
+}
+
+
+def _ensure_grouping_rule_tables(cur) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mode_m_grouping_rules (
+            rule_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mode_m_refused_clusters (
+            cluster_key TEXT PRIMARY KEY,
+            refused_at_utc TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _load_grouping_rules_state(cur) -> tuple[dict[str, bool], set[str]]:
+    rules_map = {r["id"]: bool(r["default_enabled"]) for r in DEFAULT_GROUPING_RULES}
+    refused: set[str] = set()
+    try:
+        has_rules = cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mode_m_grouping_rules' LIMIT 1"
+        ).fetchone()
+        if has_rules:
+            for rid, en in cur.execute("SELECT rule_id, enabled FROM mode_m_grouping_rules").fetchall():
+                if rid in rules_map:
+                    rules_map[rid] = bool(en)
+        has_ref = cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mode_m_refused_clusters' LIMIT 1"
+        ).fetchone()
+        if has_ref:
+            for (ck,) in cur.execute("SELECT cluster_key FROM mode_m_refused_clusters").fetchall():
+                if ck:
+                    refused.add(ck)
+    except Exception:
+        pass
+    return rules_map, refused
+
+
 def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str]) -> dict:
     """Computes live Mode [M] thresholds, unassigned high-rank clusters, sync needs, and recommendations from SQLite."""
     # Excluded assets in Ignore / SkipPublishing / TopScore Excluded albums
@@ -2028,68 +2112,44 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 assigned_with_gps.append((m_alb, m_dt, m_lat, m_lon))
             assigned_all.append((m_alb, m_dt))
 
+    rules_map, refused_clusters = _load_grouping_rules_state(cur)
     grouped_moments = {}
-    for (
-        aid, fn, score, month, dt_utc_str, imp_id, lat, lon,
-        zkind, dur_sec, width, height, fps, size_mb, size_bytes, cam_model, owner_name, dup_state
-    ) in unassigned_rows:
-        captured_str = _utc_to_local_str(dt_utc_str)
-        captured_date = captured_str[:10] if captured_str != "—" else ((dt_utc_str or "")[:10] or month)
+    uncat_items = []
 
-        m_title, m_subtitle = moment_titles.get(aid, (None, None))
-        moment_parts = []
-        if m_title:
-            moment_parts.append(m_title.replace("\xa0", " ").strip())
-        if m_subtitle:
-            moment_parts.append(m_subtitle.replace("\xa0", " ").strip())
-        suggested_new = f"{captured_date} - {' - '.join(moment_parts)}" if moment_parts else None
-
-        dt_target = _parse_utc_dt(dt_utc_str)
-        closest = _match_closest_existing_moment(
-            fn, dt_target, imp_id, lat, lon, assigned_by_import, assigned_with_gps, assigned_all
-        )
-        best_album_name, best_reason = closest if closest else (None, None)
-
-        reason_str = best_reason or ""
-        is_tight_reason = bool(
-            "inside event span" in reason_str
-            or "s apart" in reason_str
-            or "m apart" in reason_str
-            or "h apart" in reason_str
-        )
-        is_tight_existing = bool(
-            best_album_name and (
-                is_tight_reason
-                or (not suggested_new and (not _is_dated_moment_album(best_album_name) or "GPS " in reason_str))
-            )
-        )
-        if is_tight_existing:
-            group_folder = best_album_name
-            group_type = "Existing Moment Album"
-        elif suggested_new:
-            group_folder = suggested_new
-            group_type = "Existing Moment Album" if suggested_new in valid_moment_albums else "Proposed New Moment"
-        elif best_album_name:
-            group_folder = best_album_name
-            group_type = "Existing Moment Album"
-        else:
-            group_folder = f"{captured_date} - Uncategorized ({month})"
-            group_type = "Date Cluster (Needs Moment Name)"
-
+    def _add_asset_to_group(
+        folder_key: str,
+        group_type: str,
+        rule_id: str,
+        rule_reason: str,
+        row_tuple: tuple,
+        captured_str: str,
+        suggested_new: Optional[str],
+        best_album_name: Optional[str],
+        best_reason: Optional[str],
+        refused_from_group: Optional[str] = None,
+    ) -> None:
+        (
+            aid, fn, score, month, dt_utc_str, imp_id, lat, lon,
+            zkind, dur_sec, width, height, fps, size_mb, size_bytes, cam_model, owner_name, dup_state
+        ) = row_tuple
         extra_notes = []
         if best_album_name:
-            if group_folder == best_album_name:
+            if folder_key == best_album_name:
                 extra_notes.append(f"Match: {best_reason}")
             else:
                 extra_notes.append(f'Nearest Existing: "{best_album_name}" [{best_reason}]')
-        if suggested_new and group_folder.lower() != suggested_new.lower():
+        if suggested_new and folder_key.lower() != suggested_new.lower():
             extra_notes.append(f"Photos Moment: {suggested_new}")
 
-        if group_folder not in grouped_moments:
-            grouped_moments[group_folder] = {
+        if folder_key not in grouped_moments:
+            grouped_moments[folder_key] = {
                 "orig_rank": 0,
-                "folder": group_folder,
+                "folder": folder_key,
                 "group_type": group_type,
+                "rule_id": rule_id,
+                "rule_label": _RULE_LABELS.get(rule_id, rule_id),
+                "rule_reason": rule_reason,
+                "refused_from_group": refused_from_group,
                 "asset_count": 0,
                 "score_span": f"{score:.4f}",
                 "max_score": score,
@@ -2097,12 +2157,11 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 "months": set(),
                 "assets": [],
             }
-        grp = grouped_moments[group_folder]
+        grp = grouped_moments[folder_key]
         grp["max_score"] = max(grp["max_score"], score)
         grp["min_score"] = min(grp["min_score"], score)
         grp["months"].add(month)
         is_vid = zkind == 1 or (fn or "").lower().endswith((".mov", ".mp4", ".m4v", ".avi", ".mpg"))
-        dup_val = int(dup_state or 0)
         is_intake_dup = aid in intake_dup_ids
         grp["assets"].append({
             "asset_id": aid,
@@ -2120,13 +2179,220 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             "file_size_bytes": int(size_bytes or 0),
             "camera_model": cam_model or "Unknown",
             "primary_owner": owner_name or "Shared/Other",
-            "assigned_moment": f"Proposed: {group_folder}",
-            "notes": ", ".join(extra_notes),
+            "assigned_moment": f"Proposed: {folder_key}",
+            "notes": ", ".join(extra_notes) if extra_notes else rule_reason,
+            "rule_id": rule_id,
+            "rule_label": _RULE_LABELS.get(rule_id, rule_id),
             "duplicate_state": 1 if is_intake_dup else 0,
             "is_duplicate_copy": is_intake_dup,
         })
 
-    # Rank clusters cleanly and format fields expected by frontend
+    for row_tuple in unassigned_rows:
+        (
+            aid, fn, score, month, dt_utc_str, imp_id, lat, lon,
+            zkind, dur_sec, width, height, fps, size_mb, size_bytes, cam_model, owner_name, dup_state
+        ) = row_tuple
+        captured_str = _utc_to_local_str(dt_utc_str)
+        captured_date = captured_str[:10] if captured_str != "—" else ((dt_utc_str or "")[:10] or month)
+
+        m_title, m_subtitle = moment_titles.get(aid, (None, None))
+        moment_parts = []
+        if m_title:
+            moment_parts.append(m_title.replace("\xa0", " ").strip())
+        if m_subtitle:
+            moment_parts.append(m_subtitle.replace("\xa0", " ").strip())
+        suggested_new = f"{captured_date} - {' - '.join(moment_parts)}" if moment_parts else None
+        effective_suggested = suggested_new if rules_map.get("photos_moment", True) else None
+
+        dt_target = _parse_utc_dt(dt_utc_str)
+        best_album_name, best_reason = (None, None)
+        if rules_map.get("existing_proximity", True):
+            closest = _match_closest_existing_moment(
+                fn, dt_target, imp_id, lat, lon, assigned_by_import, assigned_with_gps, assigned_all
+            )
+            best_album_name, best_reason = closest if closest else (None, None)
+
+        reason_str = best_reason or ""
+        is_tight_reason = bool(
+            "inside event span" in reason_str
+            or "s apart" in reason_str
+            or "m apart" in reason_str
+            or "h apart" in reason_str
+        )
+        is_tight_existing = bool(
+            best_album_name and (
+                is_tight_reason
+                or (not effective_suggested and (not _is_dated_moment_album(best_album_name) or "GPS " in reason_str))
+            )
+        )
+        if is_tight_existing:
+            _add_asset_to_group(
+                best_album_name,
+                "Existing Moment Album",
+                "existing_proximity",
+                f"Existing Moment Proximity: {best_reason}",
+                row_tuple,
+                captured_str,
+                suggested_new,
+                best_album_name,
+                best_reason,
+            )
+        elif effective_suggested:
+            gtype = "Existing Moment Album" if effective_suggested in valid_moment_albums else "Proposed New Moment"
+            _add_asset_to_group(
+                effective_suggested,
+                gtype,
+                "photos_moment",
+                f"Apple Photos Moment Title match ('{effective_suggested}')",
+                row_tuple,
+                captured_str,
+                suggested_new,
+                best_album_name,
+                best_reason,
+            )
+        elif best_album_name:
+            _add_asset_to_group(
+                best_album_name,
+                "Existing Moment Album",
+                "existing_proximity",
+                f"Existing Moment Proximity: {best_reason}",
+                row_tuple,
+                captured_str,
+                suggested_new,
+                best_album_name,
+                best_reason,
+            )
+        else:
+            uncat_items.append((row_tuple, captured_str, captured_date, dt_target, suggested_new, best_album_name, best_reason))
+
+    # Rule 3 & Rule 4 for remaining uncategorized assets
+    session_claimed_aids: set[str] = set()
+    if uncat_items and rules_map.get("time_gps_session", False):
+        uncat_sorted = sorted(
+            uncat_items,
+            key=lambda x: (x[3] or datetime.max, x[0][1] or ""),
+        )
+        sessions: list[list[tuple]] = []
+        current_sess: list[tuple] = []
+        prev_dt = None
+        prev_lat = None
+        prev_lon = None
+        for item in uncat_sorted:
+            r_t, _cs, _cd, dt_t, _sn, _ba, _br = item
+            a_lat, a_lon = r_t[6], r_t[7]
+            has_curr_gps = a_lat is not None and a_lon is not None and a_lat != -180.0 and a_lon != -180.0
+            has_prev_gps = prev_lat is not None and prev_lon is not None and prev_lat != -180.0 and prev_lon != -180.0
+            split_needed = False
+            if not current_sess:
+                split_needed = True
+            elif dt_t is None or prev_dt is None:
+                split_needed = True
+            elif abs((dt_t - prev_dt).total_seconds()) > 2 * 3600:
+                split_needed = True
+            elif has_curr_gps and has_prev_gps and _haversine_meters(a_lat, a_lon, prev_lat, prev_lon) > 500.0:
+                split_needed = True
+
+            if split_needed and current_sess:
+                sessions.append(current_sess)
+                current_sess = []
+            current_sess.append(item)
+            prev_dt = dt_t
+            if has_curr_gps:
+                prev_lat, prev_lon = a_lat, a_lon
+        if current_sess:
+            sessions.append(current_sess)
+
+        for sess in sessions:
+            if len(sess) < 2:
+                continue
+            first_row, first_cs, first_cd, _fdt, _sn, _ba, _br = sess[0]
+            hhmm = first_cs[11:16] if len(first_cs) >= 16 else "00:00"
+            sess_key = f"{first_cd} {hhmm} - Session ({first_row[3]})"
+            for r_t, cs, _cd, _dt_t, sn, ba, br in sess:
+                session_claimed_aids.add(r_t[0])
+                _add_asset_to_group(
+                    sess_key,
+                    "Time/GPS Session",
+                    "time_gps_session",
+                    f"Captured within ≤2h & ≤500m GPS ({len(sess)} assets)",
+                    r_t,
+                    cs,
+                    sn,
+                    ba,
+                    br,
+                )
+
+    for row_tuple, captured_str, captured_date, _dt_t, suggested_new, best_album_name, best_reason in uncat_items:
+        aid, fn, _score, month = row_tuple[0], row_tuple[1], row_tuple[2], row_tuple[3]
+        if aid in session_claimed_aids:
+            continue
+        if rules_map.get("same_date", True):
+            _add_asset_to_group(
+                f"{captured_date} - Uncategorized ({month})",
+                "Date Cluster (Needs Moment Name)",
+                "same_date",
+                f"Same capture date fallback ({captured_date})",
+                row_tuple,
+                captured_str,
+                suggested_new,
+                best_album_name,
+                best_reason,
+            )
+        else:
+            ind_key = f"{captured_str} · {fn or aid[:8]}"
+            if ind_key in grouped_moments:
+                ind_key = f"{ind_key} [{aid[:6]}]"
+            _add_asset_to_group(
+                ind_key,
+                "Individual Asset (Ungrouped)",
+                "ungrouped",
+                "Same-Date fallback rule refused — kept individual",
+                row_tuple,
+                captured_str,
+                suggested_new,
+                best_album_name,
+                best_reason,
+            )
+
+    # Apply explicit per-cluster refusals: break refused multi-asset clusters into individual items
+    if refused_clusters:
+        final_grouped = {}
+        for folder_key, grp in grouped_moments.items():
+            if folder_key in refused_clusters and len(grp["assets"]) > 1:
+                for asset in grp["assets"]:
+                    ind_key = f"{asset['capture_timestamp']} · {asset['original_filename']}"
+                    if ind_key in final_grouped:
+                        ind_key = f"{ind_key} [{asset['asset_id'][:6]}]"
+                    sc = float(asset["score_normalized"])
+                    asset_copy = {
+                        **asset,
+                        "assigned_moment": f"Ungrouped (Refused: {folder_key})",
+                        "rule_id": "refused_cluster",
+                        "rule_label": _RULE_LABELS["refused_cluster"],
+                        "notes": f"Grouping refused for '{folder_key}'" + (f" · {asset['notes']}" if asset.get("notes") else ""),
+                    }
+                    final_grouped[ind_key] = {
+                        "orig_rank": 0,
+                        "folder": ind_key,
+                        "group_type": "Individual (Grouping Refused)",
+                        "rule_id": "refused_cluster",
+                        "rule_label": _RULE_LABELS["refused_cluster"],
+                        "rule_reason": f"User refused grouping rule for '{folder_key}'",
+                        "refused_from_group": folder_key,
+                        "asset_count": 1,
+                        "score_span": f"{sc:.4f}",
+                        "max_score": sc,
+                        "min_score": sc,
+                        "months": {asset["month"]},
+                        "assets": [asset_copy],
+                    }
+            else:
+                final_grouped[folder_key] = grp
+        grouped_moments = final_grouped
+
+    # Rank clusters cleanly and compute per-rule telemetry
+    rule_cluster_counts: dict[str, int] = {}
+    rule_asset_counts: dict[str, int] = {}
     clusters_by_score = sorted(
         grouped_moments.values(),
         key=lambda g: (-g["max_score"], -len(g["assets"]), g["folder"]),
@@ -2139,8 +2405,28 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         grp["duplicate_copy_count"] = sum(1 for a in grp["assets"] if a.get("is_duplicate_copy"))
         grp["months"] = ", ".join(sorted(grp["months"]))
         grp["score_span"] = f"{grp['max_score']:.4f}" if cnt == 1 else f"{grp['max_score']:.4f} .. {grp['min_score']:.4f}"
+        rid = grp.get("rule_id") or "same_date"
+        rule_cluster_counts[rid] = rule_cluster_counts.get(rid, 0) + 1
+        rule_asset_counts[rid] = rule_asset_counts.get(rid, 0) + cnt
         unassigned_clusters.append(grp)
     unassigned_clusters.sort(key=lambda g: (-len(g["assets"]), -g["max_score"], g["folder"]))
+
+    grouping_rules_payload = {
+        "rules": [
+            {
+                "id": r["id"],
+                "priority": r["priority"],
+                "name": r["name"],
+                "description": r["description"],
+                "enabled": bool(rules_map.get(r["id"], r["default_enabled"])),
+                "cluster_count": rule_cluster_counts.get(r["id"], 0),
+                "asset_count": rule_asset_counts.get(r["id"], 0),
+            }
+            for r in DEFAULT_GROUPING_RULES
+        ],
+        "refused_clusters": sorted(refused_clusters),
+        "ungrouped_count": rule_asset_counts.get("ungrouped", 0) + rule_asset_counts.get("refused_cluster", 0),
+    }
 
     # 3. Qualified Moment Stats -> needs_sync_moments + actionable/disjoint recommendations
     cur.execute(
@@ -2403,6 +2689,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         "disjoint_recs": disjoint_recs,
         "needs_sync_moments": needs_sync_moments,
         "unassigned_clusters": unassigned_clusters,
+        "grouping_rules": grouping_rules_payload,
     }
 
 
@@ -2800,6 +3087,7 @@ def get_planner_overview():
                     "unassigned_total_assets": total_unassigned_assets,
                     "unassigned_total_clusters": len(unassigned_clusters),
                     "unassigned_clusters": unassigned_clusters,
+                    "grouping_rules": mode_m_live["grouping_rules"],
                     "actionable_recommendations": mode_m_live["actionable_recs"][:12],
                     "disjoint_recommendations": mode_m_live["disjoint_recs"][:10]
                 }
@@ -2950,6 +3238,72 @@ def apply_mode_m_intake_dedup(req: ModeMDedupApplyRequest):
         _intake_dedup_cache["timestamp"] = 0.0
         _intake_dedup_cache["dup_ids"] = set()
         return data
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+class GroupingRulesUpdateRequest(BaseModel):
+    rules: Optional[dict[str, bool]] = None
+    refuse_cluster: Optional[str] = None
+    restore_cluster: Optional[str] = None
+    reset_defaults: bool = False
+
+
+@router.post("/mode-m/grouping-rules")
+def update_mode_m_grouping_rules(req: GroupingRulesUpdateRequest):
+    """Persist enabled/refused grouping rules and refused cluster overrides in media_organizer.db."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    valid_ids = {r["id"] for r in DEFAULT_GROUPING_RULES}
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            _ensure_grouping_rule_tables(cur)
+
+            if req.reset_defaults:
+                cur.execute("DELETE FROM mode_m_grouping_rules")
+                cur.execute("DELETE FROM mode_m_refused_clusters")
+            else:
+                if req.rules:
+                    for rid, en in req.rules.items():
+                        if rid in valid_ids:
+                            cur.execute(
+                                """
+                                INSERT INTO mode_m_grouping_rules (rule_id, enabled, updated_at_utc)
+                                VALUES (?, ?, datetime('now'))
+                                ON CONFLICT(rule_id) DO UPDATE SET
+                                    enabled = excluded.enabled,
+                                    updated_at_utc = excluded.updated_at_utc
+                                """,
+                                (rid, 1 if en else 0),
+                            )
+                if req.refuse_cluster:
+                    ck = req.refuse_cluster.strip()
+                    if ck:
+                        cur.execute(
+                            """
+                            INSERT OR REPLACE INTO mode_m_refused_clusters (cluster_key, refused_at_utc)
+                            VALUES (?, datetime('now'))
+                            """,
+                            (ck,),
+                        )
+                if req.restore_cluster:
+                    ck = req.restore_cluster.strip()
+                    if ck:
+                        cur.execute("DELETE FROM mode_m_refused_clusters WHERE cluster_key = ?", (ck,))
+
+            conn.commit()
+            rules_map, refused = _load_grouping_rules_state(cur)
+            return {
+                "ok": True,
+                "rules": rules_map,
+                "refused_clusters": sorted(refused),
+            }
+        finally:
+            conn.close()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
