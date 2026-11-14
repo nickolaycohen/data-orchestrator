@@ -1500,8 +1500,8 @@
                 <div class="merge-option-block">
                   <span class="option-title">Collision Resolution:</span>
                   <select id="merge-collision-strategy" class="form-select font-mono">
-                    <option value="rename" selected>rename — Append _dupX (Safest, preserves both)</option>
-                    <option value="overwrite">overwrite — Replace existing destination file</option>
+                    <option value="overwrite" selected>overwrite — Replace existing destination file (default)</option>
+                    <option value="rename">rename — Append _dupX (Preserves both)</option>
                     <option value="skip">skip — Do not transfer non-identical collisions</option>
                     <option value="newer">newer — Overwrite only if source timestamp is newer</option>
                   </select>

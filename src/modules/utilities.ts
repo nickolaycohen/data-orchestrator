@@ -144,7 +144,7 @@ function updateMergeCommandPreview(): void {
   const srcInput = document.getElementById('merge-source-dir') as HTMLInputElement | null;
   const dstInput = document.getElementById('merge-dest-dir') as HTMLInputElement | null;
   const modeVal = (document.querySelector('input[name="merge-mode"]:checked') as HTMLInputElement | null)?.value || 'move';
-  const collisionVal = (document.getElementById('merge-collision-strategy') as HTMLSelectElement | null)?.value || 'rename';
+  const collisionVal = (document.getElementById('merge-collision-strategy') as HTMLSelectElement | null)?.value || 'overwrite';
   const dryRunChecked = (document.getElementById('merge-flag-dry-run') as HTMLInputElement | null)?.checked || false;
   const noCleanChecked = (document.getElementById('merge-flag-no-clean') as HTMLInputElement | null)?.checked || false;
   const previewEl = document.getElementById('merge-cmd-preview');
@@ -154,7 +154,7 @@ function updateMergeCommandPreview(): void {
 
   const parts = ['python3', 'scripts/merge_directories.py', `"${src}"`, `"${dst}"`];
   if (modeVal === 'copy') parts.push('--copy');
-  if (collisionVal !== 'rename') parts.push(`--on-collision ${collisionVal}`);
+  if (collisionVal !== 'overwrite') parts.push(`--on-collision ${collisionVal}`);
   if (dryRunChecked) parts.push('--dry-run');
   if (noCleanChecked) parts.push('--no-clean');
 
@@ -315,7 +315,7 @@ function runDirectoryMerge(forceDryRun = false): void {
   const srcInput = document.getElementById('merge-source-dir') as HTMLInputElement | null;
   const dstInput = document.getElementById('merge-dest-dir') as HTMLInputElement | null;
   const modeVal = (document.querySelector('input[name="merge-mode"]:checked') as HTMLInputElement | null)?.value || 'move';
-  const collisionVal = (document.getElementById('merge-collision-strategy') as HTMLSelectElement | null)?.value || 'rename';
+  const collisionVal = (document.getElementById('merge-collision-strategy') as HTMLSelectElement | null)?.value || 'overwrite';
   const dryRunChecked = forceDryRun || ((document.getElementById('merge-flag-dry-run') as HTMLInputElement | null)?.checked || false);
   const noCleanChecked = (document.getElementById('merge-flag-no-clean') as HTMLInputElement | null)?.checked || false;
   const stateBadge = document.getElementById('merge-tool-state-badge');
@@ -351,7 +351,7 @@ function runDirectoryMerge(forceDryRun = false): void {
     args.push('--move');
   }
 
-  if (collisionVal && collisionVal !== 'rename') {
+  if (collisionVal && collisionVal !== 'overwrite') {
     args.push('--on-collision', collisionVal);
   }
 
