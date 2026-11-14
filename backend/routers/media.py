@@ -1935,15 +1935,22 @@ DEFAULT_GROUPING_RULES = [
         "default_enabled": True,
     },
     {
-        "id": "time_gps_session",
+        "id": "multiday_gps",
         "priority": 4,
+        "name": "Multi-Day GPS Location",
+        "description": "Merge non-home unassigned events captured across nearby days (≤5d gap) when GPS metadata is within ≤3 km into a multi-day event.",
+        "default_enabled": True,
+    },
+    {
+        "id": "time_gps_session",
+        "priority": 5,
         "name": "Time & GPS Session Clustering",
         "description": "Group remaining uncategorized assets within ≤2h and ≤500m GPS into finer sub-event sessions instead of full-day buckets.",
         "default_enabled": False,
     },
     {
         "id": "same_date",
-        "priority": 5,
+        "priority": 6,
         "name": "Same-Date Fallback Grouping",
         "description": "Imply remaining uncategorized assets captured on the same calendar date belong together (YYYY-MM-DD - Uncategorized). Refuse to keep individual.",
         "default_enabled": True,
@@ -1954,6 +1961,7 @@ _RULE_LABELS = {
     "existing_proximity": "Existing Moment Proximity",
     "photos_moment": "Apple Photos Moment Title",
     "photos_gps_guard": "Photos GPS & Time Guard",
+    "multiday_gps": "Multi-Day GPS Location",
     "time_gps_session": "Time & GPS Session",
     "same_date": "Same-Date Grouping",
     "custom_split": "Manual Event Split",
@@ -2023,6 +2031,186 @@ def _load_grouping_rules_state(cur) -> tuple[dict[str, bool], set[str], dict[str
     except Exception:
         pass
     return rules_map, refused, asset_splits
+
+
+def _apply_multiday_gps_rule(
+    grouped_moments: dict,
+    row_pre_meta: dict,
+    gps_by_aid: dict[str, tuple[float, float]],
+    home_gps_centroids: list[tuple[float, float]],
+    max_distance_m: float = 3000.0,
+    max_gap_days: int = 5,
+) -> dict:
+    """Merge non-home unassigned clusters sharing similar GPS metadata (≤3 km) across nearby days (≤5d gap)."""
+    eligible_rules = {"photos_moment", "photos_gps_guard", "time_gps_session", "same_date", "ungrouped"}
+    candidates: list[dict] = []
+
+    for folder_key, grp in grouped_moments.items():
+        if grp.get("rule_id") not in eligible_rules:
+            continue
+        assets = grp.get("assets") or []
+        gps_pts = [gps_by_aid[a["asset_id"]] for a in assets if a["asset_id"] in gps_by_aid]
+        dts = [row_pre_meta[a["asset_id"]][4] for a in assets if a["asset_id"] in row_pre_meta and row_pre_meta[a["asset_id"]][4] is not None]
+        dates = {row_pre_meta[a["asset_id"]][1] for a in assets if a["asset_id"] in row_pre_meta}
+        if not gps_pts or not dts or not dates:
+            continue
+        c_lat = sum(p[0] for p in gps_pts) / len(gps_pts)
+        c_lon = sum(p[1] for p in gps_pts) / len(gps_pts)
+        # Skip mixed-city buckets that already span >5 km internally
+        if len(gps_pts) > 1 and max(_haversine_meters(c_lat, c_lon, p[0], p[1]) for p in gps_pts) > 5000.0:
+            continue
+        # Exclude primary residence / frequent daily cells so home snapshots aren't merged across weeks
+        if any(_haversine_meters(c_lat, c_lon, h_lat, h_lon) <= 2500.0 for h_lat, h_lon in home_gps_centroids):
+            continue
+        candidates.append({
+            "key": folder_key,
+            "lat": c_lat,
+            "lon": c_lon,
+            "min_dt": min(dts),
+            "max_dt": max(dts),
+            "dates": dates,
+        })
+
+    if len(candidates) < 2:
+        return grouped_moments
+
+    n = len(candidates)
+    parent = list(range(n))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(x: int, y: int) -> None:
+        rx, ry = _find(x), _find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    max_gap_sec = max_gap_days * 86400.0
+    for i in range(n):
+        ci = candidates[i]
+        for j in range(i + 1, n):
+            cj = candidates[j]
+            gap_sec = (max(ci["min_dt"], cj["min_dt"]) - min(ci["max_dt"], cj["max_dt"])).total_seconds()
+            if gap_sec > max_gap_sec:
+                continue
+            if _haversine_meters(ci["lat"], ci["lon"], cj["lat"], cj["lon"]) <= max_distance_m:
+                _union(i, j)
+
+    comps: dict[int, list[dict]] = {}
+    for i in range(n):
+        comps.setdefault(_find(i), []).append(candidates[i])
+
+    key_to_comp: dict[str, dict] = {}
+    skip_keys: set[str] = set()
+    used_new_keys: set[str] = set()
+    existing_keys = set(grouped_moments.keys())
+
+    for items in comps.values():
+        if len(items) < 2:
+            continue
+        all_dates: set[str] = set()
+        for it in items:
+            all_dates |= it["dates"]
+        if len(all_dates) < 2:
+            continue
+
+        sorted_items = sorted(items, key=lambda it: (it["min_dt"], it["key"]))
+        merged_dates = sorted(all_dates)
+        d_start, d_end = merged_dates[0], merged_dates[-1]
+        date_span = f"{d_start}..{d_end[5:]}" if d_start[:4] == d_end[:4] else f"{d_start}..{d_end}"
+
+        mean_lat = sum(it["lat"] for it in sorted_items) / len(sorted_items)
+        mean_lon = sum(it["lon"] for it in sorted_items) / len(sorted_items)
+        spread_m = max(
+            (_haversine_meters(a["lat"], a["lon"], b["lat"], b["lon"]) for a in sorted_items for b in sorted_items),
+            default=0.0,
+        )
+        spread_str = f"{spread_m:.0f}m" if spread_m < 1000.0 else f"{spread_m / 1000.0:.1f} km"
+
+        # Prefer specific non-generic Apple Photos Moment title when available
+        title_counts: dict[str, int] = {}
+        title_first_dt: dict[str, datetime] = {}
+        for it in sorted_items:
+            grp = grouped_moments[it["key"]]
+            for asset in grp.get("assets") or []:
+                raw_title = (row_pre_meta.get(asset["asset_id"]) or (None, None, None, None))[3]
+                if raw_title and raw_title.lower() != "uncategorized":
+                    title_counts[raw_title] = title_counts.get(raw_title, 0) + 1
+                    dt_val = row_pre_meta[asset["asset_id"]][4] or it["min_dt"]
+                    if raw_title not in title_first_dt or dt_val < title_first_dt[raw_title]:
+                        title_first_dt[raw_title] = dt_val
+
+        if title_counts:
+            best_title = min(
+                title_counts.keys(),
+                key=lambda t: (-title_counts[t], title_first_dt.get(t, datetime.max), t),
+            )
+        else:
+            best_title = f"Location ({mean_lat:.3f}, {mean_lon:.3f})"
+
+        new_folder = f"{date_span} - {best_title}"
+        if (new_folder in existing_keys and new_folder not in {it["key"] for it in sorted_items}) or new_folder in used_new_keys:
+            new_folder = f"{new_folder} (Multi-Day GPS)"
+        used_new_keys.add(new_folder)
+
+        rule_reason = (
+            f"Multi-day GPS match across {len(merged_dates)} days ({date_span}, "
+            f"centroid span ≤{spread_str} at {mean_lat:.4f}, {mean_lon:.4f})"
+        )
+
+        merged_assets: list[dict] = []
+        merged_months: set[str] = set()
+        max_sc = float("-inf")
+        min_sc = float("inf")
+        for it in sorted_items:
+            old_k = it["key"]
+            skip_keys.add(old_k)
+            grp = grouped_moments[old_k]
+            merged_months |= set(grp["months"])
+            max_sc = max(max_sc, grp["max_score"])
+            min_sc = min(min_sc, grp["min_score"])
+            for asset in grp["assets"]:
+                new_asset = dict(asset)
+                new_asset["rule_id"] = "multiday_gps"
+                new_asset["rule_label"] = _RULE_LABELS["multiday_gps"]
+                new_asset["assigned_moment"] = f"Proposed: {new_folder}"
+                prev_notes = new_asset.get("notes") or ""
+                if prev_notes.startswith("Nearest Existing:") or prev_notes.startswith("Match:"):
+                    new_asset["notes"] = f"{prev_notes} · {rule_reason}"
+                else:
+                    new_asset["notes"] = rule_reason
+                merged_assets.append(new_asset)
+
+        key_to_comp[sorted_items[0]["key"]] = {
+            "orig_rank": 0,
+            "folder": new_folder,
+            "group_type": "Multi-Day GPS Event",
+            "rule_id": "multiday_gps",
+            "rule_label": _RULE_LABELS["multiday_gps"],
+            "rule_reason": rule_reason,
+            "refused_from_group": None,
+            "asset_count": 0,
+            "score_span": f"{max_sc:.4f} .. {min_sc:.4f}" if len(merged_assets) > 1 else f"{max_sc:.4f}",
+            "max_score": max_sc,
+            "min_score": min_sc,
+            "months": merged_months,
+            "assets": merged_assets,
+        }
+
+    if not skip_keys:
+        return grouped_moments
+
+    merged_result: dict = {}
+    for folder_key, grp in grouped_moments.items():
+        if folder_key in key_to_comp:
+            comp_grp = key_to_comp[folder_key]
+            merged_result[comp_grp["folder"]] = comp_grp
+        elif folder_key not in skip_keys:
+            merged_result[folder_key] = grp
+    return merged_result
 
 
 def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str]) -> dict:
@@ -2149,6 +2337,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     # Pre-index GPS anchors per Apple Photos Moment Title so photos_gps_guard can detect
     # mixed same-day events (e.g., morning GPS-less Ski photos lumped into afternoon Beach Moment).
     moment_gps_points: dict[str, list[tuple[Optional[datetime], float, float]]] = {}
+    gps_by_aid: dict[str, tuple[float, float]] = {}
     row_pre_meta: dict[str, tuple[str, str, Optional[str], Optional[str], Optional[datetime], bool]] = {}
     for row_tuple in unassigned_rows:
         aid = row_tuple[0]
@@ -2166,6 +2355,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         raw_title = " - ".join(moment_parts) if moment_parts else None
         dt_target = _parse_utc_dt(dt_utc_str)
         has_gps = lat is not None and lon is not None and lat != -180.0 and lon != -180.0
+        if has_gps:
+            gps_by_aid[aid] = (float(lat), float(lon))
         row_pre_meta[aid] = (captured_str, captured_date, suggested_new, raw_title, dt_target, has_gps)
         if suggested_new and has_gps and aid not in asset_splits:
             moment_gps_points.setdefault(suggested_new, []).append((dt_target, float(lat), float(lon)))
@@ -2503,6 +2694,27 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 best_album_name,
                 best_reason,
             )
+
+    if grouped_moments and rules_map.get("multiday_gps", True):
+        cur.execute(
+            """
+            SELECT AVG(za.ZLATITUDE), AVG(za.ZLONGITUDE)
+            FROM ZASSET za
+            JOIN assets a ON a.asset_id = za.ZUUID
+            WHERE za.ZLATITUDE IS NOT NULL AND za.ZLONGITUDE IS NOT NULL
+              AND za.ZLATITUDE != -180.0 AND za.ZLONGITUDE != -180.0
+              AND COALESCE(a.removed_from_source, 0) = 0
+            GROUP BY ROUND(za.ZLATITUDE, 2), ROUND(za.ZLONGITUDE, 2)
+            HAVING COUNT(DISTINCT substr(a.date_created_utc, 1, 10)) >= 80
+            """
+        )
+        home_gps_centroids = [(float(r[0]), float(r[1])) for r in cur.fetchall()]
+        grouped_moments = _apply_multiday_gps_rule(
+            grouped_moments,
+            row_pre_meta,
+            gps_by_aid,
+            home_gps_centroids,
+        )
 
     # Apply explicit per-cluster refusals: break refused multi-asset clusters into individual items
     if refused_clusters:
@@ -3335,12 +3547,21 @@ def _get_intake_duplicate_ids(force: bool = False) -> set[str]:
     now = time.time()
     if not force and (now - _intake_dedup_cache["timestamp"] < 300.0) and _intake_dedup_cache["dup_ids"]:
         return set(_intake_dedup_cache["dup_ids"])
-    scripts_dir = str(REPOS["media-organizer-pipeline"] / "scripts")
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
+    scripts_dir = REPOS["media-organizer-pipeline"] / "scripts"
+    script_path = scripts_dir / "dedup_unassigned_moments.py"
+    if not script_path.exists():
+        return set(_intake_dedup_cache["dup_ids"])
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
     try:
-        from dedup_unassigned_moments import analyze_unassigned_duplicates
-        res = analyze_unassigned_duplicates(db_path=str(MEDIA_DB_PATH), use_phash=True)
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("dedup_unassigned_moments", script_path)
+        if spec is None or spec.loader is None:
+            return set(_intake_dedup_cache["dup_ids"])
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        res = mod.analyze_unassigned_duplicates(db_path=str(MEDIA_DB_PATH), use_phash=True)
         dup_ids = {d["duplicate_asset_id"] for d in res.get("duplicates", [])}
         _intake_dedup_cache["timestamp"] = now
         _intake_dedup_cache["dup_ids"] = dup_ids
