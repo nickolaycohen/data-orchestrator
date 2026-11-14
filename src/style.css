@@ -3563,10 +3563,10 @@ body {
   transition: transform 0.12s ease;
 }
 
-.cleanup-iphone-size {
+.cleanup-iphone-size,
+.cleanup-iphone-duration {
   position: absolute;
   bottom: 6px;
-  right: 6px;
   background: rgba(0, 0, 0, 0.66);
   color: #ffffff;
   font-size: 0.72rem;
@@ -3578,6 +3578,14 @@ body {
   letter-spacing: 0.01em;
   pointer-events: none;
   backdrop-filter: blur(4px);
+}
+
+.cleanup-iphone-size {
+  right: 6px;
+}
+
+.cleanup-iphone-duration {
+  left: 6px;
 }
 
 .cleanup-iphone-check {

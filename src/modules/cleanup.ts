@@ -735,6 +735,8 @@ function renderCleanupIphoneGrid(): void {
   gridEl.innerHTML = currentCandidateList
     .map((c) => {
       const isChecked = selectedCandidateAssetIds.has(c.asset_id);
+      const isVideo = c.media_type === 'video';
+      const durationStr = isVideo && c.duration_sec > 0 ? formatDuration(c.duration_sec) : '';
       const sizeBytes = c.file_size_bytes || (c.file_size_mb ? c.file_size_mb * 1_000_000 : 0);
       const sizeStr = formatAppleBytes(sizeBytes);
       const thumbUrl = `/api/media/cleanup/thumbnail/${encodeURIComponent(c.asset_id)}`;
@@ -743,7 +745,7 @@ function renderCleanupIphoneGrid(): void {
         <div
           class="cleanup-iphone-tile ${isChecked ? 'selected' : ''}"
           data-grid-asset-id="${escapeHtml(c.asset_id)}"
-          title="Ordered by size (${escapeHtml(sizeStr)}) — click to preview"
+          title="Ordered by size (${escapeHtml(sizeStr)}${durationStr ? ` · ${escapeHtml(durationStr)}` : ''}) — click to preview"
         >
           <img
             class="cleanup-iphone-thumb"
@@ -759,6 +761,7 @@ function renderCleanupIphoneGrid(): void {
               ${isChecked ? 'checked' : ''}
             />
           </label>
+          ${durationStr ? `<span class="cleanup-iphone-duration">${escapeHtml(durationStr)}</span>` : ''}
           <span class="cleanup-iphone-size">${escapeHtml(sizeStr)}</span>
         </div>
       `;
