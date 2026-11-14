@@ -278,8 +278,9 @@ export interface PlannerModeM {
 export interface PlannerOverviewResponse {
   connected: boolean;
   error?: string;
-  mode_b: PlannerModeB;
-  mode_m: PlannerModeM;
+  mode?: string;
+  mode_b?: PlannerModeB | null;
+  mode_m?: PlannerModeM | null;
 }
 
 export interface ModeMDedupDuplicate {

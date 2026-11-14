@@ -64,9 +64,9 @@ TASK_DEFINITIONS = {
         "cmd": ["python3", "scripts/deduplicate_assets.py"]
     },
     "media_dedup_unassigned": {
-        "name": "Intake Dedup & Ignore Unassigned Moments",
+        "name": "[M] Intake Dedup & Ignore Unassigned Moments",
         "pillar": "media-organizer-pipeline",
-        "description": "Runs Media-Intake multi-tier & pHash deduplication before Proposed Moment grouping and moves duplicates to Ignore.",
+        "description": "Mode [M] Moments Organizer only: Runs Media-Intake multi-tier & pHash deduplication before Proposed Moment grouping and moves duplicates to Ignore.",
         "cwd_repo": "media-organizer-pipeline",
         "cmd": ["python3", "-u", "scripts/dedup_unassigned_moments.py"]
     },

@@ -2827,234 +2827,213 @@ def _enrich_batch_candidates_with_devices(cur, candidates):
 
 
 @router.get("/planner-overview")
-def get_planner_overview():
-    """Return comprehensive next-step overview for Mode [B] Batch Management and Mode [M] Moments Organizer."""
+def get_planner_overview(mode: str = "all"):
+    """Return next-step overview for Mode [B] Batch Management and/or Mode [M] Moments Organizer."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"connected": False, "error": "Media database unavailable"}
+
+    mode_norm = (mode or "all").strip().lower()
+    include_b = mode_norm in ("all", "b")
+    include_m = mode_norm in ("all", "m")
 
     try:
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
         try:
             cur = conn.cursor()
-            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-            current_month_str = now_utc.strftime("%Y-%m")
+            mode_b_payload = None
+            mode_m_payload = None
 
-            # -----------------------------------------------------------------
-            # 1. Mode [B]: Batch Management Overview & Next Steps
-            # -----------------------------------------------------------------
-            cur.execute("SELECT id, planned_month, set_at_utc FROM planned_execution WHERE active = 1 ORDER BY id ASC")
-            active_queue = [
-                {"id": r[0], "month": r[1], "queued_at_utc": r[2]}
-                for r in cur.fetchall()
-            ]
-            queued_months_set = {q["month"] for q in active_queue}
+            if include_b:
+                now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                current_month_str = now_utc.strftime("%Y-%m")
 
-            cur.execute("""
-                SELECT status_code, COUNT(*), COALESCE(SUM(assets_count), 0)
-                FROM month_batches
-                GROUP BY status_code
-                ORDER BY status_code ASC
-            """)
-            status_breakdown = {}
-            for sc, cnt, assets_sum in cur.fetchall():
-                status_breakdown[str(sc)] = {"count": cnt, "assets": assets_sum}
+                # -----------------------------------------------------------------
+                # 1. Mode [B]: Batch Management Overview & Next Steps
+                # -----------------------------------------------------------------
+                cur.execute("SELECT id, planned_month, set_at_utc FROM planned_execution WHERE active = 1 ORDER BY id ASC")
+                active_queue = [
+                    {"id": r[0], "month": r[1], "queued_at_utc": r[2]}
+                    for r in cur.fetchall()
+                ]
+                queued_months_set = {q["month"] for q in active_queue}
 
-            # Outdated completed batches (status >= 600 with newly imported assets)
-            cur.execute("""
-                SELECT mb.month, mb.updated_at_utc, MAX(a.imported_date_utc), COUNT(a.asset_id)
-                FROM month_batches mb
-                JOIN assets a ON a.month = mb.month
-                WHERE mb.status_code >= '600'
-                GROUP BY mb.month
-                HAVING MAX(a.imported_date_utc) > mb.updated_at_utc
-                ORDER BY mb.month DESC
-            """)
-            outdated_batches = [
-                {
-                    "month": r[0],
-                    "finalized_at_utc": r[1],
-                    "newest_import_utc": r[2],
-                    "assets_count": r[3]
-                }
-                for r in cur.fetchall()
-            ]
+                cur.execute("""
+                    SELECT status_code, COUNT(*), COALESCE(SUM(assets_count), 0)
+                    FROM month_batches
+                    GROUP BY status_code
+                    ORDER BY status_code ASC
+                """)
+                status_breakdown = {}
+                for sc, cnt, assets_sum in cur.fetchall():
+                    status_breakdown[str(sc)] = {"count": cnt, "assets": assets_sum}
 
-            # Active (non-650) batches with favorites and upload timestamps
-            cur.execute("""
-                SELECT 
-                    mb.month, 
-                    mb.status_code,
-                    COALESCE(a.total_assets, mb.assets_count, 0) as total_assets,
-                    COALESCE(a.fav_assets, 0) as fav_assets,
-                    a.max_fav_updated as fav_synced,
-                    a.last_uploaded_at,
-                    COALESCE(mb.is_bypassed, 0) as is_bypassed,
-                    mb.bypass_timestamp
-                FROM month_batches mb
-                LEFT JOIN (
+                # Outdated completed batches (status >= 600 with newly imported assets)
+                cur.execute("""
+                    SELECT mb.month, mb.updated_at_utc, MAX(a.imported_date_utc), COUNT(a.asset_id)
+                    FROM month_batches mb
+                    JOIN assets a ON a.month = mb.month
+                    WHERE mb.status_code >= '600'
+                    GROUP BY mb.month
+                    HAVING MAX(a.imported_date_utc) > mb.updated_at_utc
+                    ORDER BY mb.month DESC
+                """)
+                outdated_batches = [
+                    {
+                        "month": r[0],
+                        "finalized_at_utc": r[1],
+                        "newest_import_utc": r[2],
+                        "assets_count": r[3]
+                    }
+                    for r in cur.fetchall()
+                ]
+
+                # Active (non-650) batches with favorites and upload timestamps
+                cur.execute("""
                     SELECT 
-                        month, 
-                        COUNT(*) as total_assets,
-                        SUM(CASE WHEN google_favorite = 1 THEN 1 ELSE 0 END) as fav_assets,
-                        MAX(CASE WHEN google_favorite = 1 THEN updated_at_utc END) as max_fav_updated,
-                        MAX(CASE WHEN uploaded_to_google = 1 THEN updated_at_utc END) as last_uploaded_at
-                    FROM assets
-                    GROUP BY month
-                ) a ON mb.month = a.month
-                WHERE mb.status_code != '650' AND mb.month < ?
-                ORDER BY mb.month DESC
-            """, (current_month_str,))
-            non_final_rows = cur.fetchall()
+                        mb.month, 
+                        mb.status_code,
+                        COALESCE(a.total_assets, mb.assets_count, 0) as total_assets,
+                        COALESCE(a.fav_assets, 0) as fav_assets,
+                        a.max_fav_updated as fav_synced,
+                        a.last_uploaded_at,
+                        COALESCE(mb.is_bypassed, 0) as is_bypassed,
+                        mb.bypass_timestamp
+                    FROM month_batches mb
+                    LEFT JOIN (
+                        SELECT 
+                            month, 
+                            COUNT(*) as total_assets,
+                            SUM(CASE WHEN google_favorite = 1 THEN 1 ELSE 0 END) as fav_assets,
+                            MAX(CASE WHEN google_favorite = 1 THEN updated_at_utc END) as max_fav_updated,
+                            MAX(CASE WHEN uploaded_to_google = 1 THEN updated_at_utc END) as last_uploaded_at
+                        FROM assets
+                        GROUP BY month
+                    ) a ON mb.month = a.month
+                    WHERE mb.status_code != '650' AND mb.month < ?
+                    ORDER BY mb.month DESC
+                """, (current_month_str,))
+                non_final_rows = cur.fetchall()
 
-            manual_400_candidates = []
-            pipeline_500_candidates = []
-            pipeline_600_candidates = []
-            pipeline_000_candidates = []
-            retryable_candidates = []
+                manual_400_candidates = []
+                pipeline_500_candidates = []
+                pipeline_600_candidates = []
+                pipeline_000_candidates = []
+                retryable_candidates = []
 
-            for r in non_final_rows:
-                m_str, sc, tot_a, fav_a, fav_sync, last_up, is_byp, byp_ts = r
-                sc_str = str(sc)
-                in_q = m_str in queued_months_set
+                for r in non_final_rows:
+                    m_str, sc, tot_a, fav_a, fav_sync, last_up, is_byp, byp_ts = r
+                    sc_str = str(sc)
+                    in_q = m_str in queued_months_set
 
-                elapsed_days = None
-                if last_up:
-                    try:
-                        dt_up = datetime.strptime(last_up[:19], "%Y-%m-%d %H:%M:%S")
-                        elapsed_days = round((now_utc - dt_up).total_seconds() / 86400.0, 1)
-                    except Exception:
-                        pass
+                    elapsed_days = None
+                    if last_up:
+                        try:
+                            dt_up = datetime.strptime(last_up[:19], "%Y-%m-%d %H:%M:%S")
+                            elapsed_days = round((now_utc - dt_up).total_seconds() / 86400.0, 1)
+                        except Exception:
+                            pass
 
-                item = {
-                    "month": m_str,
-                    "status_code": sc_str,
-                    "total_assets": tot_a,
-                    "fav_assets": fav_a,
-                    "fav_synced": fav_sync[:10] if fav_sync else None,
-                    "last_uploaded_at": last_up[:16] if last_up else None,
-                    "elapsed_days": elapsed_days,
-                    "is_bypassed": bool(is_byp),
-                    "in_queue": in_q
-                }
+                    item = {
+                        "month": m_str,
+                        "status_code": sc_str,
+                        "total_assets": tot_a,
+                        "fav_assets": fav_a,
+                        "fav_synced": fav_sync[:10] if fav_sync else None,
+                        "last_uploaded_at": last_up[:16] if last_up else None,
+                        "elapsed_days": elapsed_days,
+                        "is_bypassed": bool(is_byp),
+                        "in_queue": in_q
+                    }
 
-                if sc_str == "400":
-                    if fav_a > 0:
-                        item["readiness"] = "ready"
-                        item["next_step"] = f"Confirm Google Photos Curation (400 ➜ 500) — {fav_a} favorites detected"
-                    elif elapsed_days is not None and elapsed_days < 3.0:
-                        item["readiness"] = "cooldown"
-                        item["next_step"] = f"Wait for Google AI curation ({elapsed_days:.1f}d / 3.0d elapsed)"
-                    else:
-                        item["readiness"] = "action_needed"
-                        item["next_step"] = "Star favorites in Google Photos album or Bypass to Direct-Rank (400 ➜ 500)"
-                    manual_400_candidates.append(item)
-                elif sc_str in ("500", "550"):
-                    item["transition_path"] = "500 ➜ 550 (Pull Favorites) ➜ 600 (Rank & Export) ➜ 650 (Cloud Retain)"
-                    item["next_step"] = (
-                        f"Queue pipeline execution ({fav_a} favorites synced)"
-                        if fav_a > 0
-                        else ("Queue Direct-Rank Bypass execution" if is_byp else "Queue Pull Google Favorites & Rank (500 ➜ 650)")
-                    )
-                    pipeline_500_candidates.append(item)
-                elif sc_str == "600":
-                    item["transition_path"] = "600 ➜ 650 (Cloud Retention & Local Staging Cleanup)"
-                    item["next_step"] = "Finalize batch & clean staging folder"
-                    pipeline_600_candidates.append(item)
-                elif sc_str in ("399",) or sc_str.endswith("E"):
-                    item["transition_path"] = f"{sc_str} ➜ Retry step"
-                    item["next_step"] = "Resume / retry interrupted upload or failed transition"
-                    retryable_candidates.append(item)
-                elif sc_str in ("000", "100", "200", "210"):
-                    item["transition_path"] = "000 ➜ 100 (Verify DB) ➜ 200 (Export) ➜ 210 (Dedupe) ➜ 399 (Upload)"
-                    item["next_step"] = f"Verify sequencing & export {tot_a} assets to staging for Google upload"
-                    pipeline_000_candidates.append(item)
+                    if sc_str == "400":
+                        if fav_a > 0:
+                            item["readiness"] = "ready"
+                            item["next_step"] = f"Confirm Google Photos Curation (400 ➜ 500) — {fav_a} favorites detected"
+                        elif elapsed_days is not None and elapsed_days < 3.0:
+                            item["readiness"] = "cooldown"
+                            item["next_step"] = f"Wait for Google AI curation ({elapsed_days:.1f}d / 3.0d elapsed)"
+                        else:
+                            item["readiness"] = "action_needed"
+                            item["next_step"] = "Star favorites in Google Photos album or Bypass to Direct-Rank (400 ➜ 500)"
+                        manual_400_candidates.append(item)
+                    elif sc_str in ("500", "550"):
+                        item["transition_path"] = "500 ➜ 550 (Pull Favorites) ➜ 600 (Rank & Export) ➜ 650 (Cloud Retain)"
+                        item["next_step"] = (
+                            f"Queue pipeline execution ({fav_a} favorites synced)"
+                            if fav_a > 0
+                            else ("Queue Direct-Rank Bypass execution" if is_byp else "Queue Pull Google Favorites & Rank (500 ➜ 650)")
+                        )
+                        pipeline_500_candidates.append(item)
+                    elif sc_str == "600":
+                        item["transition_path"] = "600 ➜ 650 (Cloud Retention & Local Staging Cleanup)"
+                        item["next_step"] = "Finalize batch & clean staging folder"
+                        pipeline_600_candidates.append(item)
+                    elif sc_str in ("399",) or sc_str.endswith("E"):
+                        item["transition_path"] = f"{sc_str} ➜ Retry step"
+                        item["next_step"] = "Resume / retry interrupted upload or failed transition"
+                        retryable_candidates.append(item)
+                    elif sc_str in ("000", "100", "200", "210"):
+                        item["transition_path"] = "000 ➜ 100 (Verify DB) ➜ 200 (Export) ➜ 210 (Dedupe) ➜ 399 (Upload)"
+                        item["next_step"] = f"Verify sequencing & export {tot_a} assets to staging for Google upload"
+                        pipeline_000_candidates.append(item)
 
-            # Determine primary suggested next action for Mode [B]
-            primary_b_suggestion = None
-            if manual_400_candidates:
-                top_m = manual_400_candidates[0]
-                primary_b_suggestion = {
-                    "type": "manual_curation",
-                    "month": top_m["month"],
-                    "status_code": "400 ➜ 500",
-                    "headline": f"Step 1 (Manual Curation Check): Batch {top_m['month']} ({top_m['total_assets']} assets)",
-                    "detail": top_m["next_step"],
-                    "secondary": (
-                        f"If skipped, planner proceeds to Pipeline Candidate: Batch {pipeline_500_candidates[0]['month']} (500 ➜ 550 ➜ 600 ➜ 650)"
-                        if pipeline_500_candidates
-                        else (f"If skipped, planner proceeds to Ingest Candidate: Batch {pipeline_000_candidates[0]['month']} (000 ➜ 399)" if pipeline_000_candidates else "")
-                    )
-                }
-            elif retryable_candidates:
-                top_r = retryable_candidates[0]
-                primary_b_suggestion = {
-                    "type": "retryable",
-                    "month": top_r["month"],
-                    "status_code": top_r["status_code"],
-                    "headline": f"Retry Interrupted Batch {top_r['month']}",
-                    "detail": top_r["next_step"],
-                    "secondary": ""
-                }
-            elif pipeline_500_candidates:
-                top_p = pipeline_500_candidates[0]
-                primary_b_suggestion = {
-                    "type": "pipeline_500",
-                    "month": top_p["month"],
-                    "status_code": "500 ➜ 650",
-                    "headline": f"Queue Ranking & Finalization for Batch {top_p['month']} ({top_p['total_assets']} assets)",
-                    "detail": top_p["next_step"],
-                    "secondary": ""
-                }
-            elif pipeline_000_candidates:
-                top_0 = pipeline_000_candidates[0]
-                primary_b_suggestion = {
-                    "type": "pipeline_000",
-                    "month": top_0["month"],
-                    "status_code": "000 ➜ 399",
-                    "headline": f"Start Batch Ingest & Upload for {top_0['month']} ({top_0['total_assets']} assets)",
-                    "detail": top_0["next_step"],
-                    "secondary": ""
-                }
+                # Determine primary suggested next action for Mode [B]
+                primary_b_suggestion = None
+                if manual_400_candidates:
+                    top_m = manual_400_candidates[0]
+                    primary_b_suggestion = {
+                        "type": "manual_curation",
+                        "month": top_m["month"],
+                        "status_code": "400 ➜ 500",
+                        "headline": f"Step 1 (Manual Curation Check): Batch {top_m['month']} ({top_m['total_assets']} assets)",
+                        "detail": top_m["next_step"],
+                        "secondary": (
+                            f"If skipped, planner proceeds to Pipeline Candidate: Batch {pipeline_500_candidates[0]['month']} (500 ➜ 550 ➜ 600 ➜ 650)"
+                            if pipeline_500_candidates
+                            else (f"If skipped, planner proceeds to Ingest Candidate: Batch {pipeline_000_candidates[0]['month']} (000 ➜ 399)" if pipeline_000_candidates else "")
+                        )
+                    }
+                elif retryable_candidates:
+                    top_r = retryable_candidates[0]
+                    primary_b_suggestion = {
+                        "type": "retryable",
+                        "month": top_r["month"],
+                        "status_code": top_r["status_code"],
+                        "headline": f"Retry Interrupted Batch {top_r['month']}",
+                        "detail": top_r["next_step"],
+                        "secondary": ""
+                    }
+                elif pipeline_500_candidates:
+                    top_p = pipeline_500_candidates[0]
+                    primary_b_suggestion = {
+                        "type": "pipeline_500",
+                        "month": top_p["month"],
+                        "status_code": "500 ➜ 650",
+                        "headline": f"Queue Ranking & Finalization for Batch {top_p['month']} ({top_p['total_assets']} assets)",
+                        "detail": top_p["next_step"],
+                        "secondary": ""
+                    }
+                elif pipeline_000_candidates:
+                    top_0 = pipeline_000_candidates[0]
+                    primary_b_suggestion = {
+                        "type": "pipeline_000",
+                        "month": top_0["month"],
+                        "status_code": "000 ➜ 399",
+                        "headline": f"Start Batch Ingest & Upload for {top_0['month']} ({top_0['total_assets']} assets)",
+                        "detail": top_0["next_step"],
+                        "secondary": ""
+                    }
 
-            # -----------------------------------------------------------------
-            # 2. Mode [M]: Moments Organizer Overview & Next Steps
-            # -----------------------------------------------------------------
-            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
-            min_th_row = cur.fetchone()
-            db_hist_min = float(min_th_row[0]) if min_th_row and min_th_row[0] else 0.5315
+                # Enrich candidate batches with device summary vs active family devices
+                top_000_batches = pipeline_000_candidates[:8]
+                _enrich_batch_candidates_with_devices(cur, top_000_batches)
+                if manual_400_candidates:
+                    _enrich_batch_candidates_with_devices(cur, manual_400_candidates)
+                if pipeline_500_candidates:
+                    _enrich_batch_candidates_with_devices(cur, pipeline_500_candidates)
 
-            cur.execute("SELECT recorded_at_utc FROM threshold_history ORDER BY id DESC LIMIT 1")
-            last_th_row = cur.fetchone()
-            last_th_utc = last_th_row[0] if last_th_row else None
-
-            cur.execute("SELECT memory_stage, COUNT(*) FROM curated_moments GROUP BY memory_stage")
-            moment_stage_counts = {r[0]: r[1] for r in cur.fetchall()}
-
-            cur.execute("SELECT COUNT(DISTINCT moment_name), COUNT(DISTINCT asset_uuid) FROM publications")
-            pub_totals = cur.fetchone()
-            published_moments_total = pub_totals[0] if pub_totals else 0
-            published_assets_total = pub_totals[1] if pub_totals else 0
-
-            mode_m_live = _compute_mode_m_from_db(cur, db_hist_min, last_th_utc)
-
-            curr_thresh = mode_m_live["current_threshold"]
-            hist_min = mode_m_live["historical_min"]
-            thresh_aligned = mode_m_live["threshold_aligned"]
-            unassigned_clusters = mode_m_live["unassigned_clusters"]
-            total_unassigned_assets = sum(len(c["assets"]) for c in unassigned_clusters)
-
-            # Enrich candidate batches with device summary vs active family devices
-            top_000_batches = pipeline_000_candidates[:8]
-            _enrich_batch_candidates_with_devices(cur, top_000_batches)
-            if manual_400_candidates:
-                _enrich_batch_candidates_with_devices(cur, manual_400_candidates)
-            if pipeline_500_candidates:
-                _enrich_batch_candidates_with_devices(cur, pipeline_500_candidates)
-
-            return {
-                "connected": True,
-                "mode_b": {
+                mode_b_payload = {
                     "active_queue": active_queue,
                     "status_breakdown": status_breakdown,
                     "outdated_batches": outdated_batches,
@@ -3066,8 +3045,37 @@ def get_planner_overview():
                     "total_000_assets": sum(x["total_assets"] for x in pipeline_000_candidates),
                     "retryable_candidates": retryable_candidates,
                     "primary_suggestion": primary_b_suggestion
-                },
-                "mode_m": {
+                }
+
+            if include_m:
+                # -----------------------------------------------------------------
+                # 2. Mode [M]: Moments Organizer Overview & Next Steps
+                # -----------------------------------------------------------------
+                cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+                min_th_row = cur.fetchone()
+                db_hist_min = float(min_th_row[0]) if min_th_row and min_th_row[0] else 0.5315
+
+                cur.execute("SELECT recorded_at_utc FROM threshold_history ORDER BY id DESC LIMIT 1")
+                last_th_row = cur.fetchone()
+                last_th_utc = last_th_row[0] if last_th_row else None
+
+                cur.execute("SELECT memory_stage, COUNT(*) FROM curated_moments GROUP BY memory_stage")
+                moment_stage_counts = {r[0]: r[1] for r in cur.fetchall()}
+
+                cur.execute("SELECT COUNT(DISTINCT moment_name), COUNT(DISTINCT asset_uuid) FROM publications")
+                pub_totals = cur.fetchone()
+                published_moments_total = pub_totals[0] if pub_totals else 0
+                published_assets_total = pub_totals[1] if pub_totals else 0
+
+                mode_m_live = _compute_mode_m_from_db(cur, db_hist_min, last_th_utc)
+
+                curr_thresh = mode_m_live["current_threshold"]
+                hist_min = mode_m_live["historical_min"]
+                thresh_aligned = mode_m_live["threshold_aligned"]
+                unassigned_clusters = mode_m_live["unassigned_clusters"]
+                total_unassigned_assets = sum(len(c["assets"]) for c in unassigned_clusters)
+
+                mode_m_payload = {
                     "threshold": {
                         "current": curr_thresh,
                         "historical_min": hist_min,
@@ -3091,6 +3099,12 @@ def get_planner_overview():
                     "actionable_recommendations": mode_m_live["actionable_recs"][:12],
                     "disjoint_recommendations": mode_m_live["disjoint_recs"][:10]
                 }
+
+            return {
+                "connected": True,
+                "mode": mode_norm,
+                "mode_b": mode_b_payload,
+                "mode_m": mode_m_payload,
             }
         finally:
             conn.close()

@@ -18,9 +18,13 @@ import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../
 import { openCleanupPreviewModal } from './cleanup.ts';
 
 let plannerOverviewData: PlannerOverviewResponse | null = null;
-let activePlannerFetchPromise: Promise<void> | null = null;
-let pendingPlannerRefresh = false;
-let queuedPlannerFetchPromise: Promise<void> | null = null;
+type PlannerModeTarget = 'b' | 'm' | 'all';
+const activePlannerFetchByMode: Partial<Record<PlannerModeTarget, Promise<void>>> = {};
+const pendingPlannerRefreshByMode: Partial<Record<PlannerModeTarget, boolean>> = {};
+let activePlannerModeView: 'b' | 'm' | 'c' = 'b';
+let modeBLoaded = false;
+let modeMLoaded = false;
+let foldersLoaded = false;
 let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
 const expandedUnassignedFolders = new Set<string>();
@@ -51,6 +55,8 @@ let groupingRulesPanelCollapsed = false;
 let isUpdatingGroupingRules = false;
 
 function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
+  activePlannerModeView = view;
+
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(t => {
     t.classList.toggle('active', t.dataset.modeView === view);
   });
@@ -63,6 +69,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   const cardTrack1 = document.getElementById('track-1-reference-card');
 
   if (view === 'b') {
+    closeIntakeDedupModal();
     if (grid) {
       grid.style.display = 'grid';
       grid.classList.add('single-col');
@@ -72,6 +79,9 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     if (cardC) cardC.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardTrack1) cardTrack1.style.display = 'block';
+    if (!modeBLoaded) {
+      void fetchPlannerOverview(false, 'b');
+    }
   } else if (view === 'm') {
     if (grid) {
       grid.style.display = 'grid';
@@ -82,7 +92,14 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     if (cardC) cardC.style.display = 'none';
     if (cardPub) cardPub.style.display = 'block';
     if (cardTrack1) cardTrack1.style.display = 'none';
+    if (!modeMLoaded) {
+      void fetchPlannerOverview(false, 'm');
+    }
+    if (!foldersLoaded) {
+      void fetchMemoriesFolders();
+    }
   } else if (view === 'c') {
+    closeIntakeDedupModal();
     if (grid) grid.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardTrack1) cardTrack1.style.display = 'none';
@@ -181,8 +198,12 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
   }
 
   document.getElementById('btn-refresh-planner-overview')?.addEventListener('click', () => {
-    fetchPlannerOverview();
-    void fetchMemoriesFolders();
+    if (activePlannerModeView === 'm') {
+      void fetchPlannerOverview(true, 'm');
+      void fetchMemoriesFolders();
+    } else if (activePlannerModeView === 'b') {
+      void fetchPlannerOverview(true, 'b');
+    }
   });
 
   // Moments Organizer: Query existing folders under Moments (local DB copy)
@@ -294,7 +315,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
         alert(`Action failed: ${data.error || 'Unknown error'}`);
         return;
       }
-      await fetchPlannerOverview();
+      await fetchPlannerOverview(true, 'b');
       if (onRefreshExecutor) onRefreshExecutor();
     } catch (err: any) {
       console.error('Error running planner batch action:', err);
@@ -302,56 +323,88 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
     }
   };
 
-  // Load initial planner overview data & synced Memories/Moments folders
-  fetchPlannerOverview();
-  void fetchMemoriesFolders();
+  // Load initial Mode [B] Batch Management overview only (Mode [M] & Intake Dedup load when [M] is opened)
+  void fetchPlannerOverview(false, 'b');
 }
 
-export async function fetchPlannerOverview(force = false): Promise<void> {
-  if (activePlannerFetchPromise) {
-    if (!force) {
-      return activePlannerFetchPromise;
+const queuedPlannerFetchByMode: Partial<Record<PlannerModeTarget, Promise<void>>> = {};
+
+export async function fetchPlannerOverview(force = false, targetMode?: PlannerModeTarget): Promise<void> {
+  if (!targetMode && activePlannerModeView === 'c') {
+    if (force) {
+      modeBLoaded = false;
+      modeMLoaded = false;
+      foldersLoaded = false;
     }
-    pendingPlannerRefresh = true;
-    if (!queuedPlannerFetchPromise) {
-      queuedPlannerFetchPromise = activePlannerFetchPromise
-        .catch(() => {})
-        .then(() => {
-          queuedPlannerFetchPromise = null;
-          pendingPlannerRefresh = false;
-          return fetchPlannerOverview(false);
-        });
+    return;
+  }
+  const mode: PlannerModeTarget = targetMode || (activePlannerModeView === 'm' ? 'm' : 'b');
+  if (force) {
+    if (mode === 'b') {
+      modeMLoaded = false;
+      foldersLoaded = false;
+    } else if (mode === 'm') {
+      modeBLoaded = false;
     }
-    return queuedPlannerFetchPromise;
   }
 
-  activePlannerFetchPromise = (async () => {
+  const inFlight = activePlannerFetchByMode[mode];
+  if (inFlight) {
+    if (!force) {
+      return inFlight;
+    }
+    pendingPlannerRefreshByMode[mode] = true;
+    if (!queuedPlannerFetchByMode[mode]) {
+      queuedPlannerFetchByMode[mode] = inFlight
+        .catch(() => {})
+        .then(() => {
+          delete queuedPlannerFetchByMode[mode];
+          pendingPlannerRefreshByMode[mode] = false;
+          return fetchPlannerOverview(false, mode);
+        });
+    }
+    return queuedPlannerFetchByMode[mode];
+  }
+
+  const runPromise = (async () => {
     try {
-      const res = await fetch('/api/media/planner-overview');
+      const res = await fetch(`/api/media/planner-overview?mode=${encodeURIComponent(mode)}`);
       const data: PlannerOverviewResponse = await res.json();
 
       if (!data.connected) return;
-      plannerOverviewData = data;
+      plannerOverviewData = {
+        connected: data.connected,
+        mode: data.mode || mode,
+        mode_b: data.mode_b ?? plannerOverviewData?.mode_b ?? null,
+        mode_m: data.mode_m ?? plannerOverviewData?.mode_m ?? null,
+      };
 
       const updatedEl = document.getElementById('planner-overview-updated');
       if (updatedEl) {
         updatedEl.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
       }
 
-      renderModeBOverview((data.mode_b || {}) as PlannerModeB);
-      renderModeMOverview((data.mode_m || {}) as PlannerModeM);
+      if (data.mode_b) {
+        modeBLoaded = true;
+        renderModeBOverview(data.mode_b as PlannerModeB);
+      }
+      if (data.mode_m) {
+        modeMLoaded = true;
+        renderModeMOverview(data.mode_m as PlannerModeM);
+      }
     } catch (err) {
-      console.error('Error fetching planner overview:', err);
+      console.error(`Error fetching planner overview (${mode}):`, err);
     } finally {
-      activePlannerFetchPromise = null;
-      if (pendingPlannerRefresh && !queuedPlannerFetchPromise) {
-        pendingPlannerRefresh = false;
-        void fetchPlannerOverview();
+      delete activePlannerFetchByMode[mode];
+      if (pendingPlannerRefreshByMode[mode] && !queuedPlannerFetchByMode[mode]) {
+        pendingPlannerRefreshByMode[mode] = false;
+        void fetchPlannerOverview(false, mode);
       }
     }
   })();
 
-  return activePlannerFetchPromise;
+  activePlannerFetchByMode[mode] = runPromise;
+  return runPromise;
 }
 
 function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
@@ -1124,6 +1177,7 @@ function renderUnassignedClustersList(): void {
 }
 
 async function openIntakeDedupModal(): Promise<void> {
+  if (activePlannerModeView !== 'm') return;
   const modal = document.getElementById('modal-intake-dedup');
   if (!modal) return;
   modal.classList.add('open');
@@ -1442,7 +1496,7 @@ async function applyIntakeDedupIgnore(): Promise<void> {
     }
     selectedDedupAssetIds.clear();
 
-    await fetchPlannerOverview(true);
+    await fetchPlannerOverview(true, 'm');
     if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
 
     if (dedupPreviewData) {
@@ -1481,6 +1535,7 @@ async function fetchMemoriesFolders(): Promise<void> {
     });
     const res = await fetch(`/api/media/memories/folders?${params.toString()}`);
     const data: MemoriesFoldersResponse = await res.json();
+    foldersLoaded = true;
     memoriesFoldersData = data;
 
     if (!data.connected) {
@@ -1880,7 +1935,7 @@ async function submitCreateMoment(): Promise<void> {
       `;
     }
 
-    await Promise.all([fetchMemoriesFolders(), fetchPlannerOverview(true)]);
+    await Promise.all([fetchMemoriesFolders(), fetchPlannerOverview(true, 'm')]);
     if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
 
     if (statusEl) {
@@ -2033,7 +2088,7 @@ async function updateGroupingRules(payload: {
       alert(`Failed updating grouping rules: ${data.error || `HTTP ${res.status}`}`);
       return;
     }
-    await fetchPlannerOverview(true);
+    await fetchPlannerOverview(true, 'm');
   } catch (err: any) {
     console.error('Error updating grouping rules:', err);
     alert(`Network error updating grouping rules: ${err?.message || 'Unknown error'}`);
