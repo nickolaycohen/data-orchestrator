@@ -2949,6 +2949,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         grp["orig_rank"] = idx
         grp["asset_count"] = cnt
         grp["duplicate_copy_count"] = sum(1 for a in grp["assets"] if a.get("is_duplicate_copy"))
+        grp["unique_count"] = max(0, cnt - grp["duplicate_copy_count"])
         grp["months"] = ", ".join(sorted(grp["months"]))
         grp["score_span"] = f"{grp['max_score']:.4f}" if cnt == 1 else f"{grp['max_score']:.4f} .. {grp['min_score']:.4f}"
         rid = grp.get("rule_id") or "same_date"
@@ -2957,7 +2958,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         unassigned_clusters.append(grp)
     unassigned_clusters.sort(
         key=lambda g: (
-            1 if g.get("rule_id") == "misdated_duplicate_triage" else 0,
+            2 if g["unique_count"] == 0 else (1 if g.get("rule_id") == "misdated_duplicate_triage" else 0),
+            -g["unique_count"],
             -len(g["assets"]),
             -g["max_score"],
             g["folder"],

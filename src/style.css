@@ -3179,6 +3179,16 @@ body {
   background: rgba(18, 24, 38, 0.95);
 }
 
+.unassigned-cluster-card.cluster-complete {
+  opacity: 0.72;
+  border-color: rgba(34, 197, 94, 0.28);
+}
+
+.unassigned-cluster-card.cluster-complete:hover,
+.unassigned-cluster-card.cluster-complete.expanded {
+  opacity: 0.96;
+}
+
 .unassigned-cluster-header {
   display: flex;
   align-items: center;

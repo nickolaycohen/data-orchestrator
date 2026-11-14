@@ -881,19 +881,30 @@ function renderUnassignedClustersList(): void {
     });
   }
 
+  const getClusterSortTier = (c: (typeof filtered)[number]): number => {
+    const cnt = c.assets.length || c.asset_count || 0;
+    const uniqueCnt = Math.max(0, cnt - (c.duplicate_copy_count || 0));
+    if (uniqueCnt === 0) return 2;
+    if (c.rule_id === 'misdated_duplicate_triage') return 1;
+    return 0;
+  };
+
   const sorted = [...filtered].sort((a, b) => {
+    const tierA = getClusterSortTier(a);
+    const tierB = getClusterSortTier(b);
+    if (tierA !== tierB) return tierA - tierB;
     const cntA = (a.assets || []).length || a.asset_count || 0;
     const cntB = (b.assets || []).length || b.asset_count || 0;
-    const isTriageA = a.rule_id === 'misdated_duplicate_triage' ? 1 : 0;
-    const isTriageB = b.rule_id === 'misdated_duplicate_triage' ? 1 : 0;
+    const uniqueA = Math.max(0, cntA - (a.duplicate_copy_count || 0));
+    const uniqueB = Math.max(0, cntB - (b.duplicate_copy_count || 0));
     if (unassignedSortMode === 'size') {
-      if (isTriageA !== isTriageB) return isTriageA - isTriageB;
+      if (uniqueB !== uniqueA) return uniqueB - uniqueA;
       if (cntB !== cntA) return cntB - cntA;
       if (b.max_score !== a.max_score) return b.max_score - a.max_score;
       return (a.folder || '').localeCompare(b.folder || '');
     } else if (unassignedSortMode === 'score') {
-      if (isTriageA !== isTriageB) return isTriageA - isTriageB;
       if (b.max_score !== a.max_score) return b.max_score - a.max_score;
+      if (uniqueB !== uniqueA) return uniqueB - uniqueA;
       if (cntB !== cntA) return cntB - cntA;
       return (a.folder || '').localeCompare(b.folder || '');
     } else {
@@ -914,6 +925,8 @@ function renderUnassignedClustersList(): void {
     .map((cluster, idx) => {
       const assets = cluster.assets || [];
       const count = assets.length || cluster.asset_count || 0;
+      const uniqueCount = Math.max(0, count - (cluster.duplicate_copy_count || 0));
+      const isCompleteGroup = uniqueCount === 0;
       const isExpanded = expandedUnassignedFolders.has(cluster.folder);
       const previewableAssets = assets.filter(a => a.asset_id);
       clusterPreviewAssetIds.set(
@@ -1091,7 +1104,7 @@ function renderUnassignedClustersList(): void {
           : '';
 
       return `
-      <div class="unassigned-cluster-card ${isExpanded ? 'expanded' : ''}" data-cluster-folder="${escapeHtml(cluster.folder)}">
+      <div class="unassigned-cluster-card ${isExpanded ? 'expanded' : ''}${isCompleteGroup ? ' cluster-complete' : ''}" data-cluster-folder="${escapeHtml(cluster.folder)}">
         <div class="unassigned-cluster-header" data-toggle-cluster="${escapeHtml(cluster.folder)}">
           <div class="unassigned-cluster-left">
             <span class="unassigned-cluster-chevron">▶</span>
@@ -1099,7 +1112,11 @@ function renderUnassignedClustersList(): void {
             <div class="unassigned-cluster-info">
               <div class="unassigned-cluster-title-row">
                 <span class="unassigned-cluster-folder">${count === 1 && (cluster.rule_id === 'ungrouped' || cluster.rule_id === 'refused_cluster') ? '🖼️' : '📁'} ${escapeHtml(cluster.folder)}</span>
-                <span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Unique files identified after Media-Intake dedup (${count} total - ${cluster.duplicate_copy_count || 0} dup flagged)">✓ ${Math.max(0, count - (cluster.duplicate_copy_count || 0))} unique</span>
+                ${
+                  isCompleteGroup
+                    ? `<span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Complete — all ${count} assets in this group are flagged as duplicate copies (no unique assets remain)">✅ Complete (0 unique)</span>`
+                    : `<span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Unique files identified after Media-Intake dedup (${count} total - ${cluster.duplicate_copy_count || 0} dup flagged)">✓ ${uniqueCount} unique</span>`
+                }
                 <span class="badge badge-xs ${sizeBadgeClass} font-mono">${count} asset${count === 1 ? '' : 's'}</span>
                 <span class="badge badge-xs ${typeBadgeClass}" style="font-size: 0.64rem;">${escapeHtml(cluster.group_type)}</span>
                 ${
@@ -1165,11 +1182,11 @@ function renderUnassignedClustersList(): void {
                   : ''
             }
             ${
-              cluster.rule_id === 'misdated_duplicate_triage'
+              cluster.rule_id === 'misdated_duplicate_triage' || isCompleteGroup
                 ? `<button
               class="btn btn-xs btn-danger btn-ignore-triage-cluster"
               data-ignore-cluster="${escapeHtml(cluster.folder)}"
-              title="Move all ${count} quarantined misdated/duplicate assets into Apple Photos Ignore album"
+              title="Move all ${count} duplicate/flagged assets into Apple Photos Ignore album"
               style="white-space: nowrap; flex-shrink: 0;"
             >
               🗑️ Ignore All (${count})
@@ -1322,7 +1339,7 @@ function renderUnassignedClustersList(): void {
       if (!cluster) return;
       const allIds = (cluster.assets || []).map(a => a.asset_id).filter(Boolean);
       if (!allIds.length) return;
-      if (!window.confirm(`Move all ${allIds.length} quarantined misdated/duplicate asset(s) in "${folder}" to Apple Photos 'Ignore' album?`)) return;
+      if (!window.confirm(`Move all ${allIds.length} duplicate/flagged asset(s) in "${folder}" to Apple Photos 'Ignore' album?`)) return;
       clusterAssetSelection.delete(folder);
       void moveAssetsToIgnoreAlbum(allIds, btn);
     });
