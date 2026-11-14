@@ -1830,7 +1830,7 @@
       </div>
 
       <!-- Media Cleanup Asset Preview Modal -->
-      <div class="modal-backdrop" id="modal-cleanup-preview">
+      <div class="modal-backdrop" id="modal-cleanup-preview" style="z-index: 320;">
         <div class="modal-dialog modal-dialog-preview">
           <div class="modal-header">
             <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
@@ -1909,13 +1909,13 @@
       </div>
 
       <!-- Modal: Media-Intake Dedup & Ignore (Pre-Moment Grouping) -->
-      <div class="modal-overlay" id="modal-intake-dedup">
-        <div class="modal-content" style="max-width: 960px; width: 94vw;">
+      <div class="modal-backdrop" id="modal-intake-dedup">
+        <div class="modal-dialog" style="max-width: 960px; width: 94vw; max-height: 90vh; display: flex; flex-direction: column;">
           <div class="modal-header">
-            <h3>🧹 Media-Intake Dedup &amp; Ignore</h3>
-            <button class="btn-icon btn-close-dedup-modal">&times;</button>
+            <h3 style="margin: 0; font-size: 1.05rem;">🧹 Media-Intake Dedup &amp; Ignore</h3>
+            <button class="btn btn-xs btn-icon btn-close-dedup-modal" aria-label="Close">✕</button>
           </div>
-          <div class="modal-body" style="padding: 1rem 1.25rem;">
+          <div class="modal-body" style="padding: 1rem 1.25rem; overflow-y: auto; flex: 1;">
             <div class="dedup-status-banner" id="dedup-modal-status">
               <div class="spinner-sm"></div>
               <span>Scanning unassigned assets against library keepers...</span>
@@ -1946,13 +1946,13 @@
       </div>
 
       <!-- Modal: Create Moment Album via AppleScript -->
-      <div class="modal-overlay" id="modal-create-moment">
-        <div class="modal-content" style="max-width: 640px; width: 92vw;">
+      <div class="modal-backdrop" id="modal-create-moment">
+        <div class="modal-dialog" style="max-width: 640px; width: 92vw; max-height: 90vh; display: flex; flex-direction: column;">
           <div class="modal-header">
-            <h3>✨ Create / Populate Moment via AppleScript</h3>
-            <button class="btn-icon btn-close-create-moment-modal">&times;</button>
+            <h3 style="margin: 0; font-size: 1.05rem;">✨ Create / Populate Moment via AppleScript</h3>
+            <button class="btn btn-xs btn-icon btn-close-create-moment-modal" aria-label="Close">✕</button>
           </div>
-          <div class="modal-body" style="padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem;">
+          <div class="modal-body" style="padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem; overflow-y: auto; flex: 1;">
             <div style="display: grid; grid-template-columns: 1fr 185px; gap: 0.75rem; align-items: end;">
               <div>
                 <label class="font-mono text-muted" style="font-size: 0.7rem; display: block; margin-bottom: 0.3rem;">

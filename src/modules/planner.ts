@@ -71,6 +71,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
 
   if (view === 'b') {
     closeIntakeDedupModal();
+    closeCreateMomentModal();
     if (grid) {
       grid.style.display = 'grid';
       grid.classList.add('single-col');
@@ -101,6 +102,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     }
   } else if (view === 'c') {
     closeIntakeDedupModal();
+    closeCreateMomentModal();
     if (grid) grid.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardTrack1) cardTrack1.style.display = 'none';
