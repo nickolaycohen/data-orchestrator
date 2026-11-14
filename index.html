@@ -262,12 +262,12 @@
             </div>
           </div>
 
-          <!-- Session Mode Selector ([B] Batch Management | [M] Memory Feature & Publishing | [C] Media Cleanup) -->
+          <!-- Session Mode Selector ([B] Batch Management | [M] Memories Organizer | [C] Media Cleanup) -->
           <div class="planner-mode-selector-bar mb-3" id="planner-mode-selector-bar">
             <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
               <span class="planner-mode-label">🛠️ Pipeline Branch:</span>
               <button class="planner-mode-tab active" data-mode-view="b">[B] Batch Management</button>
-              <button class="planner-mode-tab" data-mode-view="m">[M] Memory Feature &amp; Publishing</button>
+              <button class="planner-mode-tab" data-mode-view="m">[M] Memories Organizer</button>
               <button class="planner-mode-tab" data-mode-view="c">[C] Media Cleanup &amp; Reclaim</button>
             </div>
             <div style="display: flex; align-items: center; gap: 0.5rem;">
@@ -280,7 +280,7 @@
             </div>
           </div>
 
-          <!-- Two Sections: [B] Batch Management (default) | [M] Memory Feature & Publishing -->
+          <!-- Two Sections: [B] Batch Management (default) | [M] Memories Organizer -->
           <div class="planner-modes-grid single-col mb-4" id="planner-modes-grid">
             <!-- SECTION [B]: Batch Management (default) -->
             <div class="card planner-mode-card" id="planner-mode-b-card">
@@ -492,21 +492,26 @@
               </div>
             </div>
 
-            <!-- SECTION [M]: Memory Feature & Publishing -->
+            <!-- SECTION [M]: Memories Organizer -->
             <div class="card planner-mode-card" id="planner-mode-m-card">
               <div class="card-header">
                 <div style="display: flex; align-items: center; gap: 0.75rem;">
                   <div class="action-icon icon-green" style="width: 36px; height: 36px; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; border-radius: 8px;">🌟</div>
                   <div>
                     <h3 style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                      [M] Memory Feature &amp; Publishing
+                      [M] Memories Organizer
                       <span class="badge badge-xs badge-green font-mono" id="mode-m-threshold-pill">Threshold: Checking...</span>
                       <span class="badge badge-xs badge-purple font-mono" id="mode-m-moments-pill">163 Moments</span>
                     </h3>
                     <p class="card-subtitle">
-                      Overview of next steps if <code>[M] Memory Feature &amp; Publishing</code> is selected — checks Curation Threshold, syncs <code>ToBeCurated</code>/<code>Curated</code>, &amp; ranks Top Publishing Candidates.
+                      <code>[M] Memories Organizer</code> — query existing Memories/Moments folders from <code>media_organizer.db</code> (no Apple Photos DB query), create Moments via AppleScript, review Curation Threshold, &amp; rank Publishing Candidates.
                     </p>
                   </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                  <button class="btn btn-xs btn-purple" id="btn-open-create-moment-header" title="Create a new Moment album under Media Organizer on LaCie via AppleScript">
+                    ✨ + Create Moment
+                  </button>
                 </div>
               </div>
 
@@ -546,6 +551,66 @@
 
               <!-- Step-by-Step Breakdown for Mode [M] -->
               <div class="planner-steps-body">
+                <!-- Existing Folders under Memories / Moments (Local media_organizer.db Copy) -->
+                <div class="planner-subblock" id="mode-m-folders-block">
+                  <div class="planner-subblock-header" style="gap: 0.5rem; flex-wrap: wrap;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                      <span><strong>📁 Existing Folders under Memories / Moments</strong></span>
+                      <span class="badge badge-xs badge-purple font-mono" id="mode-m-folders-count-badge">— folders</span>
+                      <span class="badge badge-xs badge-outline font-mono" id="mode-m-folders-sync-badge" title="Queried directly from local media_organizer.db copy (zero queries to Apple Photos DB)">DB Copy</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                      <button class="btn btn-xs btn-outline" id="btn-refresh-memories-folders" title="Re-query existing Memories/Moments folders from media_organizer.db">
+                        ↻ Query DB Copy
+                      </button>
+                      <button class="btn btn-xs btn-outline" id="btn-toggle-memories-folders" title="Show or collapse the Existing Folders table">
+                        ▴ Collapse
+                      </button>
+                    </div>
+                  </div>
+                  <div id="mode-m-folders-body" class="memories-folders-body">
+                    <div class="memories-folders-toolbar">
+                      <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;" id="mode-m-folders-scope-bar">
+                        <button class="cleanup-filter-btn memories-scope-btn active" data-folders-scope="moments">Moments</button>
+                        <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="curated">Curated</button>
+                        <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="to_be_curated">ToBeCurated</button>
+                        <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="folders">Top Folders</button>
+                        <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="all">All</button>
+                      </div>
+                      <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                        <input
+                          type="text"
+                          class="form-control form-control-sm"
+                          id="mode-m-folders-search"
+                          placeholder="Query folders / moment names..."
+                          style="width: 220px; padding: 0.22rem 0.55rem; font-size: 0.72rem;"
+                        />
+                        <select id="mode-m-folders-sort" class="form-control form-control-sm" style="width: auto; padding: 0.2rem 0.45rem; font-size: 0.72rem;">
+                          <option value="name">Sort: Name (A–Z)</option>
+                          <option value="recent">Sort: Name (Z–A)</option>
+                          <option value="assets">Sort: Most Assets</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div class="planner-table-wrap" style="max-height: 230px; overflow-y: auto;">
+                      <table class="cleanup-table planner-compact-table">
+                        <thead>
+                          <tr>
+                            <th>Folder / Moment Name</th>
+                            <th>Parent Folder</th>
+                            <th style="text-align: right;">Assets</th>
+                            <th>Stage</th>
+                            <th style="text-align: right;">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody id="mode-m-folders-tbody">
+                          <tr><td colspan="5" class="text-center text-muted">Loading synced Memories/Moments folders from media_organizer.db...</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+
                 <!-- Step 1: Curation Threshold & Moments Needing ToBeCurated Sync -->
                 <div class="planner-subblock">
                   <div class="planner-subblock-header">
@@ -865,7 +930,7 @@
           <div class="card mb-4" id="published-memories-card">
             <div class="card-header" style="margin-bottom: 0.65rem;">
               <div>
-                <h3>Track 2: Memory Feature &amp; Publishing (Mode [M])</h3>
+                <h3>Track 2: Memories Organizer (Mode [M])</h3>
                 <p class="card-subtitle">
                   Published history to
                   <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-shutterfly">Shutterfly ↗</a> (Photos) &amp;
@@ -1852,6 +1917,83 @@
               <button class="btn btn-outline btn-close-dedup-modal">Close</button>
               <button class="btn btn-danger" id="btn-apply-intake-dedup-ignore" disabled>
                 🚫 Add Selected to Ignore Album
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal: Create Moment Album via AppleScript -->
+      <div class="modal-overlay" id="modal-create-moment">
+        <div class="modal-content" style="max-width: 640px; width: 92vw;">
+          <div class="modal-header">
+            <h3>✨ Create / Populate Moment via AppleScript</h3>
+            <button class="btn-icon btn-close-create-moment-modal">&times;</button>
+          </div>
+          <div class="modal-body" style="padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem;">
+            <div style="display: grid; grid-template-columns: 1fr 185px; gap: 0.75rem; align-items: end;">
+              <div>
+                <label class="font-mono text-muted" style="font-size: 0.7rem; display: block; margin-bottom: 0.3rem;">
+                  Moment Album Name
+                </label>
+                <input
+                  type="text"
+                  id="create-moment-name-input"
+                  class="form-control"
+                  placeholder="e.g. 2020-07-28 - Panichishte"
+                  style="width: 100%; font-size: 0.85rem; padding: 0.45rem 0.65rem;"
+                />
+              </div>
+              <div>
+                <label class="font-mono text-muted" style="font-size: 0.7rem; display: block; margin-bottom: 0.3rem;">
+                  Parent Folder
+                </label>
+                <select id="create-moment-parent-select" class="form-control" style="width: 100%; font-size: 0.8rem; padding: 0.45rem 0.55rem;">
+                  <option value="Moments" selected>Moments</option>
+                  <option value="Memories">Memories</option>
+                  <option value="Generic Moments">Generic Moments</option>
+                  <option value="Curated">Curated</option>
+                  <option value="ToBeCurated">ToBeCurated</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="create-moment-existing-hint" class="dedup-status-banner" style="padding: 0.5rem 0.75rem; font-size: 0.76rem;">
+              Type a Moment name to check matching folders in <code>media_organizer.db</code>...
+            </div>
+
+            <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.76rem; color: var(--text-secondary); cursor: pointer;">
+              <input type="checkbox" id="create-moment-allow-existing" checked />
+              <span>If album already exists under target folder, open it &amp; add missing assets</span>
+            </label>
+
+            <div id="create-moment-assets-box" class="create-moment-assets-box" style="display: none;">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                <strong id="create-moment-cluster-summary" style="font-size: 0.78rem; color: var(--text-primary);">—</strong>
+                <span class="badge badge-xs badge-green font-mono" id="create-moment-asset-count-pill">0 assets</span>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.45rem;">
+                <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; color: var(--text-secondary); cursor: pointer;">
+                  <input type="checkbox" id="create-moment-exclude-dups" checked />
+                  <span id="create-moment-exclude-dups-label">Exclude duplicate-flagged assets (keep unique assets only)</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; color: var(--text-secondary); cursor: pointer;">
+                  <input type="checkbox" id="create-moment-empty-only" />
+                  <span>Create album only (do not add cluster assets yet)</span>
+                </label>
+              </div>
+            </div>
+
+            <div id="create-moment-status" class="dedup-status-banner" style="display: none; font-size: 0.76rem;"></div>
+          </div>
+          <div class="modal-footer" style="justify-content: space-between;">
+            <span class="font-mono text-muted" style="font-size: 0.69rem;" id="create-moment-target-path">
+              Path: Media Organizer on LaCie/Moments/...
+            </span>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <button class="btn btn-outline btn-close-create-moment-modal">Cancel</button>
+              <button class="btn btn-purple" id="btn-submit-create-moment">
+                🍎 Create Moment via AppleScript
               </button>
             </div>
           </div>

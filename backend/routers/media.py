@@ -2526,7 +2526,7 @@ def _enrich_batch_candidates_with_devices(cur, candidates):
 
 @router.get("/planner-overview")
 def get_planner_overview():
-    """Return comprehensive next-step overview for Mode [B] Batch Management and Mode [M] Memory Feature & Publishing."""
+    """Return comprehensive next-step overview for Mode [B] Batch Management and Mode [M] Memories Organizer."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"connected": False, "error": "Media database unavailable"}
 
@@ -2716,7 +2716,7 @@ def get_planner_overview():
                 }
 
             # -----------------------------------------------------------------
-            # 2. Mode [M]: Memory Feature & Publishing Overview & Next Steps
+            # 2. Mode [M]: Memories Organizer Overview & Next Steps
             # -----------------------------------------------------------------
             cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
             min_th_row = cur.fetchone()
@@ -2937,3 +2937,479 @@ def apply_mode_m_intake_dedup(req: ModeMDedupApplyRequest):
         return data
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+class CreateMomentRequest(BaseModel):
+    moment_name: str
+    parent_folder: str = "Moments"
+    asset_ids: list[str] = []
+    allow_existing: bool = True
+
+
+_MOMENTS_APPLESCRIPT = r'''
+on run argv
+    set topFolderName to item 1 of argv
+    set parentFolderName to item 2 of argv
+    set targetAlbumName to item 3 of argv
+    set allowExisting to (item 4 of argv) is "1"
+    set assetIds to {}
+    if (count of argv) > 4 then
+        set assetIds to items 5 thru (count of argv) of argv
+    end if
+
+    tell application "Photos"
+        if not (exists folder topFolderName) then
+            make new folder named topFolderName
+        end if
+        set topFolder to folder topFolderName
+
+        if parentFolderName is not "" and parentFolderName is not topFolderName then
+            if not (exists folder parentFolderName of topFolder) then
+                make new folder named parentFolderName at topFolder
+            end if
+            set containerFolder to folder parentFolderName of topFolder
+        else
+            set containerFolder to topFolder
+        end if
+
+        set actionState to "created"
+        if exists album targetAlbumName of containerFolder then
+            if not allowExisting then
+                return "ERROR|Album '" & targetAlbumName & "' already exists under " & parentFolderName
+            end if
+            set targetAlbum to album targetAlbumName of containerFolder
+            set actionState to "existing"
+        else
+            make new album named targetAlbumName at containerFolder
+            set targetAlbum to album targetAlbumName of containerFolder
+        end if
+
+        set addedCount to 0
+        set matchedCount to 0
+        if (count of assetIds) > 0 then
+            set existingIds to {}
+            try
+                repeat with exItem in (every media item of targetAlbum)
+                    copy (id of exItem) to end of existingIds
+                end repeat
+            end try
+
+            set assetsToAdd to {}
+            repeat with anId in assetIds
+                set matchedCount to matchedCount + 1
+                set alreadyInAlbum to false
+                repeat with exId in existingIds
+                    if (exId as string) starts with (anId as string) then
+                        set alreadyInAlbum to true
+                        exit repeat
+                    end if
+                end repeat
+                if not alreadyInAlbum then
+                    try
+                        set end of assetsToAdd to media item id (anId & "/L0/001")
+                    on error
+                        try
+                            set foundItems to (media items whose id contains anId)
+                            if (count of foundItems) > 0 then
+                                set end of assetsToAdd to item 1 of foundItems
+                            end if
+                        end try
+                    end try
+                end if
+            end repeat
+
+            set addedCount to (count of assetsToAdd)
+            if addedCount > 0 then
+                add assetsToAdd to targetAlbum
+            end if
+        end if
+
+        return actionState & "|" & (addedCount as string) & "|" & (matchedCount as string)
+    end tell
+end run
+'''
+
+
+def _allocate_synthetic_album_pk(cur: sqlite3.Cursor) -> int:
+    row = cur.execute("SELECT COALESCE(MIN(album_pk), 0) FROM media_organizer_albums").fetchone()
+    min_pk = int(row[0]) if row and row[0] is not None else 0
+    return min(min_pk, -10000) - 1
+
+
+@router.get("/memories/folders")
+def query_memories_folders(
+    scope: str = "moments",
+    q: str = "",
+    sort: str = "name",
+    limit: int = 300,
+):
+    """Query existing folders/albums under Memories/Moments from the local media_organizer.db copy (no Apple Photos DB query)."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"connected": False, "error": "Media database unavailable", "items": []}
+
+    scope_clean = (scope or "moments").strip().lower()
+    query_clean = (q or "").strip().lower()
+    sort_clean = (sort or "name").strip().lower()
+    safe_limit = max(1, min(int(limit or 300), 1000))
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+
+            has_table = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_organizer_albums' LIMIT 1"
+            ).fetchone()
+            if not has_table:
+                return {
+                    "connected": True,
+                    "source": "media_organizer.db (local copy)",
+                    "synced_at_utc": None,
+                    "scope": scope_clean,
+                    "total": 0,
+                    "scope_counts": {},
+                    "items": [],
+                }
+
+            sync_row = cur.execute("SELECT MAX(synced_at_utc) FROM media_organizer_albums").fetchone()
+            synced_at_utc = sync_row[0] if sync_row else None
+
+            counts_row = cur.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'memories', 'generic moments')
+                              OR LOWER(full_path) LIKE 'media organizer on lacie/moments/%'
+                              OR LOWER(full_path) LIKE 'media organizer on lacie/memories/%'
+                              OR LOWER(full_path) LIKE 'media organizer on lacie/generic moments/%'
+                        THEN 1 ELSE 0 END) AS moments_cnt,
+                    SUM(CASE WHEN LOWER(COALESCE(parent_folder_name, '')) = 'curated' THEN 1 ELSE 0 END) AS curated_cnt,
+                    SUM(CASE WHEN LOWER(COALESCE(parent_folder_name, '')) = 'tobecurated' THEN 1 ELSE 0 END) AS tbc_cnt,
+                    SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END) AS folders_cnt,
+                    COUNT(*) AS all_cnt
+                FROM media_organizer_albums
+                """
+            ).fetchone()
+            scope_counts = {
+                "moments": int(counts_row[0] or 0) if counts_row else 0,
+                "curated": int(counts_row[1] or 0) if counts_row else 0,
+                "to_be_curated": int(counts_row[2] or 0) if counts_row else 0,
+                "folders": int(counts_row[3] or 0) if counts_row else 0,
+                "all": int(counts_row[4] or 0) if counts_row else 0,
+            }
+
+            where_clauses = []
+            params: list = []
+            if scope_clean == "moments":
+                where_clauses.append(
+                    "("
+                    "LOWER(COALESCE(moa.parent_folder_name, '')) IN ('moments', 'memories', 'generic moments') "
+                    "OR LOWER(moa.full_path) LIKE 'media organizer on lacie/moments/%' "
+                    "OR LOWER(moa.full_path) LIKE 'media organizer on lacie/memories/%' "
+                    "OR LOWER(moa.full_path) LIKE 'media organizer on lacie/generic moments/%'"
+                    ")"
+                )
+            elif scope_clean == "curated":
+                where_clauses.append(
+                    "(LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated' "
+                    "OR LOWER(moa.full_path) LIKE 'media organizer on lacie/curated/%')"
+                )
+            elif scope_clean == "to_be_curated":
+                where_clauses.append(
+                    "(LOWER(COALESCE(moa.parent_folder_name, '')) = 'tobecurated' "
+                    "OR LOWER(moa.full_path) LIKE 'media organizer on lacie/tobecurated/%')"
+                )
+            elif scope_clean == "folders":
+                where_clauses.append("moa.is_folder = 1")
+
+            if query_clean:
+                like_pat = f"%{query_clean}%"
+                where_clauses.append(
+                    "(LOWER(moa.album_name) LIKE ? OR LOWER(moa.full_path) LIKE ? OR LOWER(COALESCE(moa.parent_folder_name, '')) LIKE ?)"
+                )
+                params.extend([like_pat, like_pat, like_pat])
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+            order_sql = "ORDER BY moa.is_folder DESC, LOWER(moa.album_name) ASC"
+            if sort_clean == "assets":
+                order_sql = "ORDER BY COALESCE(moa.asset_count, 0) DESC, LOWER(moa.album_name) ASC"
+            elif sort_clean == "recent":
+                order_sql = "ORDER BY moa.album_name DESC"
+
+            count_sql = f"SELECT COUNT(*) FROM media_organizer_albums moa {where_sql}"
+            total_matches = int(cur.execute(count_sql, params).fetchone()[0] or 0)
+
+            sql = f"""
+                SELECT
+                    moa.album_pk,
+                    moa.album_name,
+                    moa.parent_folder_pk,
+                    moa.parent_folder_name,
+                    moa.full_path,
+                    moa.is_folder,
+                    moa.depth,
+                    COALESCE(moa.asset_count, 0) AS asset_count,
+                    moa.synced_at_utc,
+                    cm.memory_stage,
+                    COALESCE(cm.curated_count, 0) AS curated_count,
+                    COALESCE(pub.pub_count, 0) AS published_count
+                FROM media_organizer_albums moa
+                LEFT JOIN curated_moments cm ON LOWER(cm.moment_name) = LOWER(moa.album_name)
+                LEFT JOIN (
+                    SELECT LOWER(moment_name) AS mname_lower, COUNT(DISTINCT asset_uuid) AS pub_count
+                    FROM publications
+                    GROUP BY LOWER(moment_name)
+                ) pub ON pub.mname_lower = LOWER(moa.album_name)
+                {where_sql}
+                {order_sql}
+                LIMIT ?
+            """
+            rows = cur.execute(sql, [*params, safe_limit]).fetchall()
+            items = [
+                {
+                    "album_pk": int(r[0]),
+                    "album_name": r[1],
+                    "parent_folder_pk": int(r[2]) if r[2] is not None else None,
+                    "parent_folder_name": r[3] or "",
+                    "full_path": r[4],
+                    "is_folder": bool(r[5]),
+                    "depth": int(r[6]),
+                    "asset_count": int(r[7] or 0),
+                    "synced_at_utc": r[8] or "",
+                    "memory_stage": r[9] or None,
+                    "curated_count": int(r[10] or 0),
+                    "published_count": int(r[11] or 0),
+                }
+                for r in rows
+            ]
+
+            return {
+                "connected": True,
+                "source": "media_organizer.db (local copy)",
+                "synced_at_utc": synced_at_utc,
+                "scope": scope_clean,
+                "total": total_matches,
+                "returned": len(items),
+                "scope_counts": scope_counts,
+                "items": items,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"connected": False, "error": str(e), "items": []}
+
+
+@router.post("/memories/create-moment")
+def create_moment_via_applescript(req: CreateMomentRequest):
+    """Call AppleScript to create (or populate) a Moment album under Media Organizer on LaCie and sync local media_organizer.db."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    moment_name = (req.moment_name or "").strip()
+    parent_folder = (req.parent_folder or "Moments").strip() or "Moments"
+    top_folder = "Media Organizer on LaCie"
+
+    if not moment_name:
+        return {"ok": False, "error": "Moment name is required"}
+    if "/" in moment_name or "/" in parent_folder:
+        return {"ok": False, "error": "Folder and Moment names cannot contain '/' characters"}
+
+    clean_ids: list[str] = []
+    seen: set[str] = set()
+    for aid in (req.asset_ids or []):
+        s = (aid or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            clean_ids.append(s)
+
+    # Execute AppleScript in safe chunks of up to 80 asset IDs
+    batch_size = 80
+    batches = [clean_ids[i : i + batch_size] for i in range(0, len(clean_ids), batch_size)] if clean_ids else [[]]
+    action_state = "created"
+    total_photos_added = 0
+
+    for b_idx, chunk in enumerate(batches):
+        allow_flag = "1" if (req.allow_existing or b_idx > 0) else "0"
+        argv = [top_folder, parent_folder, moment_name, allow_flag, *chunk]
+        try:
+            proc = subprocess.run(
+                ["osascript", "-", *argv],
+                input=_MOMENTS_APPLESCRIPT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to run osascript: {e}"}
+
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        if proc.returncode != 0:
+            return {"ok": False, "error": stderr or stdout or f"AppleScript failed (exit {proc.returncode})"}
+        if stdout.startswith("ERROR|"):
+            return {"ok": False, "error": stdout.split("|", 1)[1]}
+
+        parts = stdout.split("|")
+        if b_idx == 0 and parts and parts[0]:
+            action_state = parts[0]
+        if len(parts) >= 2:
+            try:
+                total_photos_added += int(parts[1] or 0)
+            except ValueError:
+                pass
+
+    full_path = f"{top_folder}/{moment_name}" if parent_folder == top_folder else f"{top_folder}/{parent_folder}/{moment_name}"
+
+    # Immediately reflect creation & added assets in local media_organizer.db copy (no Photos.sqlite query)
+    db_inserted_assets = 0
+    db_updated_moments_col = 0
+    album_pk_out = None
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            parent_pk = None
+            depth = 2
+            if parent_folder != top_folder:
+                p_row = cur.execute(
+                    """
+                    SELECT album_pk, depth FROM media_organizer_albums
+                    WHERE is_folder = 1
+                      AND LOWER(album_name) = LOWER(?)
+                      AND LOWER(full_path) LIKE 'media organizer on lacie%'
+                    ORDER BY depth ASC, album_pk ASC
+                    LIMIT 1
+                    """,
+                    (parent_folder,),
+                ).fetchone()
+                if p_row:
+                    parent_pk = int(p_row[0])
+                    depth = int(p_row[1] or 2) + 1
+                else:
+                    top_row = cur.execute(
+                        "SELECT album_pk FROM media_organizer_albums WHERE is_folder = 1 AND LOWER(album_name) = LOWER(?) LIMIT 1",
+                        (top_folder,),
+                    ).fetchone()
+                    top_pk = int(top_row[0]) if top_row else None
+                    parent_pk = _allocate_synthetic_album_pk(cur)
+                    cur.execute(
+                        """
+                        INSERT INTO media_organizer_albums
+                            (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                        VALUES (?, ?, ?, ?, ?, 1, 2, 4000, 0, datetime('now'))
+                        """,
+                        (parent_pk, parent_folder, top_pk, top_folder, f"{top_folder}/{parent_folder}"),
+                    )
+                    depth = 3
+
+            alb_row = cur.execute(
+                """
+                SELECT album_pk, full_path FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND (
+                      LOWER(full_path) = LOWER(?)
+                      OR (LOWER(album_name) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?))
+                  )
+                LIMIT 1
+                """,
+                (full_path, moment_name, parent_folder),
+            ).fetchone()
+
+            if alb_row:
+                album_pk_out = int(alb_row[0])
+                full_path = alb_row[1] or full_path
+            else:
+                album_pk_out = _allocate_synthetic_album_pk(cur)
+                cur.execute(
+                    """
+                    INSERT INTO media_organizer_albums
+                        (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                    VALUES (?, ?, ?, ?, ?, 0, ?, 2, 0, datetime('now'))
+                    """,
+                    (album_pk_out, moment_name, parent_pk, parent_folder, full_path, depth),
+                )
+
+            if clean_ids:
+                for aid in clean_ids:
+                    exists = cur.execute(
+                        "SELECT 1 FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id = ? LIMIT 1",
+                        (album_pk_out, aid),
+                    ).fetchone()
+                    if not exists:
+                        cur.execute(
+                            "INSERT INTO media_organizer_album_assets (album_pk, asset_id) VALUES (?, ?)",
+                            (album_pk_out, aid),
+                        )
+                        db_inserted_assets += 1
+
+                cur.execute(
+                    """
+                    UPDATE media_organizer_albums
+                    SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?),
+                        synced_at_utc = datetime('now')
+                    WHERE album_pk = ?
+                    """,
+                    (album_pk_out, album_pk_out),
+                )
+
+            if parent_folder.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments"):
+                mom_exists = cur.execute(
+                    """
+                    SELECT 1 FROM moments
+                    WHERE album_pk = ?
+                       OR (LOWER(album_name) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?))
+                    LIMIT 1
+                    """,
+                    (album_pk_out, moment_name, parent_folder),
+                ).fetchone()
+                if not mom_exists:
+                    cur.execute(
+                        "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, ?, ?)",
+                        (album_pk_out, moment_name, parent_pk, parent_folder),
+                    )
+
+            if clean_ids and parent_folder.lower() in ("moments", "curated", "tobecurated"):
+                placeholders = ",".join("?" for _ in clean_ids)
+                cur.execute(
+                    f"""
+                    UPDATE assets
+                    SET MomentsAlbumName = ?, updated_at_utc = datetime('now')
+                    WHERE asset_id IN ({placeholders})
+                      AND (MomentsAlbumName IS NULL OR TRIM(MomentsAlbumName) = '')
+                    """,
+                    [moment_name, *clean_ids],
+                )
+                db_updated_moments_col = cur.rowcount or 0
+
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        return {
+            "ok": True,
+            "action": action_state,
+            "moment_name": moment_name,
+            "parent_folder": parent_folder,
+            "full_path": full_path,
+            "requested_assets": len(clean_ids),
+            "photos_added": total_photos_added,
+            "db_error": str(e),
+        }
+
+    _intake_dedup_cache["timestamp"] = 0.0
+    _intake_dedup_cache["dup_ids"] = set()
+
+    return {
+        "ok": True,
+        "action": action_state,
+        "album_pk": album_pk_out,
+        "moment_name": moment_name,
+        "parent_folder": parent_folder,
+        "full_path": full_path,
+        "requested_assets": len(clean_ids),
+        "photos_added": total_photos_added,
+        "db_inserted_assets": db_inserted_assets,
+        "db_updated_assets": db_updated_moments_col,
+    }

@@ -1,9 +1,12 @@
 // ==========================================================================
-// Planner Mode Overview: [B] Batch Management | [M] Memory & Publishing
+// Planner Mode Overview: [B] Batch Management | [M] Memories Organizer
 // ==========================================================================
 
 import type {
   BatchDeviceSummary,
+  CreateMomentResponse,
+  MemoriesFolderItem,
+  MemoriesFoldersResponse,
   ModeMDedupApplyResponse,
   ModeMDedupDuplicate,
   ModeMDedupPreviewResponse,
@@ -26,6 +29,23 @@ const selectedDedupAssetIds = new Set<string>();
 let isRunningDedupPreview = false;
 let isApplyingDedupIgnore = false;
 let plannerRefreshExecutorCb: (() => void) | undefined;
+
+let memoriesFoldersScope: 'moments' | 'curated' | 'to_be_curated' | 'folders' | 'all' = 'moments';
+let memoriesFoldersQuery = '';
+let memoriesFoldersSort: 'name' | 'recent' | 'assets' = 'name';
+let memoriesFoldersData: MemoriesFoldersResponse | null = null;
+let memoriesFoldersCollapsed = false;
+let memoriesFoldersSearchTimer: number | null = null;
+
+interface CreateMomentContext {
+  sourceClusterFolder?: string;
+  uniqueAssetIds: string[];
+  allAssetIds: string[];
+  duplicateCount: number;
+}
+let createMomentCtx: CreateMomentContext = { uniqueAssetIds: [], allAssetIds: [], duplicateCount: 0 };
+let isSubmittingCreateMoment = false;
+let createMomentCheckTimer: number | null = null;
 
 function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(t => {
@@ -159,6 +179,90 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
 
   document.getElementById('btn-refresh-planner-overview')?.addEventListener('click', () => {
     fetchPlannerOverview();
+    void fetchMemoriesFolders();
+  });
+
+  // Memories Organizer: Query existing folders under Memories/Moments (local DB copy)
+  document.querySelectorAll<HTMLElement>('.memories-scope-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const scope = (btn.dataset.foldersScope || 'moments') as typeof memoriesFoldersScope;
+      memoriesFoldersScope = scope;
+      document.querySelectorAll<HTMLElement>('.memories-scope-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.foldersScope === scope);
+      });
+      void fetchMemoriesFolders();
+    });
+  });
+
+  const foldersSearchEl = document.getElementById('mode-m-folders-search') as HTMLInputElement | null;
+  if (foldersSearchEl) {
+    foldersSearchEl.addEventListener('input', () => {
+      memoriesFoldersQuery = foldersSearchEl.value.trim();
+      if (memoriesFoldersSearchTimer !== null) window.clearTimeout(memoriesFoldersSearchTimer);
+      memoriesFoldersSearchTimer = window.setTimeout(() => {
+        void fetchMemoriesFolders();
+      }, 160);
+    });
+  }
+
+  const foldersSortEl = document.getElementById('mode-m-folders-sort') as HTMLSelectElement | null;
+  if (foldersSortEl) {
+    foldersSortEl.addEventListener('change', () => {
+      memoriesFoldersSort = (foldersSortEl.value as 'name' | 'recent' | 'assets') || 'name';
+      void fetchMemoriesFolders();
+    });
+  }
+
+  document.getElementById('btn-refresh-memories-folders')?.addEventListener('click', () => {
+    void fetchMemoriesFolders();
+  });
+
+  const btnToggleFolders = document.getElementById('btn-toggle-memories-folders');
+  if (btnToggleFolders) {
+    btnToggleFolders.addEventListener('click', () => {
+      memoriesFoldersCollapsed = !memoriesFoldersCollapsed;
+      const bodyEl = document.getElementById('mode-m-folders-body');
+      bodyEl?.classList.toggle('collapsed', memoriesFoldersCollapsed);
+      btnToggleFolders.textContent = memoriesFoldersCollapsed ? '▾ Expand' : '▴ Collapse';
+    });
+  }
+
+  // Create Moment via AppleScript Modal wiring
+  document.getElementById('btn-open-create-moment-header')?.addEventListener('click', () => {
+    openCreateMomentModal();
+  });
+
+  document.querySelectorAll<HTMLElement>('.btn-close-create-moment-modal').forEach(btn => {
+    btn.addEventListener('click', () => closeCreateMomentModal());
+  });
+
+  document.getElementById('modal-create-moment')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement)?.id === 'modal-create-moment') {
+      closeCreateMomentModal();
+    }
+  });
+
+  const cmNameInput = document.getElementById('create-moment-name-input') as HTMLInputElement | null;
+  const cmParentSelect = document.getElementById('create-moment-parent-select') as HTMLSelectElement | null;
+  if (cmNameInput) {
+    cmNameInput.addEventListener('input', () => {
+      updateCreateMomentTargetPath();
+      if (createMomentCheckTimer !== null) window.clearTimeout(createMomentCheckTimer);
+      createMomentCheckTimer = window.setTimeout(() => {
+        void checkExistingMemoriesMatch(cmNameInput.value.trim());
+      }, 180);
+    });
+  }
+  if (cmParentSelect) {
+    cmParentSelect.addEventListener('change', () => {
+      updateCreateMomentTargetPath();
+    });
+  }
+
+  document.getElementById('create-moment-exclude-dups')?.addEventListener('change', () => updateCreateMomentAssetsUI());
+  document.getElementById('create-moment-empty-only')?.addEventListener('change', () => updateCreateMomentAssetsUI());
+  document.getElementById('btn-submit-create-moment')?.addEventListener('click', () => {
+    void submitCreateMoment();
   });
 
   window.runPlannerBatchAction = async function (month: string, action: string): Promise<void> {
@@ -181,8 +285,9 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
     }
   };
 
-  // Load initial planner overview data
+  // Load initial planner overview data & synced Memories/Moments folders
   fetchPlannerOverview();
+  void fetchMemoriesFolders();
 }
 
 export async function fetchPlannerOverview(force = false): Promise<void> {
@@ -847,6 +952,14 @@ function renderUnassignedClustersList(): void {
             <div class="unassigned-thumb-strip">
               ${thumbStripHtml}
             </div>
+            <button
+              class="btn btn-xs btn-purple btn-create-moment-from-cluster"
+              data-cluster-folder="${escapeHtml(cluster.folder)}"
+              title="Create (or populate) this Moment album in Apple Photos via AppleScript"
+              style="white-space: nowrap; flex-shrink: 0;"
+            >
+              ✨ Create Moment
+            </button>
           </div>
         </div>
         <div class="unassigned-cluster-body">
@@ -875,7 +988,7 @@ function renderUnassignedClustersList(): void {
 
   listEl.querySelectorAll<HTMLElement>('[data-toggle-cluster]').forEach(headerEl => {
     headerEl.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).closest('[data-preview-asset-id]')) return;
+      if ((e.target as HTMLElement).closest('[data-preview-asset-id], .btn-create-moment-from-cluster')) return;
       const folder = headerEl.dataset.toggleCluster;
       if (!folder) return;
       if (expandedUnassignedFolders.has(folder)) {
@@ -885,6 +998,26 @@ function renderUnassignedClustersList(): void {
       }
       const card = headerEl.closest('.unassigned-cluster-card');
       card?.classList.toggle('expanded', expandedUnassignedFolders.has(folder));
+    });
+  });
+
+  listEl.querySelectorAll<HTMLElement>('.btn-create-moment-from-cluster').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const folder = btn.dataset.clusterFolder || '';
+      const cluster = (plannerOverviewData?.mode_m?.unassigned_clusters || []).find(c => c.folder === folder);
+      if (!cluster) return;
+      const allIds = (cluster.assets || []).map(a => a.asset_id).filter(Boolean);
+      const uniqueIds = (cluster.assets || []).filter(a => a.asset_id && !a.is_duplicate_copy).map(a => a.asset_id);
+      const isUncategorized = /uncategorized/i.test(cluster.folder);
+      const prefillName = isUncategorized ? '' : cluster.folder;
+      openCreateMomentModal({
+        prefillName,
+        sourceClusterFolder: cluster.folder,
+        uniqueAssetIds: uniqueIds,
+        allAssetIds: allIds,
+        duplicateCount: cluster.duplicate_copy_count || 0
+      });
     });
   });
 
@@ -1245,6 +1378,385 @@ async function applyIntakeDedupIgnore(): Promise<void> {
   } finally {
     isApplyingDedupIgnore = false;
     updateDedupSelectionUI();
+  }
+}
+
+async function fetchMemoriesFolders(): Promise<void> {
+  const countBadge = document.getElementById('mode-m-folders-count-badge');
+  const syncBadge = document.getElementById('mode-m-folders-sync-badge');
+  const tbody = document.getElementById('mode-m-folders-tbody');
+
+  try {
+    const params = new URLSearchParams({
+      scope: memoriesFoldersScope,
+      q: memoriesFoldersQuery,
+      sort: memoriesFoldersSort,
+      limit: '300'
+    });
+    const res = await fetch(`/api/media/memories/folders?${params.toString()}`);
+    const data: MemoriesFoldersResponse = await res.json();
+    memoriesFoldersData = data;
+
+    if (!data.connected) {
+      if (tbody) {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-red">${escapeHtml(data.error || 'Database unavailable')}</td></tr>`;
+      }
+      return;
+    }
+
+    const sc = data.scope_counts || {};
+    const scopeLabels: Record<string, string> = {
+      moments: `Moments (${sc.moments ?? 0})`,
+      curated: `Curated (${sc.curated ?? 0})`,
+      to_be_curated: `ToBeCurated (${sc.to_be_curated ?? 0})`,
+      folders: `Top Folders (${sc.folders ?? 0})`,
+      all: `All (${sc.all ?? 0})`
+    };
+    document.querySelectorAll<HTMLElement>('.memories-scope-btn').forEach(btn => {
+      const k = btn.dataset.foldersScope || '';
+      if (scopeLabels[k]) btn.textContent = scopeLabels[k];
+    });
+
+    if (countBadge) {
+      countBadge.textContent = `${data.total ?? data.items.length} folder${(data.total ?? data.items.length) === 1 ? '' : 's'}`;
+    }
+    if (syncBadge) {
+      const ts = data.synced_at_utc ? data.synced_at_utc.replace('T', ' ').slice(0, 16) : 'local';
+      syncBadge.textContent = `DB Copy · ${ts}`;
+    }
+
+    renderMemoriesFolders(data.items || []);
+  } catch (err: any) {
+    console.error('Error querying Memories/Moments folders:', err);
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="5" class="text-center text-red">Error querying folders: ${escapeHtml(err?.message || 'Unknown')}</td></tr>`;
+    }
+  }
+}
+
+function renderMemoriesFolders(items: MemoriesFolderItem[]): void {
+  const tbody = document.getElementById('mode-m-folders-tbody');
+  if (!tbody) return;
+
+  if (!items.length) {
+    tbody.innerHTML =
+      '<tr><td colspan="5" class="text-center text-muted">No matching folders/albums found in <code>media_organizer.db</code>.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = items
+    .map(item => {
+      const icon = item.is_folder ? '📁' : '📚';
+      let stageHtml = '<span class="text-muted font-mono" style="font-size: 0.68rem;">—</span>';
+      if (item.memory_stage) {
+        const cls =
+          item.memory_stage === 'M500'
+            ? 'badge-green'
+            : item.memory_stage === 'M450'
+              ? 'badge-purple'
+              : 'badge-blue';
+        const pubNote = item.published_count > 0 ? ` · ${item.published_count} pub` : '';
+        stageHtml = `<span class="badge badge-xs ${cls} font-mono">${escapeHtml(item.memory_stage)}${escapeHtml(pubNote)}</span>`;
+      } else if (item.is_folder) {
+        stageHtml = `<span class="badge badge-xs badge-outline font-mono">Folder</span>`;
+      }
+
+      const targetParent = item.is_folder
+        ? item.album_name
+        : item.parent_folder_name || 'Moments';
+      const prefillName = item.is_folder ? '' : item.album_name;
+
+      return `
+        <tr>
+          <td>
+            <div style="font-weight: 600; color: var(--text-primary); font-size: 0.76rem;">
+              ${icon} ${escapeHtml(item.album_name)}
+            </div>
+            <div class="memories-folder-path">${escapeHtml(item.full_path)}</div>
+          </td>
+          <td class="font-mono" style="font-size: 0.7rem; color: var(--text-secondary);">
+            ${escapeHtml(item.parent_folder_name || 'Root')}
+          </td>
+          <td style="text-align: right;" class="font-mono">
+            <strong>${item.asset_count}</strong>
+          </td>
+          <td>${stageHtml}</td>
+          <td style="text-align: right;">
+            <button
+              class="btn btn-xs btn-outline btn-use-memories-folder"
+              data-folder-name="${escapeHtml(prefillName)}"
+              data-parent-folder="${escapeHtml(targetParent)}"
+              title="Open AppleScript Create/Update Moment with this folder/album pre-selected"
+            >
+              ${item.is_folder ? '+ New Inside' : '✨ Select'}
+            </button>
+          </td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  tbody.querySelectorAll<HTMLElement>('.btn-use-memories-folder').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openCreateMomentModal({
+        prefillName: btn.dataset.folderName || '',
+        parentFolder: btn.dataset.parentFolder || 'Moments'
+      });
+    });
+  });
+}
+
+function openCreateMomentModal(opts?: {
+  prefillName?: string;
+  parentFolder?: string;
+  sourceClusterFolder?: string;
+  uniqueAssetIds?: string[];
+  allAssetIds?: string[];
+  duplicateCount?: number;
+}): void {
+  const modal = document.getElementById('modal-create-moment');
+  if (!modal) return;
+
+  const nameInput = document.getElementById('create-moment-name-input') as HTMLInputElement | null;
+  const parentSelect = document.getElementById('create-moment-parent-select') as HTMLSelectElement | null;
+  const statusEl = document.getElementById('create-moment-status');
+  const excludeDupsCb = document.getElementById('create-moment-exclude-dups') as HTMLInputElement | null;
+  const emptyOnlyCb = document.getElementById('create-moment-empty-only') as HTMLInputElement | null;
+
+  createMomentCtx = {
+    sourceClusterFolder: opts?.sourceClusterFolder,
+    uniqueAssetIds: opts?.uniqueAssetIds || [],
+    allAssetIds: opts?.allAssetIds || [],
+    duplicateCount: opts?.duplicateCount || 0
+  };
+
+  if (parentSelect) {
+    const desired = opts?.parentFolder || 'Moments';
+    const hasOption = Array.from(parentSelect.options).some(o => o.value === desired);
+    if (!hasOption && desired) {
+      const opt = document.createElement('option');
+      opt.value = desired;
+      opt.textContent = desired;
+      parentSelect.appendChild(opt);
+    }
+    parentSelect.value = desired;
+  }
+
+  if (nameInput) {
+    nameInput.value = opts?.prefillName ?? '';
+  }
+  if (excludeDupsCb) excludeDupsCb.checked = true;
+  if (emptyOnlyCb) emptyOnlyCb.checked = false;
+  if (statusEl) {
+    statusEl.style.display = 'none';
+    statusEl.innerHTML = '';
+  }
+
+  updateCreateMomentTargetPath();
+  updateCreateMomentAssetsUI();
+  modal.classList.add('open');
+  void checkExistingMemoriesMatch((nameInput?.value || '').trim());
+  window.setTimeout(() => nameInput?.focus(), 40);
+}
+
+function closeCreateMomentModal(): void {
+  document.getElementById('modal-create-moment')?.classList.remove('open');
+}
+
+function updateCreateMomentTargetPath(): void {
+  const nameInput = document.getElementById('create-moment-name-input') as HTMLInputElement | null;
+  const parentSelect = document.getElementById('create-moment-parent-select') as HTMLSelectElement | null;
+  const pathEl = document.getElementById('create-moment-target-path');
+  if (!pathEl) return;
+  const p = (parentSelect?.value || 'Moments').trim();
+  const n = (nameInput?.value || '<Moment Name>').trim() || '<Moment Name>';
+  pathEl.textContent =
+    p === 'Media Organizer on LaCie' ? `Path: ${p}/${n}` : `Path: Media Organizer on LaCie/${p}/${n}`;
+}
+
+function getSelectedAssetIdsForCreateMoment(): string[] {
+  const emptyOnlyCb = document.getElementById('create-moment-empty-only') as HTMLInputElement | null;
+  const excludeDupsCb = document.getElementById('create-moment-exclude-dups') as HTMLInputElement | null;
+  if (emptyOnlyCb?.checked) return [];
+  if (excludeDupsCb?.checked) return createMomentCtx.uniqueAssetIds;
+  return createMomentCtx.allAssetIds;
+}
+
+function updateCreateMomentAssetsUI(): void {
+  const box = document.getElementById('create-moment-assets-box');
+  const summaryEl = document.getElementById('create-moment-cluster-summary');
+  const countPill = document.getElementById('create-moment-asset-count-pill');
+  const dupLabel = document.getElementById('create-moment-exclude-dups-label');
+  const excludeDupsCb = document.getElementById('create-moment-exclude-dups') as HTMLInputElement | null;
+  const emptyOnlyCb = document.getElementById('create-moment-empty-only') as HTMLInputElement | null;
+  if (!box) return;
+
+  if (!createMomentCtx.allAssetIds.length) {
+    box.style.display = 'none';
+    return;
+  }
+
+  box.style.display = 'block';
+  const totalCount = createMomentCtx.allAssetIds.length;
+  const uniqueCount = createMomentCtx.uniqueAssetIds.length;
+  const dupCount = Math.max(createMomentCtx.duplicateCount, totalCount - uniqueCount);
+
+  if (summaryEl) {
+    summaryEl.textContent = createMomentCtx.sourceClusterFolder
+      ? `Cluster: ${createMomentCtx.sourceClusterFolder} (${uniqueCount} unique / ${totalCount} total)`
+      : `${uniqueCount} unique / ${totalCount} selected assets`;
+  }
+  if (dupLabel) {
+    dupLabel.textContent =
+      dupCount > 0
+        ? `Exclude ${dupCount} duplicate-flagged asset(s) (add ${uniqueCount} unique only)`
+        : `All ${totalCount} asset(s) are unique`;
+  }
+  if (excludeDupsCb) {
+    excludeDupsCb.disabled = Boolean(emptyOnlyCb?.checked);
+  }
+
+  const willAdd = getSelectedAssetIdsForCreateMoment().length;
+  if (countPill) {
+    countPill.textContent = willAdd > 0 ? `+${willAdd} asset${willAdd === 1 ? '' : 's'}` : '0 assets (empty album)';
+  }
+}
+
+async function checkExistingMemoriesMatch(query: string): Promise<void> {
+  const hintEl = document.getElementById('create-moment-existing-hint');
+  if (!hintEl) return;
+
+  const q = query.trim();
+  if (!q) {
+    const sampleCount = memoriesFoldersData?.scope_counts?.moments ?? memoriesFoldersData?.total ?? 0;
+    hintEl.innerHTML = `Type a Moment name to match against <strong>${sampleCount}</strong> synced Moments folders in <code>media_organizer.db</code> (no Apple Photos DB query).`;
+    return;
+  }
+
+  try {
+    const params = new URLSearchParams({ scope: 'moments', q, limit: '8' });
+    const res = await fetch(`/api/media/memories/folders?${params.toString()}`);
+    const data: MemoriesFoldersResponse = await res.json();
+    const matches = data.items || [];
+    const exactMatch = matches.find(m => m.album_name.toLowerCase() === q.toLowerCase());
+
+    if (exactMatch) {
+      hintEl.innerHTML = `
+        <span class="text-amber">
+          ⚠️ Existing folder match in <code>media_organizer.db</code>:
+          <strong>${escapeHtml(exactMatch.full_path)}</strong> (${exactMatch.asset_count} assets)
+        </span>
+      `;
+    } else if (matches.length > 0) {
+      const chips = matches
+        .slice(0, 4)
+        .map(
+          m =>
+            `<button type="button" class="create-moment-match-chip" data-pick-moment="${escapeHtml(m.album_name)}" title="${escapeHtml(m.full_path)}">${escapeHtml(m.album_name)} (${m.asset_count})</button>`
+        )
+        .join(' ');
+      hintEl.innerHTML = `
+        <div style="display:flex; align-items:center; gap:0.35rem; flex-wrap:wrap;">
+          <span class="text-muted">Similar synced folders:</span> ${chips}
+        </div>
+      `;
+      hintEl.querySelectorAll<HTMLElement>('[data-pick-moment]').forEach(chip => {
+        chip.addEventListener('click', () => {
+          const inp = document.getElementById('create-moment-name-input') as HTMLInputElement | null;
+          if (inp && chip.dataset.pickMoment) {
+            inp.value = chip.dataset.pickMoment;
+            updateCreateMomentTargetPath();
+            void checkExistingMemoriesMatch(inp.value);
+          }
+        });
+      });
+    } else {
+      hintEl.innerHTML = `<span class="text-green">✨ New Moment — no existing album named "<strong>${escapeHtml(q)}</strong>" found in <code>media_organizer.db</code>.</span>`;
+    }
+  } catch {
+    // non-fatal hint check
+  }
+}
+
+async function submitCreateMoment(): Promise<void> {
+  if (isSubmittingCreateMoment) return;
+  const nameInput = document.getElementById('create-moment-name-input') as HTMLInputElement | null;
+  const parentSelect = document.getElementById('create-moment-parent-select') as HTMLSelectElement | null;
+  const allowExistingCb = document.getElementById('create-moment-allow-existing') as HTMLInputElement | null;
+  const statusEl = document.getElementById('create-moment-status');
+  const btnSubmit = document.getElementById('btn-submit-create-moment') as HTMLButtonElement | null;
+
+  const momentName = (nameInput?.value || '').trim();
+  const parentFolder = (parentSelect?.value || 'Moments').trim() || 'Moments';
+  const allowExisting = allowExistingCb ? allowExistingCb.checked : true;
+  const assetIds = getSelectedAssetIdsForCreateMoment();
+
+  if (!momentName) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">⚠️ Please enter a Moment album name.</span>';
+    }
+    nameInput?.focus();
+    return;
+  }
+
+  isSubmittingCreateMoment = true;
+  if (btnSubmit) {
+    btnSubmit.disabled = true;
+    btnSubmit.textContent = 'Running AppleScript...';
+  }
+  if (statusEl) {
+    statusEl.style.display = 'flex';
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Creating Moment <code>${escapeHtml(momentName)}</code> in Apple Photos via AppleScript${assetIds.length ? ` and adding ${assetIds.length} asset(s)` : ''}...</span>`;
+  }
+
+  try {
+    const res = await fetch('/api/media/memories/create-moment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        moment_name: momentName,
+        parent_folder: parentFolder,
+        asset_ids: assetIds,
+        allow_existing: allowExisting
+      })
+    });
+    const data: CreateMomentResponse = await res.json();
+
+    if (!res.ok || !data.ok) {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `
+        <span class="text-green">
+          ✅ AppleScript <strong>${escapeHtml(data.action || 'created')}</strong>
+          <code>${escapeHtml(data.full_path || momentName)}</code>
+          — added <strong>${data.photos_added ?? 0}</strong> asset(s) in Photos
+          (synced ${data.db_inserted_assets ?? 0} album links in DB).
+        </span>
+      `;
+    }
+
+    await Promise.all([fetchMemoriesFolders(), fetchPlannerOverview(true)]);
+    if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
+  } catch (err: any) {
+    console.error('Error creating Moment via AppleScript:', err);
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  } finally {
+    isSubmittingCreateMoment = false;
+    if (btnSubmit) {
+      btnSubmit.disabled = false;
+      btnSubmit.textContent = '🍎 Create Moment via AppleScript';
+    }
   }
 }
 

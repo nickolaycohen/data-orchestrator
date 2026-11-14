@@ -309,6 +309,54 @@ export interface ModeMDedupApplyResponse {
   error?: string;
 }
 
+export interface MemoriesFolderItem {
+  album_pk: number;
+  album_name: string;
+  parent_folder_pk: number | null;
+  parent_folder_name: string;
+  full_path: string;
+  is_folder: boolean;
+  depth: number;
+  asset_count: number;
+  synced_at_utc: string;
+  memory_stage: string | null;
+  curated_count: number;
+  published_count: number;
+}
+
+export interface MemoriesFoldersResponse {
+  connected: boolean;
+  error?: string;
+  source?: string;
+  synced_at_utc?: string | null;
+  scope?: string;
+  total?: number;
+  returned?: number;
+  scope_counts?: {
+    moments?: number;
+    curated?: number;
+    to_be_curated?: number;
+    folders?: number;
+    all?: number;
+  };
+  items: MemoriesFolderItem[];
+}
+
+export interface CreateMomentResponse {
+  ok: boolean;
+  error?: string;
+  db_error?: string;
+  action?: string;
+  album_pk?: number;
+  moment_name?: string;
+  parent_folder?: string;
+  full_path?: string;
+  requested_assets?: number;
+  photos_added?: number;
+  db_inserted_assets?: number;
+  db_updated_assets?: number;
+}
+
 export type TriggerTaskFn = (
   taskId: string,
   args?: Record<string, any> | null,

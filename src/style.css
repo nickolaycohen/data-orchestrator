@@ -2920,7 +2920,7 @@ body {
 }
 
 /* ==========================================================================
-   Planner Session Modes ([B] Batch Management | [M] Memory Feature & Publishing)
+   Planner Session Modes ([B] Batch Management | [M] Memories Organizer)
    ========================================================================== */
 
 .planner-mode-selector-bar {
@@ -3730,6 +3730,59 @@ body {
   align-items: center;
   gap: 0.2rem;
   text-align: center;
+}
+
+/* ==========================================================================
+   Memories Organizer: Existing DB Folders & Create Moment Modal
+   ========================================================================== */
+
+.memories-folders-body.collapsed {
+  display: none;
+}
+
+.memories-folders-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.65rem;
+  background: rgba(12, 16, 28, 0.55);
+  border: 1px solid rgba(139, 92, 246, 0.16);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.55rem;
+}
+
+.memories-folder-path {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+}
+
+.create-moment-assets-box {
+  padding: 0.65rem 0.85rem;
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  border-radius: var(--radius-sm);
+}
+
+.create-moment-match-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.14rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+  font-size: 0.67rem;
+  font-family: var(--font-mono, monospace);
+  cursor: pointer;
+}
+
+.create-moment-match-chip:hover {
+  background: rgba(245, 158, 11, 0.26);
 }
 
 
