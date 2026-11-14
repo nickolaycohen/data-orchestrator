@@ -21,7 +21,6 @@ let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
 const expandedUnassignedFolders = new Set<string>();
 const clusterPreviewAssetIds = new Map<string, string[]>();
-let hasInitializedUnassignedExpansion = false;
 let dedupPreviewData: ModeMDedupPreviewResponse | null = null;
 const selectedDedupAssetIds = new Set<string>();
 let isRunningDedupPreview = false;
@@ -563,20 +562,17 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   });
 
   if (unassignedClusters.length > 0) {
+    const totalDupFlagged = unassignedClusters.reduce((sum, c) => sum + (c.duplicate_copy_count || 0), 0);
+    const totalUniqueAssets = Math.max(0, totalUnassignedAssets - totalDupFlagged);
     if (unassignedSummaryBadge) {
       unassignedSummaryBadge.style.display = 'inline-flex';
-      unassignedSummaryBadge.textContent = `${totalUnassignedAssets} unassigned · ${totalUnassignedClusters} folders`;
+      unassignedSummaryBadge.textContent = `${totalUniqueAssets} unique · ${totalUnassignedAssets} unassigned · ${totalUnassignedClusters} folders`;
     }
     if (unassignedSection) {
       unassignedSection.style.display = 'block';
     }
     if (unassignedTitleEl) {
-      unassignedTitleEl.textContent = `⚠️ Unassigned High-Rank Assets Above Threshold > ${(th.historical_min || 0.5315).toFixed(4)} (${totalUnassignedAssets} Asset(s) Grouped into ${totalUnassignedClusters} Proposed Moment Folder(s))`;
-    }
-
-    if (!hasInitializedUnassignedExpansion) {
-      hasInitializedUnassignedExpansion = true;
-      unassignedClusters.slice(0, 3).forEach(c => expandedUnassignedFolders.add(c.folder));
+      unassignedTitleEl.textContent = `⚠️ Unassigned High-Rank Assets Above Threshold > ${(th.historical_min || 0.5315).toFixed(4)} (${totalUniqueAssets} Unique / ${totalUnassignedAssets} Total Grouped into ${totalUnassignedClusters} Proposed Moment Folder(s))`;
     }
 
     renderUnassignedClustersList();
@@ -829,6 +825,7 @@ function renderUnassignedClustersList(): void {
             <div class="unassigned-cluster-info">
               <div class="unassigned-cluster-title-row">
                 <span class="unassigned-cluster-folder">📁 ${escapeHtml(cluster.folder)}</span>
+                <span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Unique files identified after Media-Intake dedup (${count} total - ${cluster.duplicate_copy_count || 0} dup flagged)">✓ ${Math.max(0, count - (cluster.duplicate_copy_count || 0))} unique</span>
                 <span class="badge badge-xs ${sizeBadgeClass} font-mono">${count} asset${count === 1 ? '' : 's'}</span>
                 <span class="badge badge-xs ${typeBadgeClass}" style="font-size: 0.64rem;">${escapeHtml(cluster.group_type)}</span>
                 ${
