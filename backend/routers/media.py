@@ -37,6 +37,9 @@ class PlannerBatchActionRequest(BaseModel):
     month: str
     action: str  # "queue" | "remove_queue" | "confirm_500" | "bypass_500" | "reset_000"
 
+class ModeMDedupApplyRequest(BaseModel):
+    asset_ids: list[str]
+
 _cleanup_devices_cache = {
     "timestamp": 0.0,
     "payload": None
@@ -1325,8 +1328,8 @@ def get_cleanup_candidates(
                 ) AS assigned_moment,
                 ps.last_asset_pub,
                 aaa.ZORIGINALFILESIZE AS file_size_bytes,
-                ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2) AS file_size_mb,
-                ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1073741824.0, 3) AS file_size_gb,
+                ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1000000.0, 2) AS file_size_mb,
+                ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1000000000.0, 3) AS file_size_gb,
                 daa.asset_id AS daa_asset_id,
                 daa.device_filename AS device_filename,
                 daa.match_tier AS device_match_tier,
@@ -1393,7 +1396,7 @@ def get_cleanup_candidates(
             SELECT
                 *,
                 COUNT(*) OVER () AS filtered_total_count,
-                ROUND(SUM(file_size_bytes) OVER () / 1048576.0, 2) AS filtered_total_mb
+                ROUND(SUM(file_size_bytes) OVER () / 1000000.0, 2) AS filtered_total_mb
             FROM base_filtered
             WHERE 1=1 {loc_cond}
         )
@@ -1515,7 +1518,7 @@ def get_cleanup_candidates(
                         COALESCE(MAX(possibly_total_count), 0),
                         COALESCE(MAX(actually_total_count), 0),
                         COUNT(*),
-                        ROUND(COALESCE(SUM(file_size_bytes), 0) / 1048576.0, 2)
+                        ROUND(COALESCE(SUM(file_size_bytes), 0) / 1000000.0, 2)
                     FROM filtered
                 """, tuple(count_params))
                 c_row = cur.fetchone()
@@ -1525,7 +1528,7 @@ def get_cleanup_candidates(
                     total_count = c_row[2] or 0
                     total_mb = c_row[3] or 0.0
 
-            total_gb = round(total_mb / 1024.0, 2)
+            total_gb = round(total_mb / 1000.0, 2)
 
             return {
                 "ok": True,
@@ -2846,5 +2849,60 @@ def execute_planner_batch_action(req: PlannerBatchActionRequest):
             return {"ok": True, "month": month, "action": action, "message": msg}
         finally:
             conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _get_pipeline_python_and_dedup_script() -> tuple[str, Path]:
+    python_bin = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+    if not os.path.exists(python_bin):
+        python_bin = sys.executable
+    script_path = REPOS["media-organizer-pipeline"] / "scripts" / "dedup_unassigned_moments.py"
+    return python_bin, script_path
+
+
+@router.post("/mode-m/dedup-preview")
+def preview_mode_m_intake_dedup():
+    """Runs Media-Intake multi-tier dedup & visual comparison before Proposed Moment grouping (dry run)."""
+    python_bin, script_path = _get_pipeline_python_and_dedup_script()
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail=f"Script not found: {script_path}")
+    try:
+        proc = subprocess.run(
+            [python_bin, str(script_path), "--dry-run", "--json"],
+            cwd=str(REPOS["media-organizer-pipeline"]),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if proc.returncode != 0:
+            return {"ok": False, "error": proc.stderr.strip() or proc.stdout.strip() or f"Exit code {proc.returncode}"}
+        data = json.loads(proc.stdout)
+        return {"ok": True, **data}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/mode-m/dedup-apply")
+def apply_mode_m_intake_dedup(req: ModeMDedupApplyRequest):
+    """Adds identified duplicate assets to Apple Photos 'Ignore' album & local DB so they leave Proposed Moment groups."""
+    clean_ids = [aid.strip() for aid in (req.asset_ids or []) if aid and aid.strip()]
+    if not clean_ids:
+        return {"ok": False, "error": "No asset_ids provided"}
+    python_bin, script_path = _get_pipeline_python_and_dedup_script()
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail=f"Script not found: {script_path}")
+    try:
+        proc = subprocess.run(
+            [python_bin, str(script_path), "--apply", "--json", "--asset-ids", *clean_ids],
+            cwd=str(REPOS["media-organizer-pipeline"]),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if proc.returncode != 0:
+            return {"ok": False, "error": proc.stderr.strip() or proc.stdout.strip() or f"Exit code {proc.returncode}"}
+        data = json.loads(proc.stdout)
+        return data
     except Exception as e:
         return {"ok": False, "error": str(e)}

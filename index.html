@@ -575,11 +575,11 @@
                       </div>
                       <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
                         <button
-                          class="btn btn-xs btn-outline"
-                          id="btn-toggle-hide-dup-copies"
-                          title="Hide secondary Apple Photos duplicate copies (ZDUPLICATEASSETVISIBILITYSTATE = 1); merge them in Apple Photos -> Duplicates"
+                          class="btn btn-xs btn-purple"
+                          id="btn-intake-dedup-ignore"
+                          title="Run Media-Intake perceptual & metadata dedup across unassigned assets and add confirmed duplicates to Apple Photos Ignore album"
                         >
-                          ♻️ Hide Photos Dupes (0)
+                          🧹 Intake Dedup &amp; Ignore
                         </button>
                         <input
                           type="text"
@@ -780,9 +780,23 @@
                         <button class="cleanup-type-btn" data-type="video">🎥 Videos</button>
                         <button class="cleanup-type-btn" data-type="photo">📷 Photos</button>
                       </div>
+
+                      <div class="cleanup-filter-group" id="cleanup-view-toggle">
+                        <span class="cleanup-filter-label">View:</span>
+                        <button class="cleanup-view-btn active" data-view="iphone" title="Simplified iPhone Photos layout: ordered by size, shows thumbnail and size only">
+                          📱 iPhone View
+                        </button>
+                        <button class="cleanup-view-btn" data-view="table" title="Full metadata table view">
+                          ☰ Details
+                        </button>
+                      </div>
                     </div>
 
                     <div class="cleanup-actions-group">
+                      <label class="cleanup-select-all-pill" title="Select or deselect all items on current page">
+                        <input type="checkbox" id="cleanup-select-all-visible" />
+                        <span>Select Page</span>
+                      </label>
                       <span class="cleanup-selection-summary font-mono" id="cleanup-selection-summary">0 selected (0 MB)</span>
                       <button class="btn btn-xs btn-danger" id="btn-mark-selected-removed" disabled>
                         🗑️ Mark Selected as Removed
@@ -791,7 +805,7 @@
                   </div>
                 </div>
 
-                <!-- Candidates Table Container -->
+                <!-- Candidates Container -->
                 <div class="cleanup-candidates-table-wrap" id="cleanup-table-wrap">
                   <div class="text-muted text-center" id="cleanup-empty-placeholder" style="padding: 4.5rem 2rem; font-size: 0.9rem;">
                     <div style="font-size: 2.2rem; margin-bottom: 0.5rem; opacity: 0.5;">👆</div>
@@ -800,6 +814,9 @@
                       Choose a device from the strip above to load its candidate files for cleanup.
                     </p>
                   </div>
+
+                  <!-- Simplified iPhone-style Gallery View (default) -->
+                  <div class="cleanup-iphone-grid" id="cleanup-candidates-grid" style="display: none;"></div>
 
                   <table class="cleanup-table" id="cleanup-candidates-table" style="display: none;">
                     <thead>
@@ -1773,6 +1790,43 @@
               <button class="btn btn-outline btn-close-modal">Close</button>
               <button class="btn btn-danger" id="btn-preview-mark-removed">
                 🗑️ Mark Asset as Removed
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal: Media-Intake Dedup & Ignore (Pre-Moment Grouping) -->
+      <div class="modal-overlay" id="modal-intake-dedup">
+        <div class="modal-content" style="max-width: 960px; width: 94vw;">
+          <div class="modal-header">
+            <h3>🧹 Media-Intake Dedup &amp; Ignore</h3>
+            <button class="btn-icon btn-close-dedup-modal">&times;</button>
+          </div>
+          <div class="modal-body" style="padding: 1rem 1.25rem;">
+            <div class="dedup-status-banner" id="dedup-modal-status">
+              <div class="spinner-sm"></div>
+              <span>Scanning unassigned assets against library keepers...</span>
+            </div>
+
+            <div class="dedup-controls-bar" id="dedup-controls-bar" style="display: none;">
+              <label class="cleanup-select-all-pill">
+                <input type="checkbox" id="dedup-select-all-checkbox" checked />
+                <span>Select All Duplicates</span>
+              </label>
+              <span class="font-mono text-muted" style="font-size: 0.76rem;" id="dedup-selection-summary">
+                0 selected
+              </span>
+            </div>
+
+            <div class="dedup-pairs-list" id="dedup-pairs-list"></div>
+          </div>
+          <div class="modal-footer" style="justify-content: space-between;">
+            <button class="btn btn-outline" id="btn-rescan-intake-dedup">↻ Re-scan</button>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <button class="btn btn-outline btn-close-dedup-modal">Close</button>
+              <button class="btn btn-danger" id="btn-apply-intake-dedup-ignore" disabled>
+                🚫 Add Selected to Ignore Album
               </button>
             </div>
           </div>

@@ -6,7 +6,7 @@ import type { CleanupCandidateAsset, CleanupDevice, CleanupDevicesResponse } fro
 import {
   candidateAssetMeta,
   escapeHtml,
-  formatBytes,
+  formatAppleBytes,
   formatCaptureTimestampParts,
   formatDuration
 } from '../utils/formatters.ts';
@@ -19,6 +19,7 @@ let activeOwnerFilter = 'all';
 let activeLocationFilter = 'possibly'; // 'possibly' | 'actually'
 let activeQuartileFilter = 'all';
 let activeTypeFilter = 'all';
+let cleanupViewMode: 'iphone' | 'table' = 'iphone';
 const cleanupPageLimit = 50;
 let cleanupPageOffset = 0;
 let currentCandidateList: CleanupCandidateAsset[] = [];
@@ -172,10 +173,19 @@ export function setupMediaCleanup(): void {
     });
   });
 
-  // 5. Select All Checkbox
-  const selectAllCb = document.getElementById('cleanup-select-all-checkbox') as HTMLInputElement | null;
-  selectAllCb?.addEventListener('change', (e) => {
-    const isChecked = (e.target as HTMLInputElement).checked;
+  // 4b. View Mode Toggle (iPhone Simplified Grid vs Full Metadata Table)
+  document.querySelectorAll<HTMLElement>('.cleanup-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const nextView = (btn.dataset.view || 'iphone') as 'iphone' | 'table';
+      cleanupViewMode = nextView === 'table' ? 'table' : 'iphone';
+      document.querySelectorAll<HTMLElement>('.cleanup-view-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      syncCleanupViewContainers();
+    });
+  });
+
+  // 5. Select All Checkboxes (table header + iPhone toolbar pill)
+  const applySelectAll = (isChecked: boolean): void => {
     currentCandidateList.forEach(c => {
       if (isChecked) {
         selectedCandidateAssetIds.add(c.asset_id);
@@ -184,16 +194,25 @@ export function setupMediaCleanup(): void {
       }
     });
 
-    document.querySelectorAll<HTMLInputElement>('.cleanup-asset-checkbox').forEach(cb => {
+    document.querySelectorAll<HTMLInputElement>('.cleanup-asset-checkbox, .cleanup-grid-checkbox').forEach(cb => {
       cb.checked = isChecked;
       const tr = cb.closest('tr');
-      if (tr) {
-        if (isChecked) tr.classList.add('selected');
-        else tr.classList.remove('selected');
-      }
+      if (tr) tr.classList.toggle('selected', isChecked);
+      const tile = cb.closest('.cleanup-iphone-tile');
+      if (tile) tile.classList.toggle('selected', isChecked);
     });
 
     updateCleanupSelectionBar();
+  };
+
+  const selectAllCb = document.getElementById('cleanup-select-all-checkbox') as HTMLInputElement | null;
+  selectAllCb?.addEventListener('change', (e) => {
+    applySelectAll((e.target as HTMLInputElement).checked);
+  });
+
+  const selectAllVisibleCb = document.getElementById('cleanup-select-all-visible') as HTMLInputElement | null;
+  selectAllVisibleCb?.addEventListener('change', (e) => {
+    applySelectAll((e.target as HTMLInputElement).checked);
   });
 
   // 6. Bulk Action: Mark Selected as Removed
@@ -672,7 +691,7 @@ function selectCleanupDevice(device: any): void {
 
   if (toolbar) toolbar.style.display = 'flex';
   if (placeholder) placeholder.style.display = 'none';
-  if (table) table.style.display = 'table';
+  syncCleanupViewContainers();
   if (paginationBar) paginationBar.style.display = 'flex';
 
   cleanupPageOffset = 0;
@@ -682,16 +701,125 @@ function selectCleanupDevice(device: any): void {
   fetchCleanupCandidates();
 }
 
+function syncCleanupViewContainers(): void {
+  const tableEl = document.getElementById('cleanup-candidates-table');
+  const gridEl = document.getElementById('cleanup-candidates-grid');
+  if (!selectedCleanupDevice) {
+    if (tableEl) tableEl.style.display = 'none';
+    if (gridEl) gridEl.style.display = 'none';
+    return;
+  }
+  if (cleanupViewMode === 'iphone') {
+    if (gridEl) gridEl.style.display = 'grid';
+    if (tableEl) tableEl.style.display = 'none';
+  } else {
+    if (gridEl) gridEl.style.display = 'none';
+    if (tableEl) tableEl.style.display = 'table';
+  }
+}
+
+function renderCleanupIphoneGrid(): void {
+  const gridEl = document.getElementById('cleanup-candidates-grid');
+  if (!gridEl) return;
+
+  if (!currentCandidateList.length) {
+    gridEl.innerHTML = `
+      <div class="text-center text-muted" style="grid-column: 1 / -1; padding: 3.5rem 1rem;">
+        <span style="font-size: 1.5rem; display: block; margin-bottom: 0.4rem;">🎉</span>
+        No candidate assets found for <strong>${escapeHtml(selectedCleanupDevice?.camera_model || '')}</strong> with current filters.
+      </div>
+    `;
+    return;
+  }
+
+  gridEl.innerHTML = currentCandidateList
+    .map((c) => {
+      const isChecked = selectedCandidateAssetIds.has(c.asset_id);
+      const sizeBytes = c.file_size_bytes || (c.file_size_mb ? c.file_size_mb * 1_000_000 : 0);
+      const sizeStr = formatAppleBytes(sizeBytes);
+      const thumbUrl = `/api/media/cleanup/thumbnail/${encodeURIComponent(c.asset_id)}`;
+
+      return `
+        <div
+          class="cleanup-iphone-tile ${isChecked ? 'selected' : ''}"
+          data-grid-asset-id="${escapeHtml(c.asset_id)}"
+          title="Ordered by size (${escapeHtml(sizeStr)}) — click to preview"
+        >
+          <img
+            class="cleanup-iphone-thumb"
+            src="${thumbUrl}"
+            alt="${escapeHtml(c.original_filename)}"
+            loading="lazy"
+          />
+          <label class="cleanup-iphone-check" title="Select for removal">
+            <input
+              type="checkbox"
+              class="cleanup-grid-checkbox"
+              data-asset-id="${escapeHtml(c.asset_id)}"
+              ${isChecked ? 'checked' : ''}
+            />
+          </label>
+          <span class="cleanup-iphone-size">${escapeHtml(sizeStr)}</span>
+        </div>
+      `;
+    })
+    .join('');
+
+  gridEl.querySelectorAll<HTMLElement>('.cleanup-iphone-check').forEach((labelEl) => {
+    labelEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+    });
+  });
+
+  gridEl.querySelectorAll<HTMLInputElement>('.cleanup-grid-checkbox').forEach((cb) => {
+    cb.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const aid = cb.dataset.assetId;
+      if (!aid) return;
+      const checked = (e.target as HTMLInputElement).checked;
+      if (checked) {
+        selectedCandidateAssetIds.add(aid);
+      } else {
+        selectedCandidateAssetIds.delete(aid);
+      }
+      cb.closest('.cleanup-iphone-tile')?.classList.toggle('selected', checked);
+
+      // Keep table row checkbox in sync
+      const tableCb = document.querySelector<HTMLInputElement>(`.cleanup-asset-checkbox[data-asset-id="${CSS.escape(aid)}"]`);
+      if (tableCb) {
+        tableCb.checked = checked;
+        tableCb.closest('tr')?.classList.toggle('selected', checked);
+      }
+      updateCleanupSelectionBar();
+    });
+  });
+
+  gridEl.querySelectorAll<HTMLElement>('.cleanup-iphone-tile').forEach((tile) => {
+    tile.addEventListener('click', () => {
+      const aid = tile.dataset.gridAssetId;
+      if (!aid) return;
+      const pageAssetIds = currentCandidateList.map(item => item.asset_id).filter(Boolean);
+      const groupLabel = selectedCleanupDevice
+        ? `${selectedCleanupDevice.device_name || selectedCleanupDevice.camera_model || 'Cleanup'} (Current Page)`
+        : 'Cleanup Candidates (Current Page)';
+      openCleanupPreviewModal(aid, { assetIds: pageAssetIds, groupLabel });
+    });
+  });
+}
+
 export async function fetchCleanupCandidates(): Promise<void> {
   if (!selectedCleanupDevice) return;
   if (isFetchingCleanupCandidates) return;
   isFetchingCleanupCandidates = true;
 
   const tbody = document.getElementById('cleanup-candidates-tbody');
+  const gridEl = document.getElementById('cleanup-candidates-grid');
   const paginationInfo = document.getElementById('cleanup-pagination-info');
   const pageNumberLabel = document.getElementById('cleanup-page-number');
   const prevBtn = document.getElementById('btn-cleanup-prev-page') as HTMLButtonElement | null;
   const nextBtn = document.getElementById('btn-cleanup-next-page') as HTMLButtonElement | null;
+
+  syncCleanupViewContainers();
 
   if (tbody) {
     tbody.innerHTML = `
@@ -701,6 +829,14 @@ export async function fetchCleanupCandidates(): Promise<void> {
           Scanning ${activeLocationFilter === 'actually' ? 'on-device snapshot' : 'database candidates'} for <strong>${escapeHtml(selectedCleanupDevice.camera_model)}</strong>...
         </td>
       </tr>
+    `;
+  }
+  if (gridEl) {
+    gridEl.innerHTML = `
+      <div class="text-center text-muted" style="grid-column: 1 / -1; padding: 3rem 1rem;">
+        <div class="spinner-sm mb-2" style="margin: 0 auto;"></div>
+        Loading <strong>${escapeHtml(selectedCleanupDevice.camera_model)}</strong> items by size...
+      </div>
     `;
   }
 
@@ -726,6 +862,13 @@ export async function fetchCleanupCandidates(): Promise<void> {
               ⚠️ Error loading candidates: ${escapeHtml(data.error || 'Unknown error')}
             </td>
           </tr>
+        `;
+      }
+      if (gridEl) {
+        gridEl.innerHTML = `
+          <div class="text-center text-muted" style="grid-column: 1 / -1; padding: 2.5rem 1rem;">
+            ⚠️ Error loading candidates: ${escapeHtml(data.error || 'Unknown error')}
+          </div>
         `;
       }
       return;
@@ -845,10 +988,9 @@ export async function fetchCleanupCandidates(): Promise<void> {
           ? `<span class="candidate-duration-pill" title="Video duration: ${c.duration_sec}s">⏱️ ${formatDuration(c.duration_sec)}</span>`
           : `<span class="text-muted font-mono" style="font-size: 0.71rem;">Still</span>`;
 
-        const sizeFormatted =
-          c.file_size_mb >= 1024
-            ? `${(c.file_size_mb / 1024).toFixed(2)} GB`
-            : `${c.file_size_mb.toFixed(1)} MB`;
+        const sizeFormatted = formatAppleBytes(
+          c.file_size_bytes || (c.file_size_mb ? c.file_size_mb * 1_000_000 : 0)
+        );
 
         const quartileBadge =
           c.score_quartile === 1
@@ -913,12 +1055,18 @@ export async function fetchCleanupCandidates(): Promise<void> {
         const aid = cb.dataset.assetId;
         if (!aid) return;
         const tr = cb.closest('tr');
-        if ((e.target as HTMLInputElement).checked) {
+        const checked = (e.target as HTMLInputElement).checked;
+        if (checked) {
           selectedCandidateAssetIds.add(aid);
           tr?.classList.add('selected');
         } else {
           selectedCandidateAssetIds.delete(aid);
           tr?.classList.remove('selected');
+        }
+        const gridCb = document.querySelector<HTMLInputElement>(`.cleanup-grid-checkbox[data-asset-id="${CSS.escape(aid)}"]`);
+        if (gridCb) {
+          gridCb.checked = checked;
+          gridCb.closest('.cleanup-iphone-tile')?.classList.toggle('selected', checked);
         }
         updateCleanupSelectionBar();
       });
@@ -960,6 +1108,8 @@ export async function fetchCleanupCandidates(): Promise<void> {
     if (prevBtn) prevBtn.disabled = cleanupPageOffset <= 0;
     if (nextBtn) nextBtn.disabled = cleanupPageOffset + cleanupPageLimit >= totalCount;
 
+    renderCleanupIphoneGrid();
+    syncCleanupViewContainers();
     updateCleanupSelectionBar();
   } catch (err) {
     console.error('Error fetching cleanup candidates:', err);
@@ -970,6 +1120,13 @@ export async function fetchCleanupCandidates(): Promise<void> {
             ❌ Network error loading candidates.
           </td>
         </tr>
+      `;
+    }
+    if (gridEl) {
+      gridEl.innerHTML = `
+        <div class="text-center text-muted" style="grid-column: 1 / -1; padding: 2.5rem 1rem;">
+          ❌ Network error loading candidates.
+        </div>
       `;
     }
   } finally {
@@ -1152,10 +1309,9 @@ function renderCleanupPreviewAsset(assetId: string): void {
 
   const isVideo = c.media_type === 'video';
   const ext = (c.original_filename.split('.').pop() || '').toUpperCase();
-  const sizeStr =
-    c.file_size_mb >= 1024
-      ? `${(c.file_size_mb / 1024).toFixed(2)} GB`
-      : `${(c.file_size_mb || 0).toFixed(1)} MB`;
+  const sizeStr = formatAppleBytes(
+    c.file_size_bytes || c.bytes || (c.file_size_mb ? c.file_size_mb * 1_000_000 : 0)
+  );
 
   const titleEl = document.getElementById('cleanup-preview-title');
   const typeBadgeEl = document.getElementById('cleanup-preview-type-badge');
@@ -1315,6 +1471,7 @@ function updateCleanupSelectionBar(): void {
   const summaryEl = document.getElementById('cleanup-selection-summary');
   const btnMark = document.getElementById('btn-mark-selected-removed') as HTMLButtonElement | null;
   const selectAllCb = document.getElementById('cleanup-select-all-checkbox') as HTMLInputElement | null;
+  const selectAllVisibleCb = document.getElementById('cleanup-select-all-visible') as HTMLInputElement | null;
 
   const count = selectedCandidateAssetIds.size;
   let totalBytes = 0;
@@ -1326,7 +1483,7 @@ function updateCleanupSelectionBar(): void {
   });
 
   if (summaryEl) {
-    summaryEl.textContent = `${count} selected (${formatBytes(totalBytes)})`;
+    summaryEl.textContent = `${count} selected (${formatAppleBytes(totalBytes)})`;
   }
 
   if (btnMark) {
@@ -1334,10 +1491,13 @@ function updateCleanupSelectionBar(): void {
     btnMark.textContent = count > 0 ? `🗑️ Mark (${count}) as Removed` : '🗑️ Mark Selected as Removed';
   }
 
+  const allChecked =
+    currentCandidateList.length > 0 && currentCandidateList.every(c => selectedCandidateAssetIds.has(c.asset_id));
   if (selectAllCb) {
-    const allChecked =
-      currentCandidateList.length > 0 && currentCandidateList.every(c => selectedCandidateAssetIds.has(c.asset_id));
     selectAllCb.checked = allChecked;
+  }
+  if (selectAllVisibleCb) {
+    selectAllVisibleCb.checked = allChecked;
   }
 }
 
@@ -1369,7 +1529,7 @@ function openCleanupConfirmModal(assetIds: string[]): void {
     countEl.textContent = `${assetIds.length} asset${assetIds.length === 1 ? '' : 's'}`;
   }
   if (sizeEl) {
-    sizeEl.textContent = formatBytes(totalBytes);
+    sizeEl.textContent = formatAppleBytes(totalBytes);
   }
   if (previewEl) {
     let previewHtml = '';

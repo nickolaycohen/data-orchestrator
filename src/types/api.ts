@@ -261,6 +261,54 @@ export interface PlannerOverviewResponse {
   mode_m: PlannerModeM;
 }
 
+export interface ModeMDedupDuplicate {
+  duplicate_asset_id: string;
+  duplicate_filename: string;
+  duplicate_ext: string;
+  duplicate_score: number;
+  duplicate_size_bytes: number;
+  duplicate_size_mb: number;
+  duplicate_resolution: string;
+  duplicate_date: string;
+  duplicate_month: string;
+  keeper_asset_id: string;
+  keeper_filename: string;
+  keeper_ext: string;
+  keeper_score: number;
+  keeper_size_bytes: number;
+  keeper_size_mb: number;
+  keeper_resolution: string;
+  keeper_date: string;
+  keeper_moment: string | null;
+  match_tier: string;
+  hamming_distance: number | null;
+  similarity_pct: number | null;
+}
+
+export interface ModeMDedupPreviewResponse {
+  ok: boolean;
+  error?: string;
+  threshold: number;
+  scanned_unassigned: number;
+  pool_size: number;
+  duplicate_count: number;
+  reclaimable_bytes: number;
+  duration_sec: number;
+  has_imagehash: boolean;
+  newly_hashed?: number;
+  duplicates: ModeMDedupDuplicate[];
+}
+
+export interface ModeMDedupApplyResponse {
+  ok: boolean;
+  requested: number;
+  photos_added: number;
+  db_updated: number;
+  ignore_album_path?: string;
+  errors?: string[];
+  error?: string;
+}
+
 export type TriggerTaskFn = (
   taskId: string,
   args?: Record<string, any> | null,

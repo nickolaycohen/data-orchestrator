@@ -21,6 +21,19 @@ export function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
 
+/**
+ * Format file sizes using Apple iOS / macOS decimal SI units (base-1000),
+ * matching the iPhone Photos / Storage cleanup view (e.g. 960,217,094 B -> "960.2 MB").
+ */
+export function formatAppleBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B';
+  if (bytes < 1000) return `${Math.round(bytes)} B`;
+  if (bytes < 1_000_000) return `${Math.round(bytes / 1000)} KB`;
+  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  if (bytes < 1_000_000_000_000) return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
+  return `${(bytes / 1_000_000_000_000).toFixed(2)} TB`;
+}
+
 export function formatDuration(seconds: number | string): string {
   const sec = Number(seconds);
   if (!sec || sec <= 0) return '0:00';

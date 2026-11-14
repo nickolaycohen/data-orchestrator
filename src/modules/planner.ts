@@ -2,8 +2,16 @@
 // Planner Mode Overview: [B] Batch Management | [M] Memory & Publishing
 // ==========================================================================
 
-import type { BatchDeviceSummary, PlannerModeB, PlannerModeM, PlannerOverviewResponse } from '../types/api.ts';
-import { candidateAssetMeta, escapeHtml, formatDuration } from '../utils/formatters.ts';
+import type {
+  BatchDeviceSummary,
+  ModeMDedupApplyResponse,
+  ModeMDedupDuplicate,
+  ModeMDedupPreviewResponse,
+  PlannerModeB,
+  PlannerModeM,
+  PlannerOverviewResponse
+} from '../types/api.ts';
+import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../utils/formatters.ts';
 import { openCleanupPreviewModal } from './cleanup.ts';
 
 let plannerOverviewData: PlannerOverviewResponse | null = null;
@@ -11,12 +19,17 @@ let isFetchingPlannerOverview = false;
 let pendingPlannerRefresh = false;
 let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
-let hideDuplicateCopies = false;
 const expandedUnassignedFolders = new Set<string>();
 const clusterPreviewAssetIds = new Map<string, string[]>();
 let hasInitializedUnassignedExpansion = false;
+let dedupPreviewData: ModeMDedupPreviewResponse | null = null;
+const selectedDedupAssetIds = new Set<string>();
+let isRunningDedupPreview = false;
+let isApplyingDedupIgnore = false;
+let plannerRefreshExecutorCb: (() => void) | undefined;
 
 export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
+  plannerRefreshExecutorCb = onRefreshExecutor;
   // Mode view tabs (All | [B] | [M] | [C])
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -92,16 +105,42 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
     });
   }
 
-  // Toggle hiding secondary Apple Photos duplicate copies (ZDUPLICATEASSETVISIBILITYSTATE = 1)
-  const btnToggleDupCopies = document.getElementById('btn-toggle-hide-dup-copies');
-  if (btnToggleDupCopies) {
-    btnToggleDupCopies.addEventListener('click', () => {
-      hideDuplicateCopies = !hideDuplicateCopies;
-      btnToggleDupCopies.classList.toggle('btn-purple', hideDuplicateCopies);
-      btnToggleDupCopies.classList.toggle('btn-outline', !hideDuplicateCopies);
-      renderUnassignedClustersList();
+  // Media-Intake Dedup & Ignore (replaces Apple Photos Merge before Proposed Moment grouping)
+  document.getElementById('btn-intake-dedup-ignore')?.addEventListener('click', () => {
+    void openIntakeDedupModal();
+  });
+
+  document.querySelectorAll<HTMLElement>('.btn-close-dedup-modal').forEach(btn => {
+    btn.addEventListener('click', () => closeIntakeDedupModal());
+  });
+
+  document.getElementById('modal-intake-dedup')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement)?.id === 'modal-intake-dedup') {
+      closeIntakeDedupModal();
+    }
+  });
+
+  document.getElementById('btn-rescan-intake-dedup')?.addEventListener('click', () => {
+    void runIntakeDedupPreview();
+  });
+
+  document.getElementById('dedup-select-all-checkbox')?.addEventListener('change', (e) => {
+    const isChecked = (e.target as HTMLInputElement).checked;
+    const dups = dedupPreviewData?.duplicates || [];
+    dups.forEach(d => {
+      if (isChecked) selectedDedupAssetIds.add(d.duplicate_asset_id);
+      else selectedDedupAssetIds.delete(d.duplicate_asset_id);
     });
-  }
+    document.querySelectorAll<HTMLInputElement>('.dedup-item-checkbox').forEach(cb => {
+      cb.checked = isChecked;
+      cb.closest('.dedup-pair-card')?.classList.toggle('selected', isChecked);
+    });
+    updateDedupSelectionUI();
+  });
+
+  document.getElementById('btn-apply-intake-dedup-ignore')?.addEventListener('click', () => {
+    void applyIntakeDedupIgnore();
+  });
 
   // Expand / Collapse all unassigned clusters
   const btnToggleAllClusters = document.getElementById('btn-toggle-all-unassigned-clusters');
@@ -611,21 +650,6 @@ function renderUnassignedClustersList(): void {
   if (!listEl) return;
 
   const rawClusters = plannerOverviewData?.mode_m?.unassigned_clusters || [];
-  const totalDupCopies = rawClusters.reduce(
-    (sum, c) => sum + (c.assets || []).filter(a => a.is_duplicate_copy).length,
-    0
-  );
-  const btnToggleDupCopies = document.getElementById('btn-toggle-hide-dup-copies');
-  if (btnToggleDupCopies) {
-    if (totalDupCopies > 0) {
-      btnToggleDupCopies.style.display = 'inline-flex';
-      btnToggleDupCopies.textContent = hideDuplicateCopies
-        ? `♻️ Hiding ${totalDupCopies} Photos Dupes`
-        : `♻️ Hide Photos Dupes (${totalDupCopies})`;
-    } else {
-      btnToggleDupCopies.style.display = 'none';
-    }
-  }
 
   if (!rawClusters.length) {
     listEl.innerHTML = '<div class="text-center text-muted" style="padding: 1rem;">No unassigned high-rank asset clusters found.</div>';
@@ -634,9 +658,8 @@ function renderUnassignedClustersList(): void {
 
   const normalizedClusters = rawClusters
     .map(c => {
-      const allAssets = c.assets || [];
-      const dupCount = allAssets.filter(a => a.is_duplicate_copy).length;
-      const visibleAssets = hideDuplicateCopies ? allAssets.filter(a => !a.is_duplicate_copy) : allAssets;
+      const visibleAssets = c.assets || [];
+      const dupCount = visibleAssets.filter(a => a.is_duplicate_copy).length;
       const maxScore = visibleAssets.length ? Math.max(...visibleAssets.map(a => a.score_normalized)) : c.max_score;
       const minScore = visibleAssets.length ? Math.min(...visibleAssets.map(a => a.score_normalized)) : c.min_score;
       const scoreSpan =
@@ -811,8 +834,8 @@ function renderUnassignedClustersList(): void {
                 <span class="badge badge-xs ${sizeBadgeClass} font-mono">${count} asset${count === 1 ? '' : 's'}</span>
                 <span class="badge badge-xs ${typeBadgeClass}" style="font-size: 0.64rem;">${escapeHtml(cluster.group_type)}</span>
                 ${
-                  !hideDuplicateCopies && (cluster.duplicate_copy_count || 0) > 0
-                    ? `<span class="badge badge-xs badge-amber font-mono" style="font-size: 0.62rem;" title="Secondary duplicate copies detected by Apple Photos (merge via Photos -> Duplicates)">♻️ ${cluster.duplicate_copy_count} Photos Dupes</span>`
+                  (cluster.duplicate_copy_count || 0) > 0
+                    ? `<span class="badge badge-xs badge-amber font-mono" style="font-size: 0.62rem;" title="Potential duplicate copy flagged — review via Intake Dedup & Ignore">♻️ ${cluster.duplicate_copy_count} Dup Flagged</span>`
                     : ''
                 }
               </div>
@@ -884,5 +907,349 @@ function renderUnassignedClustersList(): void {
       );
     });
   });
+}
+
+async function openIntakeDedupModal(): Promise<void> {
+  const modal = document.getElementById('modal-intake-dedup');
+  if (!modal) return;
+  modal.classList.add('open');
+  await runIntakeDedupPreview();
+}
+
+function closeIntakeDedupModal(): void {
+  document.getElementById('modal-intake-dedup')?.classList.remove('open');
+}
+
+async function runIntakeDedupPreview(): Promise<void> {
+  if (isRunningDedupPreview) return;
+  isRunningDedupPreview = true;
+
+  const statusEl = document.getElementById('dedup-modal-status');
+  const controlsBar = document.getElementById('dedup-controls-bar');
+  const listEl = document.getElementById('dedup-pairs-list');
+  const btnRescan = document.getElementById('btn-rescan-intake-dedup') as HTMLButtonElement | null;
+  const btnApply = document.getElementById('btn-apply-intake-dedup-ignore') as HTMLButtonElement | null;
+
+  if (btnRescan) btnRescan.disabled = true;
+  if (btnApply) btnApply.disabled = true;
+  if (controlsBar) controlsBar.style.display = 'none';
+  if (listEl) listEl.innerHTML = '';
+  if (statusEl) {
+    statusEl.innerHTML = `
+      <div class="spinner-sm"></div>
+      <span>Running Media-Intake perceptual &amp; metadata dedup scan across unassigned assets...</span>
+    `;
+  }
+
+  try {
+    const res = await fetch('/api/media/mode-m/dedup-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data: ModeMDedupPreviewResponse = await res.json();
+
+    if (!res.ok || !data.ok) {
+      if (statusEl) {
+        statusEl.innerHTML = `<span class="text-red">❌ Scan failed: ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    dedupPreviewData = data;
+    selectedDedupAssetIds.clear();
+    (data.duplicates || []).forEach(d => selectedDedupAssetIds.add(d.duplicate_asset_id));
+
+    renderDedupModalResults(data);
+  } catch (err: any) {
+    console.error('Error running intake dedup preview:', err);
+    if (statusEl) {
+      statusEl.innerHTML = `<span class="text-red">❌ Network error running intake dedup: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  } finally {
+    isRunningDedupPreview = false;
+    if (btnRescan) btnRescan.disabled = false;
+  }
+}
+
+function renderDedupModalResults(data: ModeMDedupPreviewResponse): void {
+  const statusEl = document.getElementById('dedup-modal-status');
+  const controlsBar = document.getElementById('dedup-controls-bar');
+  const listEl = document.getElementById('dedup-pairs-list');
+  const selectAllCb = document.getElementById('dedup-select-all-checkbox') as HTMLInputElement | null;
+
+  const dups = data.duplicates || [];
+  const phashNote = data.has_imagehash ? 'pHash + metadata' : 'metadata only (install imagehash for visual pHash)';
+
+  if (statusEl) {
+    statusEl.innerHTML = `
+      <span>
+        Scanned <strong>${data.scanned_unassigned}</strong> unassigned assets (&gt; ${data.threshold.toFixed(4)}) against
+        <strong>${data.pool_size.toLocaleString()}</strong> library peers in <strong>${data.duration_sec.toFixed(2)}s</strong>
+        (${escapeHtml(phashNote)}).
+        Found <strong class="text-amber">${dups.length}</strong> duplicate${dups.length === 1 ? '' : 's'}
+        (${formatBytes(data.reclaimable_bytes || 0)}).
+      </span>
+    `;
+  }
+
+  if (!dups.length) {
+    if (controlsBar) controlsBar.style.display = 'none';
+    if (listEl) {
+      listEl.innerHTML = `
+        <div class="text-center text-muted" style="padding: 2.5rem 1rem;">
+          <div style="font-size: 1.6rem; margin-bottom: 0.4rem;">✅</div>
+          No duplicates found among unassigned assets above cutoff ${data.threshold.toFixed(4)}.
+        </div>
+      `;
+    }
+    updateDedupSelectionUI();
+    return;
+  }
+
+  if (controlsBar) controlsBar.style.display = 'flex';
+  if (selectAllCb) selectAllCb.checked = true;
+
+  if (listEl) {
+    listEl.innerHTML = dups
+      .map((d: ModeMDedupDuplicate) => {
+        const isChecked = selectedDedupAssetIds.has(d.duplicate_asset_id);
+        const dupThumb = `/api/media/cleanup/thumbnail/${encodeURIComponent(d.duplicate_asset_id)}`;
+        const keepThumb = `/api/media/cleanup/thumbnail/${encodeURIComponent(d.keeper_asset_id)}`;
+        const simLabel =
+          typeof d.similarity_pct === 'number'
+            ? `${d.similarity_pct.toFixed(1)}%${d.hamming_distance !== null ? ` · d=${d.hamming_distance}` : ''}`
+            : d.match_tier;
+        const keeperMomentBadge = d.keeper_moment
+          ? `<span class="badge badge-xs badge-green" style="font-size: 0.62rem;">Moment: ${escapeHtml(d.keeper_moment)}</span>`
+          : `<span class="badge badge-xs badge-outline" style="font-size: 0.62rem;">Unassigned Keeper</span>`;
+
+        // Seed minimal preview metadata so clicking thumbnails opens full preview modal cleanly
+        const seedMeta = (
+          assetId: string,
+          filename: string,
+          sizeBytes: number,
+          sizeMb: number,
+          res: string,
+          dateStr: string,
+          score: number,
+          momentName: string
+        ): void => {
+          if (candidateAssetMeta.has(assetId)) return;
+          const [wStr, hStr] = (res || '').split('x');
+          const extLower = (filename.split('.').pop() || '').toLowerCase();
+          const isVideoExt = ['mov', 'mp4', 'm4v', 'avi'].includes(extLower);
+          candidateAssetMeta.set(assetId, {
+            asset_id: assetId,
+            filename,
+            original_filename: filename,
+            camera_model: 'Library',
+            primary_owner: '',
+            month: dateStr.slice(0, 7),
+            capture_timestamp: dateStr,
+            file_size_bytes: sizeBytes,
+            bytes: sizeBytes,
+            file_size_mb: sizeMb,
+            score_normalized: score,
+            score_quartile: score > 0.5315 ? 'Top (>0.5315)' : 'Library',
+            assigned_moment: momentName,
+            media_type: isVideoExt ? 'video' : 'photo',
+            duration_sec: 0,
+            width: Number(wStr) || 0,
+            height: Number(hStr) || 0,
+            fps: 0
+          });
+        };
+
+        seedMeta(
+          d.duplicate_asset_id,
+          d.duplicate_filename,
+          d.duplicate_size_bytes,
+          d.duplicate_size_mb,
+          d.duplicate_resolution,
+          d.duplicate_date,
+          d.duplicate_score,
+          'Duplicate (→ Ignore)'
+        );
+        seedMeta(
+          d.keeper_asset_id,
+          d.keeper_filename,
+          d.keeper_size_bytes,
+          d.keeper_size_mb,
+          d.keeper_resolution,
+          d.keeper_date,
+          d.keeper_score,
+          d.keeper_moment || 'Unassigned Keeper'
+        );
+
+        return `
+          <div class="dedup-pair-card ${isChecked ? 'selected' : ''}" data-dup-id="${escapeHtml(d.duplicate_asset_id)}">
+            <input type="checkbox" class="dedup-item-checkbox" data-dup-id="${escapeHtml(d.duplicate_asset_id)}" ${isChecked ? 'checked' : ''} />
+
+            <div class="dedup-side">
+              <img class="dedup-thumb" src="${dupThumb}" alt="${escapeHtml(d.duplicate_filename)}" loading="lazy"
+                   data-dedup-preview="${escapeHtml(d.duplicate_asset_id)}"
+                   data-dedup-pair="${escapeHtml(d.duplicate_asset_id)},${escapeHtml(d.keeper_asset_id)}"
+                   title="Click to preview Duplicate vs Keeper" />
+              <div class="dedup-side-info">
+                <div style="display:flex; align-items:center; gap:0.35rem;">
+                  <span class="badge badge-xs badge-red" style="font-size: 0.6rem;">DUPLICATE → IGNORE</span>
+                  <span class="dedup-side-meta">Score ${d.duplicate_score.toFixed(4)}</span>
+                </div>
+                <div class="dedup-side-filename" title="${escapeHtml(d.duplicate_filename)}">${escapeHtml(d.duplicate_filename)}</div>
+                <div class="dedup-side-meta">${d.duplicate_size_mb.toFixed(2)} MB · ${escapeHtml(d.duplicate_resolution)} · ${escapeHtml(d.duplicate_date)}</div>
+              </div>
+            </div>
+
+            <div class="dedup-match-middle">
+              <span class="badge badge-xs badge-purple font-mono" style="font-size: 0.62rem;">${escapeHtml(d.match_tier)}</span>
+              <span class="font-mono text-muted" style="font-size: 0.66rem;">${escapeHtml(simLabel)}</span>
+            </div>
+
+            <div class="dedup-side">
+              <img class="dedup-thumb" src="${keepThumb}" alt="${escapeHtml(d.keeper_filename)}" loading="lazy"
+                   data-dedup-preview="${escapeHtml(d.keeper_asset_id)}"
+                   data-dedup-pair="${escapeHtml(d.duplicate_asset_id)},${escapeHtml(d.keeper_asset_id)}"
+                   title="Click to preview Keeper vs Duplicate" />
+              <div class="dedup-side-info">
+                <div style="display:flex; align-items:center; gap:0.35rem; flex-wrap:wrap;">
+                  <span class="badge badge-xs badge-blue" style="font-size: 0.6rem;">KEEPER</span>
+                  ${keeperMomentBadge}
+                  <span class="dedup-side-meta">Score ${d.keeper_score.toFixed(4)}</span>
+                </div>
+                <div class="dedup-side-filename" title="${escapeHtml(d.keeper_filename)}">${escapeHtml(d.keeper_filename)}</div>
+                <div class="dedup-side-meta">${d.keeper_size_mb.toFixed(2)} MB · ${escapeHtml(d.keeper_resolution)} · ${escapeHtml(d.keeper_date)}</div>
+              </div>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    listEl.querySelectorAll<HTMLInputElement>('.dedup-item-checkbox').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const dupId = cb.dataset.dupId;
+        if (!dupId) return;
+        const checked = (e.target as HTMLInputElement).checked;
+        if (checked) selectedDedupAssetIds.add(dupId);
+        else selectedDedupAssetIds.delete(dupId);
+        cb.closest('.dedup-pair-card')?.classList.toggle('selected', checked);
+        updateDedupSelectionUI();
+      });
+    });
+
+    listEl.querySelectorAll<HTMLElement>('[data-dedup-preview]').forEach(img => {
+      img.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const aid = img.dataset.dedupPreview;
+        const pairIds = (img.dataset.dedupPair || '').split(',').filter(Boolean);
+        if (aid) {
+          openCleanupPreviewModal(aid, { assetIds: pairIds, groupLabel: 'Duplicate vs Keeper' });
+        }
+      });
+    });
+  }
+
+  updateDedupSelectionUI();
+}
+
+function updateDedupSelectionUI(): void {
+  const summaryEl = document.getElementById('dedup-selection-summary');
+  const btnApply = document.getElementById('btn-apply-intake-dedup-ignore') as HTMLButtonElement | null;
+  const selectAllCb = document.getElementById('dedup-select-all-checkbox') as HTMLInputElement | null;
+
+  const dups = dedupPreviewData?.duplicates || [];
+  let selectedBytes = 0;
+  dups.forEach(d => {
+    if (selectedDedupAssetIds.has(d.duplicate_asset_id)) {
+      selectedBytes += d.duplicate_size_bytes || 0;
+    }
+  });
+
+  const count = selectedDedupAssetIds.size;
+  if (summaryEl) {
+    summaryEl.textContent = `${count} of ${dups.length} selected (${formatBytes(selectedBytes)})`;
+  }
+  if (btnApply) {
+    btnApply.disabled = count === 0 || isApplyingDedupIgnore;
+    btnApply.textContent = count > 0 ? `🚫 Add (${count}) to Ignore Album` : '🚫 Add Selected to Ignore Album';
+  }
+  if (selectAllCb && dups.length > 0) {
+    selectAllCb.checked = dups.every(d => selectedDedupAssetIds.has(d.duplicate_asset_id));
+  }
+}
+
+async function applyIntakeDedupIgnore(): Promise<void> {
+  if (isApplyingDedupIgnore || !selectedDedupAssetIds.size) return;
+  isApplyingDedupIgnore = true;
+
+  const btnApply = document.getElementById('btn-apply-intake-dedup-ignore') as HTMLButtonElement | null;
+  const statusEl = document.getElementById('dedup-modal-status');
+  const assetIds = Array.from(selectedDedupAssetIds);
+
+  if (btnApply) {
+    btnApply.disabled = true;
+    btnApply.textContent = `Adding ${assetIds.length} to Ignore...`;
+  }
+  if (statusEl) {
+    statusEl.innerHTML = `
+      <div class="spinner-sm"></div>
+      <span>Adding <strong>${assetIds.length}</strong> duplicate(s) to Apple Photos <code>Ignore</code> album and syncing database...</span>
+    `;
+  }
+
+  try {
+    const res = await fetch('/api/media/mode-m/dedup-apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asset_ids: assetIds })
+    });
+    const data: ModeMDedupApplyResponse = await res.json();
+
+    if (!res.ok || !data.ok) {
+      if (statusEl) {
+        statusEl.innerHTML = `<span class="text-red">❌ Failed adding to Ignore album: ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    const errNote = data.errors?.length ? ` (${data.errors.length} warning(s))` : '';
+    if (statusEl) {
+      statusEl.innerHTML = `
+        <span class="text-green">
+          ✅ Added <strong>${data.photos_added}</strong> asset(s) to Apple Photos <code>${escapeHtml(data.ignore_album_path || 'Ignore')}</code>
+          and updated <strong>${data.db_updated}</strong> DB record(s)${escapeHtml(errNote)}. Refreshing Mode [M]...
+        </span>
+      `;
+    }
+
+    // Remove applied duplicates from local list immediately and refresh Mode [M]
+    if (dedupPreviewData?.duplicates) {
+      dedupPreviewData.duplicates = dedupPreviewData.duplicates.filter(d => !selectedDedupAssetIds.has(d.duplicate_asset_id));
+    }
+    selectedDedupAssetIds.clear();
+
+    await fetchPlannerOverview(true);
+    if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
+
+    if (dedupPreviewData) {
+      renderDedupModalResults(dedupPreviewData);
+      if (statusEl) {
+        statusEl.innerHTML = `
+          <span class="text-green">
+            ✅ Added <strong>${data.photos_added}</strong> asset(s) to <code>${escapeHtml(data.ignore_album_path || 'Ignore')}</code>
+            (synced <strong>${data.db_updated}</strong> in DB). Mode [M] refreshed.
+          </span>
+        `;
+      }
+    }
+  } catch (err: any) {
+    console.error('Error applying intake dedup ignore:', err);
+    if (statusEl) {
+      statusEl.innerHTML = `<span class="text-red">❌ Network error adding to Ignore: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  } finally {
+    isApplyingDedupIgnore = false;
+    updateDedupSelectionUI();
+  }
 }
 
