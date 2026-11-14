@@ -794,7 +794,7 @@ function renderUnassignedClustersList(): void {
             : `<span class="text-muted">—</span>`;
 
           const dupBadgeHtml = a.is_duplicate_copy
-            ? `<span class="badge badge-xs badge-amber" style="font-size: 0.58rem; margin-left: 0.3rem;" title="Flagged as secondary duplicate copy in Apple Photos (ZDUPLICATEASSETVISIBILITYSTATE = 1)">♻️ Dup Copy</span>`
+            ? `<span class="badge badge-xs badge-amber" style="font-size: 0.58rem; margin-left: 0.3rem;" title="Flagged by Media-Intake Dedup — click 'Intake Dedup &amp; Ignore' to move to Ignore album">♻️ Dup Copy</span>`
             : '';
 
           return `

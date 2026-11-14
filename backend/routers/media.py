@@ -1984,6 +1984,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     valid_moment_albums = {r[0] for r in cur.fetchall() if r[0]}
 
     moment_titles = _load_photos_moment_titles([r[0] for r in unassigned_rows])
+    intake_dup_ids = _get_intake_duplicate_ids() if unassigned_rows else set()
 
     # Preload assigned assets index once for fast proximity matching
     assigned_by_import = {}
@@ -2087,6 +2088,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         grp["months"].add(month)
         is_vid = zkind == 1 or (fn or "").lower().endswith((".mov", ".mp4", ".m4v", ".avi", ".mpg"))
         dup_val = int(dup_state or 0)
+        is_intake_dup = aid in intake_dup_ids
         grp["assets"].append({
             "asset_id": aid,
             "original_filename": fn or "—",
@@ -2105,8 +2107,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             "primary_owner": owner_name or "Shared/Other",
             "assigned_moment": f"Proposed: {group_folder}",
             "notes": ", ".join(extra_notes),
-            "duplicate_state": dup_val,
-            "is_duplicate_copy": dup_val == 1,
+            "duplicate_state": 1 if is_intake_dup else 0,
+            "is_duplicate_copy": is_intake_dup,
         })
 
     # Rank clusters cleanly and format fields expected by frontend
@@ -2853,6 +2855,31 @@ def execute_planner_batch_action(req: PlannerBatchActionRequest):
         return {"ok": False, "error": str(e)}
 
 
+_intake_dedup_cache = {
+    "timestamp": 0.0,
+    "dup_ids": set(),
+}
+
+
+def _get_intake_duplicate_ids(force: bool = False) -> set[str]:
+    """Computes duplicate unassigned asset IDs via Media-Intake dedup (cached 30s) instead of Photos Merge."""
+    now = time.time()
+    if not force and (now - _intake_dedup_cache["timestamp"] < 30.0) and _intake_dedup_cache["dup_ids"]:
+        return set(_intake_dedup_cache["dup_ids"])
+    scripts_dir = str(REPOS["media-organizer-pipeline"] / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    try:
+        from dedup_unassigned_moments import analyze_unassigned_duplicates
+        res = analyze_unassigned_duplicates(db_path=str(MEDIA_DB_PATH), use_phash=True)
+        dup_ids = {d["duplicate_asset_id"] for d in res.get("duplicates", [])}
+        _intake_dedup_cache["timestamp"] = now
+        _intake_dedup_cache["dup_ids"] = dup_ids
+        return set(dup_ids)
+    except Exception:
+        return set(_intake_dedup_cache["dup_ids"])
+
+
 def _get_pipeline_python_and_dedup_script() -> tuple[str, Path]:
     python_bin = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
     if not os.path.exists(python_bin):
@@ -2878,6 +2905,8 @@ def preview_mode_m_intake_dedup():
         if proc.returncode != 0:
             return {"ok": False, "error": proc.stderr.strip() or proc.stdout.strip() or f"Exit code {proc.returncode}"}
         data = json.loads(proc.stdout)
+        _intake_dedup_cache["timestamp"] = time.time()
+        _intake_dedup_cache["dup_ids"] = {d["duplicate_asset_id"] for d in data.get("duplicates", [])}
         return {"ok": True, **data}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -2903,6 +2932,8 @@ def apply_mode_m_intake_dedup(req: ModeMDedupApplyRequest):
         if proc.returncode != 0:
             return {"ok": False, "error": proc.stderr.strip() or proc.stdout.strip() or f"Exit code {proc.returncode}"}
         data = json.loads(proc.stdout)
+        _intake_dedup_cache["timestamp"] = 0.0
+        _intake_dedup_cache["dup_ids"] = set()
         return data
     except Exception as e:
         return {"ok": False, "error": str(e)}
