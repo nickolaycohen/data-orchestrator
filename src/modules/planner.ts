@@ -1,5 +1,5 @@
 // ==========================================================================
-// Planner Mode Overview: [B] Batch Management | [M] Memories Organizer
+// Planner Mode Overview: [B] Batch Management | [M] Moments Organizer
 // ==========================================================================
 
 import type {
@@ -182,7 +182,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
     void fetchMemoriesFolders();
   });
 
-  // Memories Organizer: Query existing folders under Memories/Moments (local DB copy)
+  // Moments Organizer: Query existing folders under Moments (local DB copy)
   document.querySelectorAll<HTMLElement>('.memories-scope-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const scope = (btn.dataset.foldersScope || 'moments') as typeof memoriesFoldersScope;

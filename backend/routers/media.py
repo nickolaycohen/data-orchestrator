@@ -2526,7 +2526,7 @@ def _enrich_batch_candidates_with_devices(cur, candidates):
 
 @router.get("/planner-overview")
 def get_planner_overview():
-    """Return comprehensive next-step overview for Mode [B] Batch Management and Mode [M] Memories Organizer."""
+    """Return comprehensive next-step overview for Mode [B] Batch Management and Mode [M] Moments Organizer."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"connected": False, "error": "Media database unavailable"}
 
@@ -2716,7 +2716,7 @@ def get_planner_overview():
                 }
 
             # -----------------------------------------------------------------
-            # 2. Mode [M]: Memories Organizer Overview & Next Steps
+            # 2. Mode [M]: Moments Organizer Overview & Next Steps
             # -----------------------------------------------------------------
             cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
             min_th_row = cur.fetchone()
@@ -3043,7 +3043,7 @@ def query_memories_folders(
     sort: str = "name",
     limit: int = 300,
 ):
-    """Query existing folders/albums under Memories/Moments from the local media_organizer.db copy (no Apple Photos DB query)."""
+    """Query existing folders/albums under Moments from the local media_organizer.db copy (no Apple Photos DB query)."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"connected": False, "error": "Media database unavailable", "items": []}
 

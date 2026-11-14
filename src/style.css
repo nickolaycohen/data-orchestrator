@@ -2920,7 +2920,7 @@ body {
 }
 
 /* ==========================================================================
-   Planner Session Modes ([B] Batch Management | [M] Memories Organizer)
+   Planner Session Modes ([B] Batch Management | [M] Moments Organizer)
    ========================================================================== */
 
 .planner-mode-selector-bar {
@@ -3733,7 +3733,7 @@ body {
 }
 
 /* ==========================================================================
-   Memories Organizer: Existing DB Folders & Create Moment Modal
+   Moments Organizer: Existing DB Folders & Create Moment Modal
    ========================================================================== */
 
 .memories-folders-body.collapsed {

@@ -262,12 +262,12 @@
             </div>
           </div>
 
-          <!-- Session Mode Selector ([B] Batch Management | [M] Memories Organizer | [C] Media Cleanup) -->
+          <!-- Session Mode Selector ([B] Batch Management | [M] Moments Organizer | [C] Media Cleanup) -->
           <div class="planner-mode-selector-bar mb-3" id="planner-mode-selector-bar">
             <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
               <span class="planner-mode-label">🛠️ Pipeline Branch:</span>
               <button class="planner-mode-tab active" data-mode-view="b">[B] Batch Management</button>
-              <button class="planner-mode-tab" data-mode-view="m">[M] Memories Organizer</button>
+              <button class="planner-mode-tab" data-mode-view="m">[M] Moments Organizer</button>
               <button class="planner-mode-tab" data-mode-view="c">[C] Media Cleanup &amp; Reclaim</button>
             </div>
             <div style="display: flex; align-items: center; gap: 0.5rem;">
@@ -280,7 +280,7 @@
             </div>
           </div>
 
-          <!-- Two Sections: [B] Batch Management (default) | [M] Memories Organizer -->
+          <!-- Two Sections: [B] Batch Management (default) | [M] Moments Organizer -->
           <div class="planner-modes-grid single-col mb-4" id="planner-modes-grid">
             <!-- SECTION [B]: Batch Management (default) -->
             <div class="card planner-mode-card" id="planner-mode-b-card">
@@ -492,19 +492,19 @@
               </div>
             </div>
 
-            <!-- SECTION [M]: Memories Organizer -->
+            <!-- SECTION [M]: Moments Organizer -->
             <div class="card planner-mode-card" id="planner-mode-m-card">
               <div class="card-header">
                 <div style="display: flex; align-items: center; gap: 0.75rem;">
                   <div class="action-icon icon-green" style="width: 36px; height: 36px; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; border-radius: 8px;">🌟</div>
                   <div>
                     <h3 style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                      [M] Memories Organizer
+                      [M] Moments Organizer
                       <span class="badge badge-xs badge-green font-mono" id="mode-m-threshold-pill">Threshold: Checking...</span>
                       <span class="badge badge-xs badge-purple font-mono" id="mode-m-moments-pill">163 Moments</span>
                     </h3>
                     <p class="card-subtitle">
-                      <code>[M] Memories Organizer</code> — query existing Memories/Moments folders from <code>media_organizer.db</code> (no Apple Photos DB query), create Moments via AppleScript, review Curation Threshold, &amp; rank Publishing Candidates.
+                      <code>[M] Moments Organizer</code> — query existing Moments folders from <code>media_organizer.db</code> (no Apple Photos DB query), create Moments via AppleScript, review Curation Threshold, &amp; rank Publishing Candidates.
                     </p>
                   </div>
                 </div>
@@ -551,16 +551,16 @@
 
               <!-- Step-by-Step Breakdown for Mode [M] -->
               <div class="planner-steps-body">
-                <!-- Existing Folders under Memories / Moments (Local media_organizer.db Copy) -->
+                <!-- Existing Folders under Moments (Local media_organizer.db Copy) -->
                 <div class="planner-subblock" id="mode-m-folders-block">
                   <div class="planner-subblock-header" style="gap: 0.5rem; flex-wrap: wrap;">
                     <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                      <span><strong>📁 Existing Folders under Memories / Moments</strong></span>
+                      <span><strong>📁 Existing Folders under Moments</strong></span>
                       <span class="badge badge-xs badge-purple font-mono" id="mode-m-folders-count-badge">— folders</span>
                       <span class="badge badge-xs badge-outline font-mono" id="mode-m-folders-sync-badge" title="Queried directly from local media_organizer.db copy (zero queries to Apple Photos DB)">DB Copy</span>
                     </div>
                     <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
-                      <button class="btn btn-xs btn-outline" id="btn-refresh-memories-folders" title="Re-query existing Memories/Moments folders from media_organizer.db">
+                      <button class="btn btn-xs btn-outline" id="btn-refresh-memories-folders" title="Re-query existing Moments folders from media_organizer.db">
                         ↻ Query DB Copy
                       </button>
                       <button class="btn btn-xs btn-outline" id="btn-toggle-memories-folders" title="Show or collapse the Existing Folders table">
@@ -604,7 +604,7 @@
                           </tr>
                         </thead>
                         <tbody id="mode-m-folders-tbody">
-                          <tr><td colspan="5" class="text-center text-muted">Loading synced Memories/Moments folders from media_organizer.db...</td></tr>
+                          <tr><td colspan="5" class="text-center text-muted">Loading synced Moments folders from media_organizer.db...</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -930,7 +930,7 @@
           <div class="card mb-4" id="published-memories-card">
             <div class="card-header" style="margin-bottom: 0.65rem;">
               <div>
-                <h3>Track 2: Memories Organizer (Mode [M])</h3>
+                <h3>Track 2: Moments Organizer (Mode [M])</h3>
                 <p class="card-subtitle">
                   Published history to
                   <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-shutterfly">Shutterfly ↗</a> (Photos) &amp;
@@ -1950,7 +1950,6 @@
                 </label>
                 <select id="create-moment-parent-select" class="form-control" style="width: 100%; font-size: 0.8rem; padding: 0.45rem 0.55rem;">
                   <option value="Moments" selected>Moments</option>
-                  <option value="Memories">Memories</option>
                   <option value="Generic Moments">Generic Moments</option>
                   <option value="Curated">Curated</option>
                   <option value="ToBeCurated">ToBeCurated</option>
