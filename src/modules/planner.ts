@@ -28,63 +28,61 @@ let isRunningDedupPreview = false;
 let isApplyingDedupIgnore = false;
 let plannerRefreshExecutorCb: (() => void) | undefined;
 
+function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
+  document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.modeView === view);
+  });
+
+  const grid = document.getElementById('planner-modes-grid');
+  const cardB = document.getElementById('planner-mode-b-card');
+  const cardM = document.getElementById('planner-mode-m-card');
+  const cardC = document.getElementById('media-cleanup-card');
+  const cardPub = document.getElementById('published-memories-card');
+  const cardTrack1 = document.getElementById('track-1-reference-card');
+
+  if (view === 'b') {
+    if (grid) {
+      grid.style.display = 'grid';
+      grid.classList.add('single-col');
+    }
+    if (cardB) cardB.style.display = 'flex';
+    if (cardM) cardM.style.display = 'none';
+    if (cardC) cardC.style.display = 'none';
+    if (cardPub) cardPub.style.display = 'none';
+    if (cardTrack1) cardTrack1.style.display = 'block';
+  } else if (view === 'm') {
+    if (grid) {
+      grid.style.display = 'grid';
+      grid.classList.add('single-col');
+    }
+    if (cardB) cardB.style.display = 'none';
+    if (cardM) cardM.style.display = 'flex';
+    if (cardC) cardC.style.display = 'none';
+    if (cardPub) cardPub.style.display = 'block';
+    if (cardTrack1) cardTrack1.style.display = 'none';
+  } else if (view === 'c') {
+    if (grid) grid.style.display = 'none';
+    if (cardPub) cardPub.style.display = 'none';
+    if (cardTrack1) cardTrack1.style.display = 'none';
+    if (cardC) {
+      cardC.style.display = 'block';
+    }
+  }
+}
+
 export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
   plannerRefreshExecutorCb = onRefreshExecutor;
-  // Mode view tabs (All | [B] | [M] | [C])
+
+  // Mode view tabs ([B] | [M] | [C])
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(tab => {
     tab.addEventListener('click', () => {
-      document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-
-      const view = tab.dataset.modeView || 'all';
-      const grid = document.getElementById('planner-modes-grid');
-      const cardB = document.getElementById('planner-mode-b-card');
-      const cardM = document.getElementById('planner-mode-m-card');
-      const cardC = document.getElementById('media-cleanup-card');
-      const cardPub = document.getElementById('published-memories-card');
-      const cardTrack1 = document.getElementById('track-1-reference-card');
-
-      if (view === 'all') {
-        if (grid) {
-          grid.style.display = 'grid';
-          grid.classList.remove('single-col');
-        }
-        if (cardB) cardB.style.display = 'flex';
-        if (cardM) cardM.style.display = 'flex';
-        if (cardC) cardC.style.display = 'block';
-        if (cardPub) cardPub.style.display = 'block';
-        if (cardTrack1) cardTrack1.style.display = 'block';
-      } else if (view === 'b') {
-        if (grid) {
-          grid.style.display = 'grid';
-          grid.classList.add('single-col');
-        }
-        if (cardB) cardB.style.display = 'flex';
-        if (cardM) cardM.style.display = 'none';
-        if (cardC) cardC.style.display = 'none';
-        if (cardPub) cardPub.style.display = 'none';
-        if (cardTrack1) cardTrack1.style.display = 'block';
-      } else if (view === 'm') {
-        if (grid) {
-          grid.style.display = 'grid';
-          grid.classList.add('single-col');
-        }
-        if (cardB) cardB.style.display = 'none';
-        if (cardM) cardM.style.display = 'flex';
-        if (cardC) cardC.style.display = 'none';
-        if (cardPub) cardPub.style.display = 'block';
-        if (cardTrack1) cardTrack1.style.display = 'none';
-      } else if (view === 'c') {
-        if (grid) grid.style.display = 'none';
-        if (cardPub) cardPub.style.display = 'none';
-        if (cardTrack1) cardTrack1.style.display = 'none';
-        if (cardC) {
-          cardC.style.display = 'block';
-          cardC.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
-      }
+      const view = (tab.dataset.modeView as 'b' | 'm' | 'c') || 'b';
+      applyPlannerModeView(view);
     });
   });
+
+  // Default to [B] Batch Management focused branch view
+  applyPlannerModeView('b');
 
   // Unassigned High-Rank Assets cluster sort buttons
   document.querySelectorAll<HTMLElement>('.unassigned-sort-btn').forEach(btn => {

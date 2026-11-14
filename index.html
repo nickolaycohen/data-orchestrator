@@ -66,6 +66,10 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
           Media Organizer
         </button>
+        <button class="nav-tab" data-tab="background">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          Background Processes
+        </button>
         <button class="nav-tab" data-tab="storage">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
           Drive & Storage Master
@@ -258,17 +262,16 @@
             </div>
           </div>
 
-          <!-- Session Mode Selector & Next-Steps Overview ([B] Batch Management | [M] Memory Feature & Publishing | [C] Media Cleanup) -->
+          <!-- Session Mode Selector ([B] Batch Management | [M] Memory Feature & Publishing | [C] Media Cleanup) -->
           <div class="planner-mode-selector-bar mb-3" id="planner-mode-selector-bar">
             <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
-              <span class="planner-mode-label">🛠️ Planner Mode Overview:</span>
-              <button class="planner-mode-tab active" data-mode-view="all">All Modes Overview</button>
-              <button class="planner-mode-tab" data-mode-view="b">[B] Batch Management (default)</button>
+              <span class="planner-mode-label">🛠️ Pipeline Branch:</span>
+              <button class="planner-mode-tab active" data-mode-view="b">[B] Batch Management</button>
               <button class="planner-mode-tab" data-mode-view="m">[M] Memory Feature &amp; Publishing</button>
               <button class="planner-mode-tab" data-mode-view="c">[C] Media Cleanup &amp; Reclaim</button>
             </div>
             <div style="display: flex; align-items: center; gap: 0.5rem;">
-              <span class="badge badge-xs" id="planner-bg-sync-pill" style="display: none;"></span>
+              <span class="badge badge-xs" id="planner-bg-sync-pill" style="display: none; cursor: pointer;" title="Click to open Background Processes tab"></span>
               <span class="font-mono text-muted" style="font-size: 0.72rem;" id="planner-overview-updated">—</span>
               <button class="btn btn-xs btn-outline" id="btn-refresh-planner-overview" title="Refresh Mode [B] &amp; Mode [M] Next Steps">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
@@ -278,7 +281,7 @@
           </div>
 
           <!-- Two Sections: [B] Batch Management (default) | [M] Memory Feature & Publishing -->
-          <div class="planner-modes-grid mb-4" id="planner-modes-grid">
+          <div class="planner-modes-grid single-col mb-4" id="planner-modes-grid">
             <!-- SECTION [B]: Batch Management (default) -->
             <div class="card planner-mode-card" id="planner-mode-b-card">
               <div class="card-header">
@@ -353,7 +356,7 @@
                         <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_dedupe')">Run</button>
                       </div>
                       <div class="track-mini-arrow">➜</div>
-                      <div class="track-mini-step" style="cursor: pointer;" onclick="document.getElementById('upload-throughput-panel')?.scrollIntoView({behavior: 'smooth'})" title="Click to view Upload Throughput Timeline">
+                      <div class="track-mini-step" style="cursor: pointer;" onclick="document.querySelector('[data-tab=background]')?.click(); setTimeout(() => document.getElementById('upload-throughput-panel')?.scrollIntoView({behavior: 'smooth'}), 50)" title="Click to view Upload Throughput Timeline in Background Processes">
                         <div class="track-mini-header">
                           <span class="step-num">400</span>
                           <strong>Google Upload</strong>
@@ -858,6 +861,59 @@
             </div>
           </div>
 
+          <!-- Track 2: Featured Moments & Published History (Full Width) -->
+          <div class="card mb-4" id="published-memories-card">
+            <div class="card-header" style="margin-bottom: 0.65rem;">
+              <div>
+                <h3>Track 2: Memory Feature &amp; Publishing (Mode [M])</h3>
+                <p class="card-subtitle">
+                  Published history to
+                  <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-shutterfly">Shutterfly ↗</a> (Photos) &amp;
+                  <a href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-youtube">YouTube ↗</a> (Videos) with normalized scoring
+                </p>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="badge badge-sm badge-amber font-mono pub-badge-link" id="pub-shutterfly-badge" title="Open Shutterfly Photos (photos.shutterfly.com)">📷 Shutterfly: — ↗</a>
+                <a href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer" class="badge badge-sm badge-purple font-mono pub-badge-link" id="pub-youtube-badge" title="Open YouTube (youtube.com)">🎥 YouTube: — ↗</a>
+                <span class="badge badge-sm badge-green font-mono" id="pub-moments-badge">Published Memories</span>
+              </div>
+            </div>
+            <div class="pub-history-controls">
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <div class="tp-scale-group" title="Sort Published Moments">
+                  <span class="tp-scale-label">Order By:</span>
+                  <button class="tp-scale-btn active" data-pub-sort="score">★ Normalized Score</button>
+                  <button class="tp-scale-btn" data-pub-sort="date">🕒 Date Published</button>
+                </div>
+                <div class="tp-scale-group" title="Filter by Platform">
+                  <button class="tp-scale-btn active" data-pub-filter="all">All</button>
+                  <button class="tp-scale-btn" data-pub-filter="shutterfly">📷 Shutterfly</button>
+                  <button class="tp-scale-btn" data-pub-filter="youtube">🎥 YouTube</button>
+                </div>
+              </div>
+              <input type="text" id="pub-history-search" class="pub-search-input" placeholder="Search moment..." />
+            </div>
+            <div class="moments-container pub-moments-scroll" id="featured-moments-list">
+              <div class="loading-spinner">Loading published moments history...</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2b. Ecosystem Background Processes Panel -->
+        <section id="tab-background" class="tab-panel">
+          <div class="section-title-bar">
+            <div>
+              <h2>Ecosystem Background Processes</h2>
+              <p class="subtitle">Automated Daemons, Apple Photos Replica Sync, Live Execution Queue, Upload Telemetry &amp; Nightly Backups</p>
+            </div>
+            <div style="display: flex; gap: 0.75rem; align-items: center;">
+              <button class="btn btn-outline" onclick="window.triggerTask('media_monitor_executor')" title="Run python3 scripts/monitor_executor.py in Live Console">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                Launch CLI Monitor
+              </button>
+            </div>
+          </div>
+
           <!-- Media Manager Scheduler & Executor Monitor -->
           <div class="card mb-4" id="media-scheduler-monitor-card">
             <div class="card-header">
@@ -865,7 +921,7 @@
                 <div class="action-icon icon-purple" style="width: 36px; height: 36px; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; border-radius: 8px;">⏱️</div>
                 <div>
                   <h3 style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
-                    Media Scheduler & Executor Monitor
+                    Media Scheduler &amp; Executor Monitor
                     <span class="badge badge-sm" id="monitor-executor-badge">Checking...</span>
                     <span class="badge badge-sm badge-outline" id="monitor-bg-service-badge">🔄 BG Sync: Checking...</span>
                     <span class="badge badge-sm badge-outline" id="monitor-db-lock-badge">🔓 DB Lock: Checking</span>
@@ -908,7 +964,7 @@
             <div class="bg-service-panel mb-3" id="bg-service-status-panel">
               <div class="bg-service-header">
                 <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
-                  <strong>🔄 Background Database Copy & Sync Service</strong>
+                  <strong>🔄 Background Database Copy &amp; Sync Service</strong>
                   <code style="font-size: 0.72rem; color: var(--text-muted);">scripts/bg_copy_db_service.py</code>
                   <span class="badge badge-xs badge-outline" id="bg-service-state-pill">Checking...</span>
                   <span class="badge badge-xs badge-green" id="bg-service-sync-pill">Replica Up to Date</span>
@@ -966,7 +1022,7 @@
               <!-- Nightly Backup & Safety Column -->
               <div class="monitor-subpanel">
                 <div class="monitor-subpanel-header">
-                  <strong>🛡️ Nightly Backup Schedule & Concurrency Safety</strong>
+                  <strong>🛡️ Nightly Backup Schedule &amp; Concurrency Safety</strong>
                   <span class="badge badge-sm badge-green" id="monitor-backup-safety-tag">Safe</span>
                 </div>
                 <div class="monitor-schedule-list" id="monitor-schedule-list">
@@ -1009,43 +1065,6 @@
               <div class="monitor-log-box" id="monitor-log-box">
                 Waiting for executor log output...
               </div>
-            </div>
-          </div>
-
-          <!-- Track 2: Featured Moments & Published History (Full Width) -->
-          <div class="card mb-4" id="published-memories-card">
-            <div class="card-header" style="margin-bottom: 0.65rem;">
-              <div>
-                <h3>Track 2: Memory Feature &amp; Publishing (Mode [M])</h3>
-                <p class="card-subtitle">
-                  Published history to
-                  <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-shutterfly">Shutterfly ↗</a> (Photos) &amp;
-                  <a href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-youtube">YouTube ↗</a> (Videos) with normalized scoring
-                </p>
-              </div>
-              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
-                <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="badge badge-sm badge-amber font-mono pub-badge-link" id="pub-shutterfly-badge" title="Open Shutterfly Photos (photos.shutterfly.com)">📷 Shutterfly: — ↗</a>
-                <a href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer" class="badge badge-sm badge-purple font-mono pub-badge-link" id="pub-youtube-badge" title="Open YouTube (youtube.com)">🎥 YouTube: — ↗</a>
-                <span class="badge badge-sm badge-green font-mono" id="pub-moments-badge">Published Memories</span>
-              </div>
-            </div>
-            <div class="pub-history-controls">
-              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                <div class="tp-scale-group" title="Sort Published Moments">
-                  <span class="tp-scale-label">Order By:</span>
-                  <button class="tp-scale-btn active" data-pub-sort="score">★ Normalized Score</button>
-                  <button class="tp-scale-btn" data-pub-sort="date">🕒 Date Published</button>
-                </div>
-                <div class="tp-scale-group" title="Filter by Platform">
-                  <button class="tp-scale-btn active" data-pub-filter="all">All</button>
-                  <button class="tp-scale-btn" data-pub-filter="shutterfly">📷 Shutterfly</button>
-                  <button class="tp-scale-btn" data-pub-filter="youtube">🎥 YouTube</button>
-                </div>
-              </div>
-              <input type="text" id="pub-history-search" class="pub-search-input" placeholder="Search moment..." />
-            </div>
-            <div class="moments-container pub-moments-scroll" id="featured-moments-list">
-              <div class="loading-spinner">Loading published moments history...</div>
             </div>
           </div>
 
@@ -1118,7 +1137,6 @@
               </div>
             </div>
           </div>
-
 
           <!-- Recent Pipeline Executions (Compact at Very Bottom) -->
           <div class="card mb-4 compact-executions-card" id="card-recent-executions">

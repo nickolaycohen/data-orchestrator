@@ -54,19 +54,22 @@ function setupTabs(): void {
         targetPanel.classList.add('active');
       }
 
-      if (tab.dataset.tab === 'media') {
+      if (tab.dataset.tab === 'media' || tab.dataset.tab === 'background') {
         fetchExecutorMonitor();
         if (!mediaMonitorInterval) {
           mediaMonitorInterval = setInterval(fetchExecutorMonitor, 4000);
-        }
-        fetchPlannerOverview();
-        if (!hasCleanupDevicesLoaded()) {
-          fetchCleanupDevices();
         }
       } else {
         if (mediaMonitorInterval) {
           clearInterval(mediaMonitorInterval);
           mediaMonitorInterval = null;
+        }
+      }
+
+      if (tab.dataset.tab === 'media') {
+        fetchPlannerOverview();
+        if (!hasCleanupDevicesLoaded()) {
+          fetchCleanupDevices();
         }
       }
 
@@ -86,6 +89,9 @@ function setupTabs(): void {
 
 // Refresh all metrics across pillars
 function setupRefresh(): void {
+  document.getElementById('planner-bg-sync-pill')?.addEventListener('click', () => {
+    document.querySelector<HTMLElement>('.nav-tab[data-tab="background"]')?.click();
+  });
   document.getElementById('btn-refresh-all')?.addEventListener('click', () => {
     fetchAllMetrics();
   });
