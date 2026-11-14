@@ -1928,15 +1928,22 @@ DEFAULT_GROUPING_RULES = [
         "default_enabled": True,
     },
     {
-        "id": "time_gps_session",
+        "id": "photos_gps_guard",
         "priority": 3,
+        "name": "Photos Moment GPS & Time Guard",
+        "description": "Split assets out of an Apple Photos Moment Title if GPS differs >5 km or GPS is missing with >2h gap from the location-verified photos.",
+        "default_enabled": True,
+    },
+    {
+        "id": "time_gps_session",
+        "priority": 4,
         "name": "Time & GPS Session Clustering",
         "description": "Group remaining uncategorized assets within ≤2h and ≤500m GPS into finer sub-event sessions instead of full-day buckets.",
         "default_enabled": False,
     },
     {
         "id": "same_date",
-        "priority": 4,
+        "priority": 5,
         "name": "Same-Date Fallback Grouping",
         "description": "Imply remaining uncategorized assets captured on the same calendar date belong together (YYYY-MM-DD - Uncategorized). Refuse to keep individual.",
         "default_enabled": True,
@@ -1946,8 +1953,10 @@ DEFAULT_GROUPING_RULES = [
 _RULE_LABELS = {
     "existing_proximity": "Existing Moment Proximity",
     "photos_moment": "Apple Photos Moment Title",
+    "photos_gps_guard": "Photos GPS & Time Guard",
     "time_gps_session": "Time & GPS Session",
     "same_date": "Same-Date Grouping",
+    "custom_split": "Manual Event Split",
     "ungrouped": "Ungrouped (Date Rule Refused)",
     "refused_cluster": "Individual (Grouping Refused)",
 }
@@ -1971,11 +1980,22 @@ def _ensure_grouping_rule_tables(cur) -> None:
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mode_m_asset_splits (
+            asset_id TEXT PRIMARY KEY,
+            target_group TEXT NOT NULL,
+            source_group TEXT,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
 
 
-def _load_grouping_rules_state(cur) -> tuple[dict[str, bool], set[str]]:
+def _load_grouping_rules_state(cur) -> tuple[dict[str, bool], set[str], dict[str, tuple[str, Optional[str]]]]:
     rules_map = {r["id"]: bool(r["default_enabled"]) for r in DEFAULT_GROUPING_RULES}
     refused: set[str] = set()
+    asset_splits: dict[str, tuple[str, Optional[str]]] = {}
     try:
         has_rules = cur.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mode_m_grouping_rules' LIMIT 1"
@@ -1991,9 +2011,18 @@ def _load_grouping_rules_state(cur) -> tuple[dict[str, bool], set[str]]:
             for (ck,) in cur.execute("SELECT cluster_key FROM mode_m_refused_clusters").fetchall():
                 if ck:
                     refused.add(ck)
+        has_splits = cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mode_m_asset_splits' LIMIT 1"
+        ).fetchone()
+        if has_splits:
+            for aid, tgt, src in cur.execute(
+                "SELECT asset_id, target_group, source_group FROM mode_m_asset_splits"
+            ).fetchall():
+                if aid and tgt:
+                    asset_splits[aid] = (tgt, src)
     except Exception:
         pass
-    return rules_map, refused
+    return rules_map, refused, asset_splits
 
 
 def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str]) -> dict:
@@ -2112,9 +2141,47 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 assigned_with_gps.append((m_alb, m_dt, m_lat, m_lon))
             assigned_all.append((m_alb, m_dt))
 
-    rules_map, refused_clusters = _load_grouping_rules_state(cur)
+    rules_map, refused_clusters, asset_splits = _load_grouping_rules_state(cur)
     grouped_moments = {}
     uncat_items = []
+    guard_split_items = []
+
+    # Pre-index GPS anchors per Apple Photos Moment Title so photos_gps_guard can detect
+    # mixed same-day events (e.g., morning GPS-less Ski photos lumped into afternoon Beach Moment).
+    moment_gps_points: dict[str, list[tuple[Optional[datetime], float, float]]] = {}
+    row_pre_meta: dict[str, tuple[str, str, Optional[str], Optional[str], Optional[datetime], bool]] = {}
+    for row_tuple in unassigned_rows:
+        aid = row_tuple[0]
+        dt_utc_str = row_tuple[4]
+        lat, lon = row_tuple[6], row_tuple[7]
+        captured_str = _utc_to_local_str(dt_utc_str)
+        captured_date = captured_str[:10] if captured_str != "—" else ((dt_utc_str or "")[:10] or row_tuple[3])
+        m_title, m_subtitle = moment_titles.get(aid, (None, None))
+        moment_parts = []
+        if m_title:
+            moment_parts.append(m_title.replace("\xa0", " ").strip())
+        if m_subtitle:
+            moment_parts.append(m_subtitle.replace("\xa0", " ").strip())
+        suggested_new = f"{captured_date} - {' - '.join(moment_parts)}" if moment_parts else None
+        raw_title = " - ".join(moment_parts) if moment_parts else None
+        dt_target = _parse_utc_dt(dt_utc_str)
+        has_gps = lat is not None and lon is not None and lat != -180.0 and lon != -180.0
+        row_pre_meta[aid] = (captured_str, captured_date, suggested_new, raw_title, dt_target, has_gps)
+        if suggested_new and has_gps and aid not in asset_splits:
+            moment_gps_points.setdefault(suggested_new, []).append((dt_target, float(lat), float(lon)))
+
+    # Pick primary dense GPS sub-cluster for each suggested_new (in case GPS itself spans >5 km)
+    moment_primary_anchors: dict[str, list[tuple[Optional[datetime], float, float]]] = {}
+    for s_key, pts in moment_gps_points.items():
+        best_cluster = pts
+        if len(pts) > 1:
+            best_count = -1
+            for _dt, p_lat, p_lon in pts:
+                near = [p for p in pts if _haversine_meters(p_lat, p_lon, p[1], p[2]) <= 5000.0]
+                if len(near) > best_count:
+                    best_count = len(near)
+                    best_cluster = near
+        moment_primary_anchors[s_key] = best_cluster
 
     def _add_asset_to_group(
         folder_key: str,
@@ -2192,17 +2259,60 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             aid, fn, score, month, dt_utc_str, imp_id, lat, lon,
             zkind, dur_sec, width, height, fps, size_mb, size_bytes, cam_model, owner_name, dup_state
         ) = row_tuple
-        captured_str = _utc_to_local_str(dt_utc_str)
-        captured_date = captured_str[:10] if captured_str != "—" else ((dt_utc_str or "")[:10] or month)
+        captured_str, captured_date, suggested_new, raw_title, dt_target, has_gps = row_pre_meta[aid]
 
-        m_title, m_subtitle = moment_titles.get(aid, (None, None))
-        moment_parts = []
-        if m_title:
-            moment_parts.append(m_title.replace("\xa0", " ").strip())
-        if m_subtitle:
-            moment_parts.append(m_subtitle.replace("\xa0", " ").strip())
-        suggested_new = f"{captured_date} - {' - '.join(moment_parts)}" if moment_parts else None
+        # Explicit user asset-level split/removal overrides take priority over automatic rules
+        if aid in asset_splits:
+            tgt_group, src_group = asset_splits[aid]
+            if tgt_group == "__INDIVIDUAL__":
+                ind_key = f"{captured_str} · {fn or aid[:8]}"
+                if ind_key in grouped_moments:
+                    ind_key = f"{ind_key} [{aid[:6]}]"
+                _add_asset_to_group(
+                    ind_key,
+                    "Individual (Grouping Refused)",
+                    "refused_cluster",
+                    f"Removed from '{src_group or 'group'}'",
+                    row_tuple,
+                    captured_str,
+                    suggested_new,
+                    None,
+                    None,
+                    refused_from_group=src_group,
+                )
+            else:
+                _add_asset_to_group(
+                    tgt_group,
+                    "Existing Moment Album" if tgt_group in valid_moment_albums else "Proposed New Moment",
+                    "custom_split",
+                    f"Manually split event{f' (from {src_group})' if src_group else ''}",
+                    row_tuple,
+                    captured_str,
+                    suggested_new,
+                    None,
+                    None,
+                    refused_from_group=src_group,
+                )
+            continue
+
+        # Check Photos Moment GPS & Time Guard when Apple Photos Moment Title applies
+        guard_reason = None
         effective_suggested = suggested_new if rules_map.get("photos_moment", True) else None
+        if effective_suggested and rules_map.get("photos_gps_guard", True):
+            anchor_pts = moment_primary_anchors.get(effective_suggested, [])
+            if anchor_pts:
+                if has_gps:
+                    min_dist_m = min(_haversine_meters(float(lat), float(lon), a_lat, a_lon) for _dt, a_lat, a_lon in anchor_pts)
+                    if min_dist_m > 5000.0:
+                        guard_reason = f"GPS differs {min_dist_m / 1000.0:.1f} km from '{raw_title}'"
+                        effective_suggested = None
+                elif dt_target is not None:
+                    dt_pts = [p[0] for p in anchor_pts if p[0] is not None]
+                    if dt_pts:
+                        min_gap_sec = min(abs((dt_target - a_dt).total_seconds()) for a_dt in dt_pts)
+                        if min_gap_sec > 2 * 3600:
+                            guard_reason = f"Missing GPS & {min_gap_sec / 3600.0:.1f}h apart from GPS-verified '{raw_title}'"
+                            effective_suggested = None
 
         dt_target = _parse_utc_dt(dt_utc_str)
         best_album_name, best_reason = (None, None)
@@ -2250,6 +2360,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 best_album_name,
                 best_reason,
             )
+        elif guard_reason:
+            guard_split_items.append((row_tuple, captured_str, captured_date, dt_target, suggested_new, raw_title, guard_reason, best_album_name, best_reason))
         elif best_album_name:
             _add_asset_to_group(
                 best_album_name,
@@ -2264,6 +2376,44 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             )
         else:
             uncat_items.append((row_tuple, captured_str, captured_date, dt_target, suggested_new, best_album_name, best_reason))
+
+    # Group guard-split assets into contiguous <=2h sub-events so separated morning/evening
+    # shots never stay lumped into the GPS-verified location Moment or merge with unrelated times.
+    if guard_split_items:
+        by_src: dict[tuple[str, str], list[tuple]] = {}
+        for item in sorted(guard_split_items, key=lambda x: (x[2], x[3] or datetime.max, x[0][1] or "")):
+            by_src.setdefault((item[2], item[5] or "Event"), []).append(item)
+        for (cdate, rtitle), items in by_src.items():
+            sub_blocks: list[list[tuple]] = []
+            cur_block: list[tuple] = []
+            prev_bdt = None
+            for item in items:
+                bdt = item[3]
+                if cur_block and (bdt is None or prev_bdt is None or abs((bdt - prev_bdt).total_seconds()) > 2 * 3600):
+                    sub_blocks.append(cur_block)
+                    cur_block = []
+                cur_block.append(item)
+                prev_bdt = bdt
+            if cur_block:
+                sub_blocks.append(cur_block)
+
+            multi_block = len(sub_blocks) > 1
+            for blk in sub_blocks:
+                hhmm = blk[0][1][11:16] if len(blk[0][1]) >= 16 else ""
+                time_tag = f" {hhmm}" if (multi_block and hhmm) else ""
+                blk_folder = f"{cdate}{time_tag} - Separate Event (from {rtitle})"
+                for r_t, cs, _cd, _dt_t, sn, _rt, gr, ba, br in blk:
+                    _add_asset_to_group(
+                        blk_folder,
+                        "Separate Event (GPS/Time Guard)",
+                        "photos_gps_guard",
+                        gr,
+                        r_t,
+                        cs,
+                        sn,
+                        ba,
+                        br,
+                    )
 
     # Rule 3 & Rule 4 for remaining uncategorized assets
     session_claimed_aids: set[str] = set()
@@ -2411,6 +2561,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         unassigned_clusters.append(grp)
     unassigned_clusters.sort(key=lambda g: (-len(g["assets"]), -g["max_score"], g["folder"]))
 
+    custom_split_groups = sorted({tgt for tgt, _src in asset_splits.values() if tgt and tgt != "__INDIVIDUAL__"})
     grouping_rules_payload = {
         "rules": [
             {
@@ -2425,6 +2576,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             for r in DEFAULT_GROUPING_RULES
         ],
         "refused_clusters": sorted(refused_clusters),
+        "custom_split_groups": custom_split_groups,
         "ungrouped_count": rule_asset_counts.get("ungrouped", 0) + rule_asset_counts.get("refused_cluster", 0),
     }
 
@@ -3260,12 +3412,17 @@ class GroupingRulesUpdateRequest(BaseModel):
     rules: Optional[dict[str, bool]] = None
     refuse_cluster: Optional[str] = None
     restore_cluster: Optional[str] = None
+    split_asset_ids: Optional[list[str]] = None
+    split_target_group: Optional[str] = None
+    split_source_group: Optional[str] = None
+    clear_split_group: Optional[str] = None
+    clear_split_asset_ids: Optional[list[str]] = None
     reset_defaults: bool = False
 
 
 @router.post("/mode-m/grouping-rules")
 def update_mode_m_grouping_rules(req: GroupingRulesUpdateRequest):
-    """Persist enabled/refused grouping rules and refused cluster overrides in media_organizer.db."""
+    """Persist enabled/refused grouping rules, refused clusters, and per-asset event splits in media_organizer.db."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"ok": False, "error": "Media database unavailable"}
 
@@ -3280,6 +3437,7 @@ def update_mode_m_grouping_rules(req: GroupingRulesUpdateRequest):
             if req.reset_defaults:
                 cur.execute("DELETE FROM mode_m_grouping_rules")
                 cur.execute("DELETE FROM mode_m_refused_clusters")
+                cur.execute("DELETE FROM mode_m_asset_splits")
             else:
                 if req.rules:
                     for rid, en in req.rules.items():
@@ -3308,13 +3466,46 @@ def update_mode_m_grouping_rules(req: GroupingRulesUpdateRequest):
                     ck = req.restore_cluster.strip()
                     if ck:
                         cur.execute("DELETE FROM mode_m_refused_clusters WHERE cluster_key = ?", (ck,))
+                        cur.execute(
+                            "DELETE FROM mode_m_asset_splits WHERE source_group = ? AND target_group = '__INDIVIDUAL__'",
+                            (ck,),
+                        )
+                if req.split_asset_ids and req.split_target_group:
+                    tgt = req.split_target_group.strip()
+                    src = (req.split_source_group or "").strip() or None
+                    if tgt:
+                        for raw_aid in req.split_asset_ids:
+                            aid = (raw_aid or "").strip()
+                            if aid:
+                                cur.execute(
+                                    """
+                                    INSERT INTO mode_m_asset_splits (asset_id, target_group, source_group, updated_at_utc)
+                                    VALUES (?, ?, ?, datetime('now'))
+                                    ON CONFLICT(asset_id) DO UPDATE SET
+                                        target_group = excluded.target_group,
+                                        source_group = COALESCE(excluded.source_group, mode_m_asset_splits.source_group),
+                                        updated_at_utc = excluded.updated_at_utc
+                                    """,
+                                    (aid, tgt, src),
+                                )
+                if req.clear_split_group:
+                    cg = req.clear_split_group.strip()
+                    if cg:
+                        cur.execute("DELETE FROM mode_m_asset_splits WHERE target_group = ?", (cg,))
+                if req.clear_split_asset_ids:
+                    clean_clr = [(a or "").strip() for a in req.clear_split_asset_ids if (a or "").strip()]
+                    if clean_clr:
+                        ph = ",".join("?" for _ in clean_clr)
+                        cur.execute(f"DELETE FROM mode_m_asset_splits WHERE asset_id IN ({ph})", clean_clr)
 
             conn.commit()
-            rules_map, refused = _load_grouping_rules_state(cur)
+            rules_map, refused, splits = _load_grouping_rules_state(cur)
+            custom_split_groups = sorted({tgt for tgt, _src in splits.values() if tgt and tgt != "__INDIVIDUAL__"})
             return {
                 "ok": True,
                 "rules": rules_map,
                 "refused_clusters": sorted(refused),
+                "custom_split_groups": custom_split_groups,
             }
         finally:
             conn.close()

@@ -186,6 +186,7 @@ export interface GroupingRuleItem {
 export interface GroupingRulesState {
   rules: GroupingRuleItem[];
   refused_clusters: string[];
+  custom_split_groups?: string[];
   ungrouped_count?: number;
 }
 

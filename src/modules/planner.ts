@@ -29,6 +29,7 @@ let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
 const expandedUnassignedFolders = new Set<string>();
 const clusterPreviewAssetIds = new Map<string, string[]>();
+const clusterAssetSelection = new Map<string, Set<string>>();
 let dedupPreviewData: ModeMDedupPreviewResponse | null = null;
 const selectedDedupAssetIds = new Set<string>();
 let isRunningDedupPreview = false;
@@ -946,9 +947,16 @@ function renderUnassignedClustersList(): void {
           })
           .join('') + extraThumbHtml;
 
+      const selectedInCluster = clusterAssetSelection.get(cluster.folder) || new Set<string>();
+      const dateMatch = (cluster.folder || '').match(/^(\d{4}-\d{2}-\d{2})/);
+      const defaultSplitPlaceholder = dateMatch
+        ? `${dateMatch[1]} - New Event Name`
+        : 'New Moment / Event Name';
+
       const rowsHtml = assets
         .map((a, aIdx) => {
           const hasUuid = Boolean(a.asset_id);
+          const isRowChecked = hasUuid && selectedInCluster.has(a.asset_id);
           const isVideo = a.media_type === 'video';
           const ext = (a.original_filename.split('.').pop() || '').toUpperCase();
           const thumbUrl = hasUuid ? `/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}` : '';
@@ -986,8 +994,16 @@ function renderUnassignedClustersList(): void {
             ? `<span class="badge badge-xs badge-amber" style="font-size: 0.58rem; margin-left: 0.3rem;" title="Flagged by Media-Intake Dedup — click 'Intake Dedup &amp; Ignore' to move to Ignore album">♻️ Dup Copy</span>`
             : '';
 
+          const checkboxCell =
+            count > 1 && hasUuid
+              ? `<td style="width: 28px;"><input type="checkbox" class="cluster-asset-checkbox" data-cluster-folder="${escapeHtml(cluster.folder)}" data-asset-id="${escapeHtml(a.asset_id)}" ${isRowChecked ? 'checked' : ''} /></td>`
+              : count > 1
+                ? `<td style="width: 28px;"></td>`
+                : '';
+
           return `
         <tr>
+          ${checkboxCell}
           <td class="text-muted font-mono" style="width: 28px;">${aIdx + 1}</td>
           <td style="width: 56px;">${thumbCell}</td>
           <td>
@@ -1008,6 +1024,54 @@ function renderUnassignedClustersList(): void {
       `;
         })
         .join('');
+
+      const splitToolbarHtml =
+        count > 1
+          ? `
+        <div class="cluster-split-toolbar" data-split-toolbar="${escapeHtml(cluster.folder)}">
+          <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+            <span class="badge badge-xs ${selectedInCluster.size > 0 ? 'badge-purple' : 'badge-outline'} font-mono cluster-selected-count">${selectedInCluster.size} selected</span>
+            <input
+              type="text"
+              class="form-control form-control-sm cluster-split-name-input"
+              placeholder="${escapeHtml(defaultSplitPlaceholder)}"
+              value="${dateMatch ? escapeHtml(`${dateMatch[1]} - `) : ''}"
+              style="width: 250px; padding: 0.2rem 0.5rem; font-size: 0.72rem;"
+            />
+          </div>
+          <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+            <button
+              type="button"
+              class="btn btn-xs btn-outline btn-split-selected-assets"
+              data-split-source="${escapeHtml(cluster.folder)}"
+              title="Move checked assets into a separate Proposed Moment cluster with the name above"
+              ${selectedInCluster.size === 0 ? 'disabled' : ''}
+            >
+              ✂️ Split to Event
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs btn-outline btn-remove-selected-assets"
+              data-split-source="${escapeHtml(cluster.folder)}"
+              title="Refuse grouping for checked assets and break them out individually"
+              style="color: #fca5a5; border-color: rgba(239,68,68,0.35);"
+              ${selectedInCluster.size === 0 ? 'disabled' : ''}
+            >
+              🚫 Remove from Group
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs btn-purple btn-create-moment-selected"
+              data-split-source="${escapeHtml(cluster.folder)}"
+              title="Create an Apple Photos Moment directly from only the checked assets"
+              ${selectedInCluster.size === 0 ? 'disabled' : ''}
+            >
+              ✨ Create Moment (Selected)
+            </button>
+          </div>
+        </div>
+      `
+          : '';
 
       return `
       <div class="unassigned-cluster-card ${isExpanded ? 'expanded' : ''}" data-cluster-folder="${escapeHtml(cluster.folder)}">
@@ -1051,6 +1115,18 @@ function renderUnassignedClustersList(): void {
               ${thumbStripHtml}
             </div>
             ${
+              cluster.rule_id === 'custom_split'
+                ? `<button
+              class="btn btn-xs btn-outline btn-clear-split-group"
+              data-clear-split-group="${escapeHtml(cluster.folder)}"
+              title="Undo manual event split and return assets to automatic grouping"
+              style="white-space: nowrap; flex-shrink: 0;"
+            >
+              ↩️ Undo Split
+            </button>`
+                : ''
+            }
+            ${
               count > 1
                 ? `<button
               class="btn btn-xs btn-outline btn-refuse-cluster-group"
@@ -1082,9 +1158,11 @@ function renderUnassignedClustersList(): void {
           </div>
         </div>
         <div class="unassigned-cluster-body">
+          ${splitToolbarHtml}
           <table class="cleanup-table planner-compact-table">
             <thead>
               <tr>
+                ${count > 1 ? `<th style="width: 28px;"><input type="checkbox" class="cluster-select-all-checkbox" data-cluster-folder="${escapeHtml(cluster.folder)}" title="Select all assets in this cluster" /></th>` : ''}
                 <th>#</th>
                 <th>Preview</th>
                 <th>Filename &amp; Device</th>
@@ -1107,7 +1185,7 @@ function renderUnassignedClustersList(): void {
 
   listEl.querySelectorAll<HTMLElement>('[data-toggle-cluster]').forEach(headerEl => {
     headerEl.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).closest('[data-preview-asset-id], .btn-create-moment-from-cluster, .btn-refuse-cluster-group, .btn-restore-cluster-group')) return;
+      if ((e.target as HTMLElement).closest('[data-preview-asset-id], .btn-create-moment-from-cluster, .btn-refuse-cluster-group, .btn-restore-cluster-group, .btn-clear-split-group')) return;
       const folder = headerEl.dataset.toggleCluster;
       if (!folder) return;
       if (expandedUnassignedFolders.has(folder)) {
@@ -1117,6 +1195,115 @@ function renderUnassignedClustersList(): void {
       }
       const card = headerEl.closest('.unassigned-cluster-card');
       card?.classList.toggle('expanded', expandedUnassignedFolders.has(folder));
+    });
+  });
+
+  const syncClusterToolbarUI = (cardEl: Element | null, folder: string) => {
+    if (!cardEl) return;
+    const sel = clusterAssetSelection.get(folder) || new Set<string>();
+    const countBadge = cardEl.querySelector('.cluster-selected-count');
+    if (countBadge) {
+      countBadge.textContent = `${sel.size} selected`;
+      countBadge.className = `badge badge-xs ${sel.size > 0 ? 'badge-purple' : 'badge-outline'} font-mono cluster-selected-count`;
+    }
+    cardEl.querySelectorAll<HTMLButtonElement>('.btn-split-selected-assets, .btn-remove-selected-assets, .btn-create-moment-selected').forEach(b => {
+      b.disabled = sel.size === 0;
+    });
+  };
+
+  listEl.querySelectorAll<HTMLInputElement>('.cluster-asset-checkbox').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const folder = cb.dataset.clusterFolder || '';
+      const aid = cb.dataset.assetId || '';
+      if (!folder || !aid) return;
+      if (!clusterAssetSelection.has(folder)) clusterAssetSelection.set(folder, new Set());
+      const sel = clusterAssetSelection.get(folder)!;
+      if (cb.checked) sel.add(aid);
+      else sel.delete(aid);
+      syncClusterToolbarUI(cb.closest('.unassigned-cluster-card'), folder);
+    });
+  });
+
+  listEl.querySelectorAll<HTMLInputElement>('.cluster-select-all-checkbox').forEach(masterCb => {
+    masterCb.addEventListener('change', () => {
+      const folder = masterCb.dataset.clusterFolder || '';
+      const cardEl = masterCb.closest('.unassigned-cluster-card');
+      if (!folder || !cardEl) return;
+      const sel = new Set<string>();
+      cardEl.querySelectorAll<HTMLInputElement>('.cluster-asset-checkbox').forEach(cb => {
+        cb.checked = masterCb.checked;
+        if (masterCb.checked && cb.dataset.assetId) sel.add(cb.dataset.assetId);
+      });
+      clusterAssetSelection.set(folder, sel);
+      syncClusterToolbarUI(cardEl, folder);
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-split-selected-assets').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const folder = btn.dataset.splitSource || '';
+      const sel = Array.from(clusterAssetSelection.get(folder) || []);
+      if (!folder || !sel.length) return;
+      const toolbar = btn.closest('.cluster-split-toolbar');
+      const inputEl = toolbar?.querySelector<HTMLInputElement>('.cluster-split-name-input');
+      const rawName = (inputEl?.value || '').trim();
+      const targetGroup = rawName && !rawName.endsWith(' -')
+        ? rawName
+        : `${rawName.replace(/\s*-\s*$/, '') || 'Separate Event'} - Split Event`;
+      clusterAssetSelection.delete(folder);
+      expandedUnassignedFolders.add(targetGroup);
+      void updateGroupingRules({
+        split_asset_ids: sel,
+        split_target_group: targetGroup,
+        split_source_group: folder
+      });
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-remove-selected-assets').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const folder = btn.dataset.splitSource || '';
+      const sel = Array.from(clusterAssetSelection.get(folder) || []);
+      if (!folder || !sel.length) return;
+      clusterAssetSelection.delete(folder);
+      void updateGroupingRules({
+        split_asset_ids: sel,
+        split_target_group: '__INDIVIDUAL__',
+        split_source_group: folder
+      });
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-create-moment-selected').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const folder = btn.dataset.splitSource || '';
+      const selSet = clusterAssetSelection.get(folder);
+      const cluster = (plannerOverviewData?.mode_m?.unassigned_clusters || []).find(c => c.folder === folder);
+      if (!cluster || !selSet || !selSet.size) return;
+      const selectedAssets = (cluster.assets || []).filter(a => a.asset_id && selSet.has(a.asset_id));
+      const allIds = selectedAssets.map(a => a.asset_id);
+      const uniqueIds = selectedAssets.filter(a => !a.is_duplicate_copy).map(a => a.asset_id);
+      const dupCount = selectedAssets.filter(a => a.is_duplicate_copy).length;
+      const toolbar = btn.closest('.cluster-split-toolbar');
+      const typedName = (toolbar?.querySelector<HTMLInputElement>('.cluster-split-name-input')?.value || '').trim();
+      const prefillName = typedName && !typedName.endsWith(' -') ? typedName : '';
+      openCreateMomentModal({
+        prefillName,
+        sourceClusterFolder: folder,
+        uniqueAssetIds: uniqueIds,
+        allAssetIds: allIds,
+        duplicateCount: dupCount
+      });
+    });
+  });
+
+  listEl.querySelectorAll<HTMLElement>('.btn-clear-split-group').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const cg = btn.dataset.clearSplitGroup;
+      if (cg) {
+        void updateGroupingRules({ clear_split_group: cg });
+      }
     });
   });
 
@@ -1978,13 +2165,16 @@ function renderGroupingRulesPanel(): void {
 
   const rules = gr.rules || [];
   const refusedClusters = gr.refused_clusters || [];
+  const customSplitGroups = gr.custom_split_groups || [];
   const activeCount = rules.filter(r => r.enabled).length;
   const refusedRuleCount = rules.length - activeCount;
 
   if (summaryBadge) {
     const parts = [`${activeCount}/${rules.length} active`];
     if (refusedRuleCount > 0) parts.push(`${refusedRuleCount} rule refused`);
-    if (refusedClusters.length > 0) parts.push(`${refusedClusters.length} group split`);
+    if (refusedClusters.length + customSplitGroups.length > 0) {
+      parts.push(`${refusedClusters.length + customSplitGroups.length} group override`);
+    }
     summaryBadge.textContent = parts.join(' · ');
   }
 
@@ -1992,7 +2182,9 @@ function renderGroupingRulesPanel(): void {
     rules.some(r => {
       const def = r.id === 'time_gps_session' ? false : true;
       return r.enabled !== def;
-    }) || refusedClusters.length > 0;
+    }) ||
+    refusedClusters.length > 0 ||
+    customSplitGroups.length > 0;
   if (resetBtn) {
     resetBtn.style.display = hasNonDefault ? 'inline-flex' : 'none';
   }
@@ -2043,23 +2235,35 @@ function renderGroupingRulesPanel(): void {
   });
 
   if (refusedBar) {
-    if (!refusedClusters.length) {
+    if (!refusedClusters.length && !customSplitGroups.length) {
       refusedBar.style.display = 'none';
       refusedBar.innerHTML = '';
     } else {
       refusedBar.style.display = 'flex';
+      const refusedHtml = refusedClusters
+        .map(
+          ck =>
+            `<button type="button" class="grouping-refused-chip" data-restore-refused="${escapeHtml(ck)}" title="Click to restore grouping for ${escapeHtml(ck)}">🚫 ${escapeHtml(ck)} ✕</button>`
+        )
+        .join('');
+      const splitHtml = customSplitGroups
+        .map(
+          sg =>
+            `<button type="button" class="grouping-refused-chip grouping-split-chip" data-clear-split="${escapeHtml(sg)}" title="Click to undo split event '${escapeHtml(sg)}'">✂️ ${escapeHtml(sg)} ✕</button>`
+        )
+        .join('');
       refusedBar.innerHTML =
-        `<span class="text-muted">Refused Cluster Groups (split to individual):</span>` +
-        refusedClusters
-          .map(
-            ck =>
-              `<button type="button" class="grouping-refused-chip" data-restore-refused="${escapeHtml(ck)}" title="Click to restore grouping for ${escapeHtml(ck)}">🚫 ${escapeHtml(ck)} ✕</button>`
-          )
-          .join('');
+        `<span class="text-muted">Group Overrides:</span>` + refusedHtml + splitHtml;
       refusedBar.querySelectorAll<HTMLElement>('[data-restore-refused]').forEach(chip => {
         chip.addEventListener('click', () => {
           const ck = chip.dataset.restoreRefused;
           if (ck) void updateGroupingRules({ restore_cluster: ck });
+        });
+      });
+      refusedBar.querySelectorAll<HTMLElement>('[data-clear-split]').forEach(chip => {
+        chip.addEventListener('click', () => {
+          const sg = chip.dataset.clearSplit;
+          if (sg) void updateGroupingRules({ clear_split_group: sg });
         });
       });
     }
@@ -2070,6 +2274,11 @@ async function updateGroupingRules(payload: {
   rules?: Record<string, boolean>;
   refuse_cluster?: string;
   restore_cluster?: string;
+  split_asset_ids?: string[];
+  split_target_group?: string;
+  split_source_group?: string;
+  clear_split_group?: string;
+  clear_split_asset_ids?: string[];
   reset_defaults?: boolean;
 }): Promise<void> {
   if (isUpdatingGroupingRules) return;
