@@ -34,6 +34,7 @@ let previewModalAssetId: string | null = null;
 let previewGroupAssetIds: string[] = [];
 let previewGroupIndex = -1;
 let previewGroupLabel: string | null = null;
+let previewSortMode: 'timestamp' | 'score' = 'timestamp';
 let isFetchingCleanupDevices = false;
 let isFetchingCleanupCandidates = false;
 
@@ -240,6 +241,15 @@ export function setupMediaCleanup(): void {
 
   document.getElementById('btn-preview-next')?.addEventListener('click', () => {
     navigateCleanupPreview(1);
+  });
+
+  document.querySelectorAll<HTMLElement>('.cleanup-preview-sort-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const nextSort = btn.dataset.previewSort === 'score' ? 'score' : 'timestamp';
+      if (nextSort === previewSortMode) return;
+      previewSortMode = nextSort;
+      applyPreviewSortOrder();
+    });
   });
 
   document.getElementById('cleanup-preview-filmstrip')?.addEventListener(
@@ -1238,7 +1248,13 @@ function renderPreviewFilmstrip(): void {
       const captureTs = (meta?.capture_timestamp && meta.capture_timestamp !== '—' ? meta.capture_timestamp : meta?.date_created_utc && meta.date_created_utc !== '—' ? meta.date_created_utc : '').trim();
       const shortTs = captureTs ? captureTs.replace('T', ' ').slice(0, 19) : '—';
       const isDupCopy = Boolean(meta?.is_duplicate_copy);
-      const scoreLabel = typeof meta?.score_normalized === 'number' ? ` · ${meta.score_normalized.toFixed(4)}` : '';
+      const hasScore = typeof meta?.score_normalized === 'number';
+      const scoreVal = hasScore ? meta!.score_normalized.toFixed(4) : '';
+      const scoreLabel = hasScore ? ` · ${scoreVal}` : '';
+      const subLine =
+        previewSortMode === 'score' && hasScore
+          ? `★ ${scoreVal}${shortTs !== '—' ? ` · ${shortTs.slice(5, 16)}` : ''}`
+          : shortTs;
       const tooltipParts = [`#${idx + 1} ${filename}`, captureTs, scoreLabel, isDupCopy ? '· ♻️ Photos Dup Copy' : ''].filter(Boolean).join(' ');
       return `
         <button type="button" class="cleanup-preview-thumb-item${idx === previewGroupIndex ? ' active' : ''}${isDupCopy ? ' is-dup-copy' : ''}" data-preview-index="${idx}" title="${escapeHtml(tooltipParts)}">
@@ -1248,7 +1264,7 @@ function renderPreviewFilmstrip(): void {
             ${isVideo ? '<span class="cleanup-preview-thumb-play">▶</span>' : ''}
           </div>
           <span class="cleanup-preview-thumb-caption">${escapeHtml(filename)}</span>
-          <span class="cleanup-preview-thumb-time">${escapeHtml(shortTs)}</span>
+          <span class="cleanup-preview-thumb-time">${escapeHtml(subLine)}</span>
         </button>
       `;
     })
@@ -1410,6 +1426,41 @@ function compareAssetsByCaptureDate(aId: string, bId: string): number {
   return aId.localeCompare(bId);
 }
 
+function compareAssetsByScore(aId: string, bId: string): number {
+  const aScore = candidateAssetMeta.get(aId)?.score_normalized;
+  const bScore = candidateAssetMeta.get(bId)?.score_normalized;
+  const aVal = typeof aScore === 'number' ? aScore : -1;
+  const bVal = typeof bScore === 'number' ? bScore : -1;
+  if (bVal !== aVal) {
+    return bVal - aVal;
+  }
+  return compareAssetsByCaptureDate(aId, bId);
+}
+
+function syncPreviewSortButtons(): void {
+  document.querySelectorAll<HTMLElement>('.cleanup-preview-sort-btn').forEach(btn => {
+    btn.classList.toggle('active', (btn.dataset.previewSort || 'timestamp') === previewSortMode);
+  });
+}
+
+function applyPreviewSortOrder(): void {
+  syncPreviewSortButtons();
+  if (!previewGroupAssetIds.length) return;
+
+  const comparator = previewSortMode === 'score' ? compareAssetsByScore : compareAssetsByCaptureDate;
+  previewGroupAssetIds.sort(comparator);
+
+  if (previewModalAssetId) {
+    const newIdx = previewGroupAssetIds.indexOf(previewModalAssetId);
+    previewGroupIndex = newIdx >= 0 ? newIdx : 0;
+  } else {
+    previewGroupIndex = 0;
+  }
+
+  renderPreviewFilmstrip();
+  updatePreviewGroupControls();
+}
+
 export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupContext): void {
   const c = candidateAssetMeta.get(assetId);
   if (!c) return;
@@ -1430,16 +1481,12 @@ export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupC
     validGroupIds.unshift(assetId);
   }
 
-  // Order series chronologically by date captured (oldest -> newest) so duplicates sit adjacent
-  validGroupIds.sort(compareAssetsByCaptureDate);
-
   previewGroupAssetIds = validGroupIds;
-  previewGroupIndex = validGroupIds.indexOf(assetId);
+  previewModalAssetId = assetId;
   previewGroupLabel = context?.groupLabel || null;
 
   renderCleanupPreviewAsset(assetId);
-  renderPreviewFilmstrip();
-  updatePreviewGroupControls();
+  applyPreviewSortOrder();
 
   modal.classList.add('open');
 }

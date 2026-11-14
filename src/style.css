@@ -2350,7 +2350,8 @@ body {
 
 .cleanup-filter-btn,
 .cleanup-type-btn,
-.cleanup-location-btn {
+.cleanup-location-btn,
+.cleanup-preview-sort-btn {
   background: transparent;
   border: none;
   border-radius: var(--radius-sm);
@@ -2363,18 +2364,25 @@ body {
 
 .cleanup-filter-btn:hover,
 .cleanup-type-btn:hover,
-.cleanup-location-btn:hover {
+.cleanup-location-btn:hover,
+.cleanup-preview-sort-btn:hover {
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.06);
 }
 
 .cleanup-filter-btn.active,
 .cleanup-type-btn.active,
-.cleanup-location-btn.active {
+.cleanup-location-btn.active,
+.cleanup-preview-sort-btn.active {
   background: rgba(139, 92, 246, 0.25);
   color: #c4b5fd;
   font-weight: 600;
   border: 1px solid rgba(139, 92, 246, 0.4);
+}
+
+.cleanup-preview-sort-btn {
+  font-size: 0.68rem;
+  padding: 0.14rem 0.42rem;
 }
 
 .cleanup-location-btn[data-location="actually"].active {
