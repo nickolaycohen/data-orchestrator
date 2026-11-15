@@ -909,6 +909,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   } else {
     if (unassignedSummaryBadge) unassignedSummaryBadge.style.display = 'none';
     if (unassignedSection) unassignedSection.style.display = 'none';
+    renderUnassignedClustersStatsBar([], []);
     updateThresholdDriverDisplay([], []);
   }
 
@@ -1099,6 +1100,87 @@ function updateThresholdDriverDisplay(
   }
 }
 
+function renderUnassignedClustersStatsBar(
+  allSorted: UnassignedClusterItem[],
+  visibleSorted: UnassignedClusterItem[]
+): void {
+  const bar = document.getElementById('mode-m-clusters-stats-bar');
+  if (!bar) return;
+  if (!allSorted.length) {
+    bar.style.display = 'none';
+    bar.innerHTML = '';
+    return;
+  }
+
+  const outstanding = allSorted.filter(c => {
+    const cnt = c.assets.length || c.asset_count || 0;
+    return Math.max(0, cnt - (c.duplicate_copy_count || 0)) > 0;
+  });
+  const completeCount = allSorted.length - outstanding.length;
+  const sourceForMonths = outstanding.length > 0 ? outstanding : allSorted;
+
+  const monthStats = new Map<string, { groups: number; assets: number }>();
+  for (const c of sourceForMonths) {
+    const clusterMonths = new Set<string>();
+    for (const a of c.assets || []) {
+      const m = (a.month || '').trim();
+      if (!m) continue;
+      clusterMonths.add(m);
+      const cur = monthStats.get(m) || { groups: 0, assets: 0 };
+      cur.assets += 1;
+      monthStats.set(m, cur);
+    }
+    if (clusterMonths.size === 0 && c.months) {
+      for (const m of c.months.split(',').map(x => x.trim()).filter(Boolean)) {
+        clusterMonths.add(m);
+        if (!monthStats.has(m)) monthStats.set(m, { groups: 0, assets: 0 });
+      }
+    }
+    clusterMonths.forEach(m => {
+      const cur = monthStats.get(m);
+      if (cur) cur.groups += 1;
+    });
+  }
+
+  const sortedMonths = Array.from(monthStats.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  const filterNote = unassignedSearchQuery
+    ? `<span class="badge badge-xs badge-purple font-mono">Showing ${visibleSorted.length}/${allSorted.length}</span>`
+    : '';
+  const completeNote =
+    completeCount > 0 ? `<span class="badge badge-xs badge-green font-mono">+${completeCount} complete</span>` : '';
+
+  const monthChipsHtml = sortedMonths
+    .map(([m, st]) => {
+      const isActive = unassignedSearchQuery === m.toLowerCase();
+      return `<button type="button" class="unassigned-month-chip${isActive ? ' active' : ''}" data-filter-month="${escapeHtml(m)}" title="Month batch ${escapeHtml(m)}: ${st.groups} group(s), ${st.assets} asset(s) — click to filter">${escapeHtml(m)} <span>(${st.groups})</span></button>`;
+    })
+    .join('');
+
+  bar.style.display = 'flex';
+  bar.innerHTML = `
+    <div class="unassigned-stats-summary">
+      <span>📁 <strong class="text-amber">${outstanding.length}</strong> outstanding group${outstanding.length === 1 ? '' : 's'}</span>
+      ${completeNote}
+      ${filterNote}
+      <span>•</span>
+      <span>📅 <strong>${sortedMonths.length}</strong> month batch${sortedMonths.length === 1 ? '' : 'es'}:</span>
+    </div>
+    <div class="unassigned-months-chips">${monthChipsHtml}</div>
+  `;
+
+  bar.querySelectorAll<HTMLButtonElement>('[data-filter-month]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const month = (btn.dataset.filterMonth || '').trim();
+      if (!month) return;
+      const nextQuery = unassignedSearchQuery === month.toLowerCase() ? '' : month;
+      unassignedSearchQuery = nextQuery.toLowerCase();
+      const searchEl = document.getElementById('mode-m-unassigned-search') as HTMLInputElement | null;
+      if (searchEl) searchEl.value = nextQuery;
+      renderUnassignedClustersList();
+    });
+  });
+}
+
 function renderUnassignedClustersList(): void {
   const listEl = document.getElementById('mode-m-unassigned-list');
   if (!listEl) return;
@@ -1107,6 +1189,7 @@ function renderUnassignedClustersList(): void {
 
   if (!rawClusters.length) {
     listEl.innerHTML = '<div class="text-center text-muted" style="padding: 1rem;">No unassigned high-rank asset clusters found.</div>';
+    renderUnassignedClustersStatsBar([], []);
     updateThresholdDriverDisplay([], []);
     return;
   }
@@ -1150,6 +1233,7 @@ function renderUnassignedClustersList(): void {
     });
   }
 
+  renderUnassignedClustersStatsBar(allSorted, sorted);
   updateThresholdDriverDisplay(allSorted, sorted);
 
   if (!sorted.length) {
