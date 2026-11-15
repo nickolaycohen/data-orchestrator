@@ -1985,7 +1985,7 @@ function openCreateMomentModal(opts?: {
     nameInput.value = opts?.prefillName ?? '';
   }
   if (excludeDupsCb) excludeDupsCb.checked = true;
-  if (ignoreDupsCb) ignoreDupsCb.checked = false;
+  if (ignoreDupsCb) ignoreDupsCb.checked = true;
   if (emptyOnlyCb) emptyOnlyCb.checked = false;
   if (statusEl) {
     statusEl.style.display = 'none';
