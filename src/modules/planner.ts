@@ -782,9 +782,11 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
     if (th.aligned) {
       thPill.className = 'badge badge-xs badge-green font-mono';
       thPill.textContent = `🎉 Threshold Aligned (${(th.current || 0.5315).toFixed(4)})`;
+      thPill.title = '';
     } else {
       thPill.className = 'badge badge-xs badge-amber font-mono';
       thPill.textContent = `⚠️ Threshold ${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0).toFixed(4)}`;
+      thPill.title = '';
     }
   }
   if (momPill) {
@@ -846,7 +848,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   if (syncBox) {
     const thText = th.aligned
       ? `<span class="text-green">✅ <strong>Curation Threshold Aligned:</strong> Current <code>${(th.current || 0.5315).toFixed(4)}</code> matches target <code>${(th.historical_min || 0.5315).toFixed(4)}</code>.</span>`
-      : `<span class="text-amber">⚠️ <strong>Threshold Mismatch:</strong> Current <code>${(th.current || 0).toFixed(4)}</code> exceeds target <code>${(th.historical_min || 0).toFixed(4)}</code> — assign Moments to top unassigned assets first.</span>`;
+      : `<span class="text-amber">⚠️ <strong>Threshold Mismatch:</strong> Current <code>${(th.current || 0).toFixed(4)}</code> exceeds target <code>${(th.historical_min || 0).toFixed(4)}</code> — assign Moments to top unassigned assets first.</span><span id="mode-m-threshold-driver-slot"></span>`;
 
     let syncMomentsHtml = '';
     if (needsSync.length > 0) {
@@ -907,6 +909,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   } else {
     if (unassignedSummaryBadge) unassignedSummaryBadge.style.display = 'none';
     if (unassignedSection) unassignedSection.style.display = 'none';
+    updateThresholdDriverDisplay([], []);
   }
 
   // Step 2: Top Actionable Recommendations Table
@@ -967,6 +970,135 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   }
 }
 
+type UnassignedClusterItem = NonNullable<NonNullable<PlannerModeM>['unassigned_clusters']>[number];
+
+function sortNormalizedClusters(clusters: UnassignedClusterItem[]): UnassignedClusterItem[] {
+  const getClusterSortTier = (c: UnassignedClusterItem): number => {
+    const cnt = c.assets.length || c.asset_count || 0;
+    const uniqueCnt = Math.max(0, cnt - (c.duplicate_copy_count || 0));
+    if (uniqueCnt === 0) return 2;
+    if (c.rule_id === 'misdated_duplicate_triage') return 1;
+    return 0;
+  };
+
+  return [...clusters].sort((a, b) => {
+    const tierA = getClusterSortTier(a);
+    const tierB = getClusterSortTier(b);
+    if (tierA !== tierB) return tierA - tierB;
+    const cntA = (a.assets || []).length || a.asset_count || 0;
+    const cntB = (b.assets || []).length || b.asset_count || 0;
+    const uniqueA = Math.max(0, cntA - (a.duplicate_copy_count || 0));
+    const uniqueB = Math.max(0, cntB - (b.duplicate_copy_count || 0));
+    if (unassignedSortMode === 'size') {
+      if (uniqueB !== uniqueA) return uniqueB - uniqueA;
+      if (cntB !== cntA) return cntB - cntA;
+      if (b.max_score !== a.max_score) return b.max_score - a.max_score;
+      return (a.folder || '').localeCompare(b.folder || '');
+    } else if (unassignedSortMode === 'score') {
+      if (b.max_score !== a.max_score) return b.max_score - a.max_score;
+      if (uniqueB !== uniqueA) return uniqueB - uniqueA;
+      if (cntB !== cntA) return cntB - cntA;
+      return (a.folder || '').localeCompare(b.folder || '');
+    } else {
+      return (a.folder || '').localeCompare(b.folder || '');
+    }
+  });
+}
+
+function jumpToUnassignedCluster(folder: string): void {
+  if (!folder) return;
+  if (unassignedSearchQuery) {
+    unassignedSearchQuery = '';
+    const searchEl = document.getElementById('mode-m-unassigned-search') as HTMLInputElement | null;
+    if (searchEl) searchEl.value = '';
+    expandedUnassignedFolders.add(folder);
+    renderUnassignedClustersList();
+  } else {
+    expandedUnassignedFolders.add(folder);
+  }
+  const listEl = document.getElementById('mode-m-unassigned-list');
+  const cards = listEl?.querySelectorAll<HTMLElement>('.unassigned-cluster-card') || [];
+  let targetCard: HTMLElement | null = null;
+  cards.forEach(card => {
+    if (card.dataset.clusterFolder === folder) targetCard = card;
+  });
+  if (targetCard) {
+    const card = targetCard as HTMLElement;
+    card.classList.add('expanded');
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('cluster-highlight');
+    window.setTimeout(() => card.classList.remove('cluster-highlight'), 2200);
+  }
+}
+
+function updateThresholdDriverDisplay(
+  allSorted: UnassignedClusterItem[],
+  visibleSorted: UnassignedClusterItem[]
+): void {
+  const th = plannerOverviewData?.mode_m?.threshold;
+  const thPill = document.getElementById('mode-m-threshold-pill');
+  const driverSlot = document.getElementById('mode-m-threshold-driver-slot');
+  if (!th || th.aligned) {
+    if (driverSlot) driverSlot.innerHTML = '';
+    return;
+  }
+
+  const backendDriver = th.driver || null;
+  const findIn = (arr: UnassignedClusterItem[]) => {
+    if (backendDriver?.asset_id) {
+      const byAidIdx = arr.findIndex(c => (c.assets || []).some(a => a.asset_id === backendDriver.asset_id));
+      if (byAidIdx >= 0) return { idx: byAidIdx + 1, cluster: arr[byAidIdx] };
+    }
+    if (backendDriver?.folder) {
+      const byFolderIdx = arr.findIndex(c => c.folder === backendDriver.folder);
+      if (byFolderIdx >= 0) return { idx: byFolderIdx + 1, cluster: arr[byFolderIdx] };
+    }
+    if (arr.length > 0) {
+      let bestIdx = 0;
+      for (let i = 1; i < arr.length; i++) {
+        if ((arr[i].max_score || 0) > (arr[bestIdx].max_score || 0)) bestIdx = i;
+      }
+      return { idx: bestIdx + 1, cluster: arr[bestIdx] };
+    }
+    return null;
+  };
+
+  const visibleMatch = findIn(visibleSorted);
+  const fullMatch = findIn(allSorted);
+  const resolved = visibleMatch || fullMatch;
+
+  const folderName = resolved?.cluster.folder || backendDriver?.folder || '';
+  const posNum = visibleMatch?.idx ?? fullMatch?.idx ?? backendDriver?.position ?? 0;
+  const isFilteredOut = !visibleMatch && Boolean(unassignedSearchQuery) && Boolean(fullMatch);
+
+  const cnt = resolved
+    ? (resolved.cluster.assets || []).length || resolved.cluster.asset_count || 0
+    : backendDriver?.asset_count || 0;
+  const uniqueCnt = resolved
+    ? Math.max(0, cnt - (resolved.cluster.duplicate_copy_count || 0))
+    : backendDriver?.unique_count || 0;
+  const filenameNote = backendDriver?.filename ? ` (${backendDriver.filename})` : '';
+
+  if (thPill && folderName && posNum > 0) {
+    const shortName = folderName.length > 26 ? `${folderName.slice(0, 24)}…` : folderName;
+    thPill.textContent = `⚠️ Threshold ${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0).toFixed(4)} · #${posNum} ${shortName}`;
+    thPill.title = `Caused by group #${posNum}: ${folderName}${filenameNote} — ${uniqueCnt} unique / ${cnt} asset(s)`;
+  }
+
+  if (driverSlot) {
+    if (!folderName || posNum <= 0) {
+      driverSlot.innerHTML = '';
+      return;
+    }
+    const statusNote = uniqueCnt === 0 ? `0 unique · ${cnt} dup` : `${uniqueCnt} unique`;
+    const filterTag = isFilteredOut ? ' · hidden by filter' : '';
+    driverSlot.innerHTML = `<button type="button" class="threshold-driver-pill" id="btn-jump-threshold-driver" title="Driven by${escapeHtml(filenameNote)} in cluster #${posNum} (${escapeHtml(folderName)}). Click to jump &amp; expand.">📌 #${posNum} ${escapeHtml(folderName)} (${escapeHtml(statusNote)}${escapeHtml(filterTag)})</button>`;
+    document.getElementById('btn-jump-threshold-driver')?.addEventListener('click', () => {
+      jumpToUnassignedCluster(folderName);
+    });
+  }
+}
+
 function renderUnassignedClustersList(): void {
   const listEl = document.getElementById('mode-m-unassigned-list');
   if (!listEl) return;
@@ -975,6 +1107,7 @@ function renderUnassignedClustersList(): void {
 
   if (!rawClusters.length) {
     listEl.innerHTML = '<div class="text-center text-muted" style="padding: 1rem;">No unassigned high-rank asset clusters found.</div>';
+    updateThresholdDriverDisplay([], []);
     return;
   }
 
@@ -998,9 +1131,11 @@ function renderUnassignedClustersList(): void {
     })
     .filter(c => c.assets.length > 0);
 
-  let filtered = normalizedClusters;
+  const allSorted = sortNormalizedClusters(normalizedClusters);
+
+  let sorted = allSorted;
   if (unassignedSearchQuery) {
-    filtered = normalizedClusters.filter(c => {
+    sorted = allSorted.filter(c => {
       if ((c.folder || '').toLowerCase().includes(unassignedSearchQuery)) return true;
       if ((c.group_type || '').toLowerCase().includes(unassignedSearchQuery)) return true;
       if ((c.rule_label || '').toLowerCase().includes(unassignedSearchQuery)) return true;
@@ -1015,36 +1150,7 @@ function renderUnassignedClustersList(): void {
     });
   }
 
-  const getClusterSortTier = (c: (typeof filtered)[number]): number => {
-    const cnt = c.assets.length || c.asset_count || 0;
-    const uniqueCnt = Math.max(0, cnt - (c.duplicate_copy_count || 0));
-    if (uniqueCnt === 0) return 2;
-    if (c.rule_id === 'misdated_duplicate_triage') return 1;
-    return 0;
-  };
-
-  const sorted = [...filtered].sort((a, b) => {
-    const tierA = getClusterSortTier(a);
-    const tierB = getClusterSortTier(b);
-    if (tierA !== tierB) return tierA - tierB;
-    const cntA = (a.assets || []).length || a.asset_count || 0;
-    const cntB = (b.assets || []).length || b.asset_count || 0;
-    const uniqueA = Math.max(0, cntA - (a.duplicate_copy_count || 0));
-    const uniqueB = Math.max(0, cntB - (b.duplicate_copy_count || 0));
-    if (unassignedSortMode === 'size') {
-      if (uniqueB !== uniqueA) return uniqueB - uniqueA;
-      if (cntB !== cntA) return cntB - cntA;
-      if (b.max_score !== a.max_score) return b.max_score - a.max_score;
-      return (a.folder || '').localeCompare(b.folder || '');
-    } else if (unassignedSortMode === 'score') {
-      if (b.max_score !== a.max_score) return b.max_score - a.max_score;
-      if (uniqueB !== uniqueA) return uniqueB - uniqueA;
-      if (cntB !== cntA) return cntB - cntA;
-      return (a.folder || '').localeCompare(b.folder || '');
-    } else {
-      return (a.folder || '').localeCompare(b.folder || '');
-    }
-  });
+  updateThresholdDriverDisplay(allSorted, sorted);
 
   if (!sorted.length) {
     listEl.innerHTML = unassignedSearchQuery

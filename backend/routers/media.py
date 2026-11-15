@@ -2384,9 +2384,11 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         """
     )
     live_curr_th = None
+    live_curr_th_aid = None
     for aid, sc in cur.fetchall():
         if aid not in excluded_aids and sc is not None:
             live_curr_th = float(sc)
+            live_curr_th_aid = aid
             break
 
     hist_min_raw = db_hist_min if db_hist_min > 0 else 0.5315
@@ -2966,6 +2968,27 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         )
     )
 
+    threshold_driver = None
+    if not threshold_aligned and unassigned_clusters:
+        for pos_idx, grp in enumerate(unassigned_clusters, 1):
+            matched_asset = (
+                next((a for a in grp["assets"] if a.get("asset_id") == live_curr_th_aid), None)
+                if live_curr_th_aid
+                else None
+            )
+            if matched_asset:
+                threshold_driver = {
+                    "folder": grp["folder"],
+                    "position": pos_idx,
+                    "asset_id": live_curr_th_aid,
+                    "filename": matched_asset.get("original_filename") or "",
+                    "score": round(live_curr_th, 4) if live_curr_th is not None else curr_thresh,
+                    "unique_count": grp["unique_count"],
+                    "asset_count": grp["asset_count"],
+                    "rule_id": grp.get("rule_id") or "",
+                }
+                break
+
     custom_split_groups = sorted({tgt for tgt, _src in asset_splits.values() if tgt and tgt != "__INDIVIDUAL__"})
     grouping_rules_payload = {
         "rules": [
@@ -3242,6 +3265,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         "current_threshold": curr_thresh,
         "historical_min": hist_min,
         "last_checked_utc": last_th_utc,
+        "threshold_driver": threshold_driver,
         "actionable_recs": actionable_recs,
         "disjoint_recs": disjoint_recs,
         "needs_sync_moments": needs_sync_moments,
@@ -3637,7 +3661,8 @@ def get_planner_overview(mode: str = "all"):
                         "current": curr_thresh,
                         "historical_min": hist_min,
                         "aligned": thresh_aligned,
-                        "last_checked_utc": last_th_utc
+                        "last_checked_utc": last_th_utc,
+                        "driver": mode_m_live.get("threshold_driver"),
                     },
                     "stage_counts": {
                         "M400": moment_stage_counts.get("M400", 0),

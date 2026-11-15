@@ -229,13 +229,26 @@ export interface PlannerModeB {
   } | null;
 }
 
+export interface ThresholdDriverInfo {
+  folder: string;
+  position: number;
+  asset_id: string;
+  filename: string;
+  score: number;
+  unique_count: number;
+  asset_count: number;
+  rule_id: string;
+}
+
 export interface PlannerModeM {
   threshold: {
     historical_min: number;
     current: number;
     aligned: boolean;
-    unassigned_above_count: number;
-    proposed_folders_count: number;
+    unassigned_above_count?: number;
+    proposed_folders_count?: number;
+    last_checked_utc?: string | null;
+    driver?: ThresholdDriverInfo | null;
   };
   stage_counts: {
     M400: number;

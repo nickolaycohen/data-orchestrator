@@ -3211,6 +3211,33 @@ body {
   opacity: 0.96;
 }
 
+.unassigned-cluster-card.cluster-highlight {
+  border-color: rgba(245, 158, 11, 0.9);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.28);
+}
+
+.threshold-driver-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.4rem;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.14);
+  color: #fde68a;
+  font-size: 0.71rem;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.threshold-driver-pill:hover {
+  background: rgba(245, 158, 11, 0.25);
+  border-color: rgba(245, 158, 11, 0.75);
+}
+
 .unassigned-cluster-header {
   display: flex;
   align-items: center;
