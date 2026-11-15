@@ -617,6 +617,7 @@
                     <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                       <span><strong>1️⃣ Curation Threshold &amp; Moments Requiring <code>ToBeCurated</code> Update (Option <code>[1]</code>)</strong></span>
                       <span class="badge badge-xs badge-amber font-mono" id="mode-m-unassigned-summary-badge" style="display: none;">0 Unassigned</span>
+                      <span class="badge badge-xs badge-outline font-mono" id="mode-m-clusters-updated-badge" title="Cluster &amp; threshold update time and background Photos DB sync status">Updated: —</span>
                     </div>
                     <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_create_moments')" title="Run Option [1]: Sync proposed assets to ToBeCurated in Apple Photos">
                       ▶ Run [1] Sync ToBeCurated
@@ -685,6 +686,18 @@
                           🔄 Refresh List
                         </button>
                       </div>
+                    </div>
+
+                    <div id="mode-m-clusters-sync-banner" class="clusters-sync-banner" style="display: none;">
+                      <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                        <div class="spinner-sm"></div>
+                        <span id="mode-m-clusters-sync-banner-text">
+                          Awaiting background Apple Photos DB sync to refresh stats &amp; reorder clusters…
+                        </span>
+                      </div>
+                      <button class="btn btn-xs btn-outline" id="btn-unlock-refresh-clusters-sync" title="Force refresh from local DB now and unlock cluster list">
+                        🔄 Refresh &amp; Unlock
+                      </button>
                     </div>
 
                     <div class="unassigned-clusters-wrap" id="mode-m-unassigned-list">

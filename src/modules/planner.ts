@@ -56,6 +56,119 @@ let createMomentCheckTimer: number | null = null;
 let groupingRulesPanelCollapsed = false;
 let isUpdatingGroupingRules = false;
 
+type ClustersSyncLockMode = 'idle' | 'running' | 'awaiting';
+let clustersSyncLockMode: ClustersSyncLockMode = 'idle';
+let clustersSyncLockMessage = '';
+let clustersLastUpdatedTime = '';
+let latestBgSyncStateInfo: {
+  isRunning: boolean;
+  syncState: string;
+  latestRefreshUtc: string;
+} = { isRunning: false, syncState: 'UNKNOWN', latestRefreshUtc: '' };
+
+function formatClusterDbSyncShort(utcStr: string): string {
+  const s = (utcStr || '').trim();
+  if (!s || s === '—') return '';
+  const m = s.match(/(\d{2}:\d{2})(?::\d{2})?/);
+  return m ? `DB ${m[1]} UTC` : `DB ${s.slice(0, 16)}`;
+}
+
+function renderClustersSyncUI(): void {
+  const sectionEl = document.getElementById('mode-m-unassigned-section');
+  const bannerEl = document.getElementById('mode-m-clusters-sync-banner');
+  const bannerTextEl = document.getElementById('mode-m-clusters-sync-banner-text');
+  const badgeEl = document.getElementById('mode-m-clusters-updated-badge');
+
+  const isLocked = clustersSyncLockMode !== 'idle';
+  sectionEl?.classList.toggle('clusters-awaiting-sync', isLocked);
+  if (bannerEl) {
+    bannerEl.style.display = isLocked ? 'flex' : 'none';
+  }
+  if (bannerTextEl && isLocked) {
+    if (clustersSyncLockMode === 'running') {
+      bannerTextEl.textContent =
+        clustersSyncLockMessage || 'Running Apple Photos update — cluster list paused until sync completes…';
+    } else if (latestBgSyncStateInfo.syncState === 'REFRESHING') {
+      bannerTextEl.textContent =
+        'Background Apple Photos DB sync running — refreshing threshold stats & reordering clusters…';
+    } else {
+      bannerTextEl.textContent =
+        clustersSyncLockMessage ||
+        'Awaiting background Apple Photos DB sync to refresh threshold stats & reorder clusters…';
+    }
+  }
+
+  if (badgeEl) {
+    const updPart = clustersLastUpdatedTime ? `Updated ${clustersLastUpdatedTime}` : 'Updated: —';
+    const dbPart = formatClusterDbSyncShort(latestBgSyncStateInfo.latestRefreshUtc);
+    if (clustersSyncLockMode === 'running') {
+      badgeEl.className = 'badge badge-xs badge-purple pulse font-mono';
+      badgeEl.textContent = '🍎 Updating Apple Photos…';
+    } else if (clustersSyncLockMode === 'awaiting') {
+      if (latestBgSyncStateInfo.syncState === 'REFRESHING') {
+        badgeEl.className = 'badge badge-xs badge-purple pulse font-mono';
+        badgeEl.textContent = '🔄 Syncing Photos DB…';
+      } else {
+        badgeEl.className = 'badge badge-xs badge-amber pulse font-mono';
+        badgeEl.textContent = '⏳ Awaiting DB Sync…';
+      }
+    } else if (latestBgSyncStateInfo.syncState === 'REFRESHING') {
+      badgeEl.className = 'badge badge-xs badge-purple pulse font-mono';
+      badgeEl.textContent = `${updPart} · 🔄 Syncing DB`;
+    } else if (latestBgSyncStateInfo.syncState === 'SYNC_PENDING') {
+      badgeEl.className = 'badge badge-xs badge-amber font-mono';
+      badgeEl.textContent = `${updPart} · ⏳ Sync Pending`;
+    } else {
+      badgeEl.className = 'badge badge-xs badge-outline font-mono';
+      badgeEl.textContent = dbPart ? `${updPart} · ${dbPart}` : updPart;
+    }
+  }
+}
+
+function setClustersSyncLock(mode: ClustersSyncLockMode, message = ''): void {
+  clustersSyncLockMode = mode;
+  clustersSyncLockMessage = message;
+  renderClustersSyncUI();
+}
+
+function finishApplePhotosActionSyncLock(awaitingMessage: string): void {
+  if (latestBgSyncStateInfo.isRunning && latestBgSyncStateInfo.syncState !== 'SOURCE_OFFLINE') {
+    setClustersSyncLock('awaiting', awaitingMessage);
+  } else {
+    setClustersSyncLock('idle');
+  }
+}
+
+export function updateClustersBgSyncStatus(bg: {
+  isRunning?: boolean;
+  syncState?: string;
+  latestRefreshUtc?: string;
+  syncJustCompleted?: boolean;
+}): void {
+  const prevLatest = latestBgSyncStateInfo.latestRefreshUtc;
+  latestBgSyncStateInfo = {
+    isRunning: Boolean(bg.isRunning),
+    syncState: bg.syncState || 'UNKNOWN',
+    latestRefreshUtc: bg.latestRefreshUtc || ''
+  };
+
+  if (clustersSyncLockMode === 'awaiting') {
+    const completedNow =
+      Boolean(bg.syncJustCompleted) ||
+      (Boolean(prevLatest) && Boolean(bg.latestRefreshUtc) && bg.latestRefreshUtc !== prevLatest);
+    if (completedNow) {
+      setClustersSyncLock('idle');
+      void refreshModeMFull();
+      return;
+    }
+    if (!latestBgSyncStateInfo.isRunning || latestBgSyncStateInfo.syncState === 'SOURCE_OFFLINE') {
+      setClustersSyncLock('idle');
+      return;
+    }
+  }
+  renderClustersSyncUI();
+}
+
 function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   activePlannerModeView = view;
 
@@ -212,6 +325,13 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
 
   document.getElementById('btn-refresh-unassigned-clusters')?.addEventListener('click', () => {
     const btn = document.getElementById('btn-refresh-unassigned-clusters') as HTMLButtonElement | null;
+    setClustersSyncLock('idle');
+    void refreshModeMFull(btn);
+  });
+
+  document.getElementById('btn-unlock-refresh-clusters-sync')?.addEventListener('click', () => {
+    const btn = document.getElementById('btn-unlock-refresh-clusters-sync') as HTMLButtonElement | null;
+    setClustersSyncLock('idle');
     void refreshModeMFull(btn);
   });
 
@@ -391,9 +511,14 @@ export async function fetchPlannerOverview(force = false, targetMode?: PlannerMo
         mode_m: data.mode_m ?? plannerOverviewData?.mode_m ?? null,
       };
 
+      const nowStr = new Date().toLocaleTimeString();
       const updatedEl = document.getElementById('planner-overview-updated');
       if (updatedEl) {
-        updatedEl.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+        updatedEl.textContent = `Updated: ${nowStr}`;
+      }
+      if (data.mode_m) {
+        clustersLastUpdatedTime = nowStr;
+        renderClustersSyncUI();
       }
 
       if (data.mode_b) {
@@ -1450,6 +1575,7 @@ async function moveAssetsToIgnoreAlbum(assetIds: string[], triggerBtn?: HTMLButt
     triggerBtn.disabled = true;
     triggerBtn.textContent = `Ignoring ${assetIds.length}...`;
   }
+  setClustersSyncLock('running', `🍎 Moving ${assetIds.length} asset(s) to Apple Photos Ignore album — awaiting sync…`);
   try {
     const res = await fetch('/api/media/mode-m/dedup-apply', {
       method: 'POST',
@@ -1458,12 +1584,17 @@ async function moveAssetsToIgnoreAlbum(assetIds: string[], triggerBtn?: HTMLButt
     });
     const data: ModeMDedupApplyResponse = await res.json();
     if (!res.ok || !data.ok) {
+      setClustersSyncLock('idle');
       window.alert(`Failed moving assets to Ignore album: ${data.error || `HTTP ${res.status}`}`);
       return;
     }
-    await fetchPlannerOverview(true, 'm');
-    if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
+    applyOptimisticClusterRemoval(new Set(assetIds));
+    await refreshModeMFull();
+    finishApplePhotosActionSyncLock(
+      `⏳ Moved ${assetIds.length} asset(s) to Ignore — awaiting background Photos DB sync to refresh threshold & reorder clusters…`
+    );
   } catch (err) {
+    setClustersSyncLock('idle');
     window.alert(`Failed moving assets to Ignore album: ${String(err)}`);
   } finally {
     if (triggerBtn) {
@@ -1755,6 +1886,7 @@ async function applyIntakeDedupIgnore(): Promise<void> {
     btnApply.disabled = true;
     btnApply.textContent = `Adding ${assetIds.length} to Ignore...`;
   }
+  setClustersSyncLock('running', `🍎 Adding ${assetIds.length} duplicate(s) to Apple Photos Ignore album — awaiting sync…`);
   if (statusEl) {
     statusEl.innerHTML = `
       <div class="spinner-sm"></div>
@@ -1771,6 +1903,7 @@ async function applyIntakeDedupIgnore(): Promise<void> {
     const data: ModeMDedupApplyResponse = await res.json();
 
     if (!res.ok || !data.ok) {
+      setClustersSyncLock('idle');
       if (statusEl) {
         statusEl.innerHTML = `<span class="text-red">❌ Failed adding to Ignore album: ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
       }
@@ -1793,8 +1926,10 @@ async function applyIntakeDedupIgnore(): Promise<void> {
     }
     selectedDedupAssetIds.clear();
 
-    await fetchPlannerOverview(true, 'm');
-    if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
+    await refreshModeMFull();
+    finishApplePhotosActionSyncLock(
+      `⏳ Added ${assetIds.length} duplicate(s) to Ignore — awaiting background Photos DB sync to refresh threshold & reorder clusters…`
+    );
 
     if (dedupPreviewData) {
       renderDedupModalResults(dedupPreviewData);
@@ -1809,6 +1944,7 @@ async function applyIntakeDedupIgnore(): Promise<void> {
     }
   } catch (err: any) {
     console.error('Error applying intake dedup ignore:', err);
+    setClustersSyncLock('idle');
     if (statusEl) {
       statusEl.innerHTML = `<span class="text-red">❌ Network error adding to Ignore: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
     }
@@ -2234,6 +2370,7 @@ async function submitCreateMoment(): Promise<void> {
     btnSubmit.disabled = true;
     btnSubmit.textContent = 'Running AppleScript...';
   }
+  setClustersSyncLock('running', `🍎 Updating Apple Photos (${momentName}) — cluster section paused until sync…`);
   if (statusEl) {
     statusEl.style.display = 'flex';
     const ignNote = ignoreAssetIds.length ? ` and moving ${ignoreAssetIds.length} duplicate(s) to Ignore` : '';
@@ -2256,6 +2393,7 @@ async function submitCreateMoment(): Promise<void> {
     const data: CreateMomentResponse = await res.json();
 
     if (!res.ok || !data.ok) {
+      setClustersSyncLock('idle');
       if (statusEl) {
         statusEl.style.display = 'flex';
         statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
@@ -2281,6 +2419,9 @@ async function submitCreateMoment(): Promise<void> {
     }
 
     await refreshModeMFull();
+    finishApplePhotosActionSyncLock(
+      `⏳ Apple Photos updated (${momentName}) — awaiting background Photos DB sync to refresh threshold & reorder clusters…`
+    );
 
     if (statusEl) {
       const ignSummary =
@@ -2300,6 +2441,7 @@ async function submitCreateMoment(): Promise<void> {
     succeeded = true;
   } catch (err: any) {
     console.error('Error creating Moment via AppleScript:', err);
+    setClustersSyncLock('idle');
     if (statusEl) {
       statusEl.style.display = 'flex';
       statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;

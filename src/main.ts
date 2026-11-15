@@ -10,7 +10,11 @@ import {
   hasCleanupDevicesLoaded,
   setupMediaCleanup
 } from './modules/cleanup.ts';
-import { fetchPlannerOverview, setupPlannerOverview } from './modules/planner.ts';
+import {
+  fetchPlannerOverview,
+  setupPlannerOverview,
+  updateClustersBgSyncStatus
+} from './modules/planner.ts';
 import {
   fetchMergeLog,
   setupUtilities,
@@ -899,6 +903,13 @@ async function fetchExecutorMonitor(): Promise<void> {
 
       lastObservedBgRefreshUtc = currentRefreshUtc;
       lastObservedBgSyncState = bg.sync_state || null;
+
+      updateClustersBgSyncStatus({
+        isRunning: bg.is_running,
+        syncState: bg.sync_state,
+        latestRefreshUtc: bg.latest_refresh_utc,
+        syncJustCompleted
+      });
 
       if (syncJustCompleted) {
         fetchPlannerOverview(true);
