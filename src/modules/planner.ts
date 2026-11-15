@@ -53,7 +53,7 @@ let createMomentCtx: CreateMomentContext = { uniqueAssetIds: [], allAssetIds: []
 let isSubmittingCreateMoment = false;
 let createMomentCompleted = false;
 let createMomentCheckTimer: number | null = null;
-let groupingRulesPanelCollapsed = false;
+let groupingRulesPanelCollapsed = true;
 let isUpdatingGroupingRules = false;
 
 type ClustersSyncLockMode = 'idle' | 'running' | 'awaiting';
