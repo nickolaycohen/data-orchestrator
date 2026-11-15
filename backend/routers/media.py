@@ -4359,7 +4359,7 @@ def create_moment_via_applescript(req: CreateMomentRequest):
                         (album_pk_out, moment_name, parent_pk, parent_folder),
                     )
 
-            if clean_ids and parent_folder.lower() in ("moments", "curated", "tobecurated"):
+            if clean_ids and parent_folder.lower() in ("moments", "curated", "tobecurated", "generic moments"):
                 placeholders = ",".join("?" for _ in clean_ids)
                 cur.execute(
                     f"""

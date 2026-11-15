@@ -681,6 +681,9 @@
                         <button class="btn btn-xs btn-outline" id="btn-toggle-all-unassigned-clusters" title="Expand or collapse all proposed Moment clusters">
                           ⊞ Expand All
                         </button>
+                        <button class="btn btn-xs btn-outline" id="btn-refresh-unassigned-clusters" title="Force full refresh of clusters &amp; Moments folders">
+                          🔄 Refresh List
+                        </button>
                       </div>
                     </div>
 
@@ -2016,7 +2019,7 @@
               Path: Media Organizer on LaCie/Moments/...
             </span>
             <div style="display: flex; align-items: center; gap: 0.5rem;">
-              <button class="btn btn-outline btn-close-create-moment-modal">Cancel</button>
+              <button class="btn btn-outline btn-close-create-moment-modal" id="btn-cancel-create-moment">Cancel</button>
               <button class="btn btn-purple" id="btn-submit-create-moment">
                 🍎 Create Moment via AppleScript
               </button>

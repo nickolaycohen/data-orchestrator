@@ -51,6 +51,7 @@ interface CreateMomentContext {
 }
 let createMomentCtx: CreateMomentContext = { uniqueAssetIds: [], allAssetIds: [], duplicateCount: 0 };
 let isSubmittingCreateMoment = false;
+let createMomentCompleted = false;
 let createMomentCheckTimer: number | null = null;
 let groupingRulesPanelCollapsed = false;
 let isUpdatingGroupingRules = false;
@@ -201,12 +202,17 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
   }
 
   document.getElementById('btn-refresh-planner-overview')?.addEventListener('click', () => {
+    const btn = document.getElementById('btn-refresh-planner-overview') as HTMLButtonElement | null;
     if (activePlannerModeView === 'm') {
-      void fetchPlannerOverview(true, 'm');
-      void fetchMemoriesFolders();
+      void refreshModeMFull(btn);
     } else if (activePlannerModeView === 'b') {
       void fetchPlannerOverview(true, 'b');
     }
+  });
+
+  document.getElementById('btn-refresh-unassigned-clusters')?.addEventListener('click', () => {
+    const btn = document.getElementById('btn-refresh-unassigned-clusters') as HTMLButtonElement | null;
+    void refreshModeMFull(btn);
   });
 
   // Moments Organizer: Query existing folders under Moments (local DB copy)
@@ -363,7 +369,7 @@ export async function fetchPlannerOverview(force = false, targetMode?: PlannerMo
         .then(() => {
           delete queuedPlannerFetchByMode[mode];
           pendingPlannerRefreshByMode[mode] = false;
-          return fetchPlannerOverview(false, mode);
+          return fetchPlannerOverview(true, mode);
         });
     }
     return queuedPlannerFetchByMode[mode];
@@ -371,7 +377,10 @@ export async function fetchPlannerOverview(force = false, targetMode?: PlannerMo
 
   const runPromise = (async () => {
     try {
-      const res = await fetch(`/api/media/planner-overview?mode=${encodeURIComponent(mode)}`);
+      const bust = force ? `&_t=${Date.now()}` : '';
+      const res = await fetch(`/api/media/planner-overview?mode=${encodeURIComponent(mode)}${bust}`, {
+        cache: 'no-store'
+      });
       const data: PlannerOverviewResponse = await res.json();
 
       if (!data.connected) return;
@@ -1985,9 +1994,47 @@ function openCreateMomentModal(opts?: {
 
   updateCreateMomentTargetPath();
   updateCreateMomentAssetsUI();
+  setCreateMomentModalCompletedState(false);
   modal.classList.add('open');
   void checkExistingMemoriesMatch((nameInput?.value || '').trim());
   window.setTimeout(() => nameInput?.focus(), 40);
+}
+
+function setCreateMomentModalCompletedState(completed: boolean): void {
+  createMomentCompleted = completed;
+  const btnCancel = document.getElementById('btn-cancel-create-moment') as HTMLButtonElement | null;
+  const btnSubmit = document.getElementById('btn-submit-create-moment') as HTMLButtonElement | null;
+  if (btnCancel) {
+    btnCancel.style.display = completed ? 'none' : '';
+    btnCancel.disabled = false;
+  }
+  if (btnSubmit) {
+    btnSubmit.disabled = false;
+    if (completed) {
+      btnSubmit.className = 'btn btn-green';
+      btnSubmit.textContent = '✅ OK';
+    } else {
+      btnSubmit.className = 'btn btn-purple';
+      btnSubmit.textContent = '🍎 Create Moment via AppleScript';
+    }
+  }
+}
+
+async function refreshModeMFull(triggerBtn?: HTMLButtonElement | null): Promise<void> {
+  const prevText = triggerBtn?.textContent || '';
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+    triggerBtn.textContent = '🔄 Refreshing...';
+  }
+  try {
+    await Promise.all([fetchMemoriesFolders(), fetchPlannerOverview(true, 'm')]);
+    if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
+  } finally {
+    if (triggerBtn) {
+      triggerBtn.disabled = false;
+      triggerBtn.textContent = prevText;
+    }
+  }
 }
 
 function closeCreateMomentModal(): void {
@@ -2154,11 +2201,16 @@ function applyOptimisticClusterRemoval(removedIds: Set<string>): void {
 }
 
 async function submitCreateMoment(): Promise<void> {
+  if (createMomentCompleted) {
+    closeCreateMomentModal();
+    return;
+  }
   if (isSubmittingCreateMoment) return;
   const nameInput = document.getElementById('create-moment-name-input') as HTMLInputElement | null;
   const parentSelect = document.getElementById('create-moment-parent-select') as HTMLSelectElement | null;
   const allowExistingCb = document.getElementById('create-moment-allow-existing') as HTMLInputElement | null;
   const statusEl = document.getElementById('create-moment-status');
+  const btnCancel = document.getElementById('btn-cancel-create-moment') as HTMLButtonElement | null;
   const btnSubmit = document.getElementById('btn-submit-create-moment') as HTMLButtonElement | null;
 
   const momentName = (nameInput?.value || '').trim();
@@ -2177,6 +2229,7 @@ async function submitCreateMoment(): Promise<void> {
   }
 
   isSubmittingCreateMoment = true;
+  if (btnCancel) btnCancel.disabled = true;
   if (btnSubmit) {
     btnSubmit.disabled = true;
     btnSubmit.textContent = 'Running AppleScript...';
@@ -2187,6 +2240,7 @@ async function submitCreateMoment(): Promise<void> {
     statusEl.innerHTML = `<div class="spinner-sm"></div><span>Creating Moment <code>${escapeHtml(momentName)}</code> in Apple Photos via AppleScript${assetIds.length ? ` and adding ${assetIds.length} asset(s)` : ''}${escapeHtml(ignNote)}...</span>`;
   }
 
+  let succeeded = false;
   try {
     const res = await fetch('/api/media/memories/create-moment', {
       method: 'POST',
@@ -2209,7 +2263,10 @@ async function submitCreateMoment(): Promise<void> {
       return;
     }
 
-    // Immediately update UI cluster list optimistically while authoritative DB refresh runs
+    // Clear selection and immediately update UI cluster list while authoritative DB refresh runs
+    if (createMomentCtx.sourceClusterFolder) {
+      clusterAssetSelection.delete(createMomentCtx.sourceClusterFolder);
+    }
     applyOptimisticClusterRemoval(new Set([...assetIds, ...ignoreAssetIds]));
 
     if (statusEl) {
@@ -2223,8 +2280,7 @@ async function submitCreateMoment(): Promise<void> {
       `;
     }
 
-    await Promise.all([fetchMemoriesFolders(), fetchPlannerOverview(true, 'm')]);
-    if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
+    await refreshModeMFull();
 
     if (statusEl) {
       const ignSummary =
@@ -2241,6 +2297,7 @@ async function submitCreateMoment(): Promise<void> {
         </span>
       `;
     }
+    succeeded = true;
   } catch (err: any) {
     console.error('Error creating Moment via AppleScript:', err);
     if (statusEl) {
@@ -2249,10 +2306,7 @@ async function submitCreateMoment(): Promise<void> {
     }
   } finally {
     isSubmittingCreateMoment = false;
-    if (btnSubmit) {
-      btnSubmit.disabled = false;
-      btnSubmit.textContent = '🍎 Create Moment via AppleScript';
-    }
+    setCreateMomentModalCompletedState(succeeded);
   }
 }
 
