@@ -1227,10 +1227,10 @@ function renderUnassignedClustersList(): void {
               type="button"
               class="btn btn-xs btn-purple btn-create-moment-selected"
               data-split-source="${escapeHtml(cluster.folder)}"
-              title="Create an Apple Photos Moment directly from only the checked assets"
+              title="Apply or create an Apple Photos Moment directly from only the checked assets"
               ${selectedInCluster.size === 0 ? 'disabled' : ''}
             >
-              ✨ Create Moment (Selected)
+              ✨ Apply Moment (Selected)
             </button>
           </div>
         </div>
@@ -1330,10 +1330,10 @@ function renderUnassignedClustersList(): void {
             <button
               class="btn btn-xs btn-purple btn-create-moment-from-cluster"
               data-cluster-folder="${escapeHtml(cluster.folder)}"
-              title="Create (or populate) this Moment album in Apple Photos via AppleScript"
+              title="Apply or create this Moment album in Apple Photos via AppleScript"
               style="white-space: nowrap; flex-shrink: 0;"
             >
-              ✨ Create Moment
+              ✨ Apply Moment
             </button>
           </div>
         </div>
@@ -2151,7 +2151,7 @@ function setCreateMomentModalCompletedState(completed: boolean): void {
       btnSubmit.textContent = '✅ OK';
     } else {
       btnSubmit.className = 'btn btn-purple';
-      btnSubmit.textContent = '🍎 Create Moment via AppleScript';
+      btnSubmit.textContent = '🍎 Apply Moment via AppleScript';
     }
   }
 }
@@ -2374,7 +2374,7 @@ async function submitCreateMoment(): Promise<void> {
   if (statusEl) {
     statusEl.style.display = 'flex';
     const ignNote = ignoreAssetIds.length ? ` and moving ${ignoreAssetIds.length} duplicate(s) to Ignore` : '';
-    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Creating Moment <code>${escapeHtml(momentName)}</code> in Apple Photos via AppleScript${assetIds.length ? ` and adding ${assetIds.length} asset(s)` : ''}${escapeHtml(ignNote)}...</span>`;
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Applying Moment <code>${escapeHtml(momentName)}</code> in Apple Photos via AppleScript${assetIds.length ? ` and adding ${assetIds.length} asset(s)` : ''}${escapeHtml(ignNote)}...</span>`;
   }
 
   let succeeded = false;
