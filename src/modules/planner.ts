@@ -1752,7 +1752,25 @@ function renderUnassignedClustersList(): void {
       const groupAssetIds = folder ? clusterPreviewAssetIds.get(folder) : undefined;
       openCleanupPreviewModal(
         aid,
-        groupAssetIds && groupAssetIds.length > 0 ? { assetIds: groupAssetIds, groupLabel: folder } : undefined
+        groupAssetIds && groupAssetIds.length > 0
+          ? {
+              assetIds: groupAssetIds,
+              groupLabel: folder,
+              hideMarkRemoved: true,
+              onRemoveFromGroup:
+                groupAssetIds.length > 1 && folder
+                  ? async (removingAid: string) => {
+                      const selSet = clusterAssetSelection.get(folder);
+                      if (selSet) selSet.delete(removingAid);
+                      return await updateGroupingRules({
+                        split_asset_ids: [removingAid],
+                        split_target_group: '__INDIVIDUAL__',
+                        split_source_group: folder
+                      });
+                    }
+                  : undefined
+            }
+          : { assetIds: [aid], hideMarkRemoved: true }
       );
     });
   });
@@ -2029,7 +2047,7 @@ function renderDedupModalResults(data: ModeMDedupPreviewResponse): void {
         const aid = img.dataset.dedupPreview;
         const pairIds = (img.dataset.dedupPair || '').split(',').filter(Boolean);
         if (aid) {
-          openCleanupPreviewModal(aid, { assetIds: pairIds, groupLabel: 'Duplicate vs Keeper' });
+          openCleanupPreviewModal(aid, { assetIds: pairIds, groupLabel: 'Duplicate vs Keeper', hideMarkRemoved: true });
         }
       });
     });
@@ -2767,8 +2785,8 @@ async function updateGroupingRules(payload: {
   clear_split_group?: string;
   clear_split_asset_ids?: string[];
   reset_defaults?: boolean;
-}): Promise<void> {
-  if (isUpdatingGroupingRules) return;
+}): Promise<boolean> {
+  if (isUpdatingGroupingRules) return false;
   isUpdatingGroupingRules = true;
   const badge = document.getElementById('mode-m-rules-summary-badge');
   if (badge) badge.textContent = 'Updating rules...';
@@ -2782,12 +2800,14 @@ async function updateGroupingRules(payload: {
     const data = await res.json();
     if (!res.ok || !data.ok) {
       alert(`Failed updating grouping rules: ${data.error || `HTTP ${res.status}`}`);
-      return;
+      return false;
     }
     await fetchPlannerOverview(true, 'm');
+    return true;
   } catch (err: any) {
     console.error('Error updating grouping rules:', err);
     alert(`Network error updating grouping rules: ${err?.message || 'Unknown error'}`);
+    return false;
   } finally {
     isUpdatingGroupingRules = false;
   }

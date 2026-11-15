@@ -27,6 +27,8 @@ const selectedCandidateAssetIds = new Set<string>();
 export interface PreviewGroupContext {
   assetIds: string[];
   groupLabel?: string;
+  hideMarkRemoved?: boolean;
+  onRemoveFromGroup?: (assetId: string) => Promise<boolean | void>;
 }
 
 let pendingRemovalAssetIds: string[] = [];
@@ -34,6 +36,8 @@ let previewModalAssetId: string | null = null;
 let previewGroupAssetIds: string[] = [];
 let previewGroupIndex = -1;
 let previewGroupLabel: string | null = null;
+let previewHideMarkRemoved = false;
+let previewRemoveFromGroupCb: ((assetId: string) => Promise<boolean | void>) | null = null;
 let previewSortMode: 'timestamp' | 'score' = 'timestamp';
 let isFetchingCleanupDevices = false;
 let isFetchingCleanupCandidates = false;
@@ -227,12 +231,43 @@ export function setupMediaCleanup(): void {
     executeCleanupRemoval();
   });
 
-  // 8. Preview Modal Mark as Removed button & Group Prev/Next Navigation
+  // 8. Preview Modal Mark as Removed / Remove from Group & Group Prev/Next Navigation
   document.getElementById('btn-preview-mark-removed')?.addEventListener('click', () => {
-    if (!previewModalAssetId) return;
+    if (!previewModalAssetId || previewHideMarkRemoved) return;
     const aid = previewModalAssetId;
     closeCleanupPreviewModal();
     openCleanupConfirmModal([aid]);
+  });
+
+  document.getElementById('btn-preview-remove-from-group')?.addEventListener('click', async () => {
+    if (!previewModalAssetId || !previewRemoveFromGroupCb) return;
+    const btn = document.getElementById('btn-preview-remove-from-group') as HTMLButtonElement | null;
+    const removingId = previewModalAssetId;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Removing...';
+    }
+    try {
+      const ok = await previewRemoveFromGroupCb(removingId);
+      if (ok === false) return;
+      const oldIdx = previewGroupIndex;
+      previewGroupAssetIds = previewGroupAssetIds.filter(id => id !== removingId);
+      if (previewGroupAssetIds.length === 0) {
+        closeCleanupPreviewModal();
+        return;
+      }
+      const nextIdx = Math.min(Math.max(0, oldIdx), previewGroupAssetIds.length - 1);
+      previewGroupIndex = nextIdx;
+      renderCleanupPreviewAsset(previewGroupAssetIds[nextIdx]);
+      renderPreviewFilmstrip();
+      updatePreviewGroupControls();
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '🚫 Remove from Group';
+      }
+      syncPreviewFooterActionButtons();
+    }
   });
 
   document.getElementById('btn-preview-prev')?.addEventListener('click', () => {
@@ -1279,6 +1314,18 @@ function renderPreviewFilmstrip(): void {
   });
 }
 
+function syncPreviewFooterActionButtons(): void {
+  const btnMark = document.getElementById('btn-preview-mark-removed') as HTMLButtonElement | null;
+  const btnRemoveGroup = document.getElementById('btn-preview-remove-from-group') as HTMLButtonElement | null;
+  if (btnMark) {
+    btnMark.style.display = previewHideMarkRemoved ? 'none' : '';
+  }
+  if (btnRemoveGroup) {
+    const showGroupRemove = Boolean(previewRemoveFromGroupCb) && previewGroupAssetIds.length > 1;
+    btnRemoveGroup.style.display = showGroupRemove ? '' : 'none';
+  }
+}
+
 function updatePreviewGroupControls(): void {
   const total = previewGroupAssetIds.length;
   const hasGroup = total > 1;
@@ -1483,9 +1530,12 @@ export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupC
   previewGroupAssetIds = validGroupIds;
   previewModalAssetId = assetId;
   previewGroupLabel = context?.groupLabel || null;
+  previewHideMarkRemoved = Boolean(context?.hideMarkRemoved || context?.onRemoveFromGroup);
+  previewRemoveFromGroupCb = context?.onRemoveFromGroup || null;
 
   renderCleanupPreviewAsset(assetId);
   applyPreviewSortOrder();
+  syncPreviewFooterActionButtons();
 
   modal.classList.add('open');
 }
@@ -1514,6 +1564,9 @@ export function closeCleanupPreviewModal(): void {
   previewGroupAssetIds = [];
   previewGroupIndex = -1;
   previewGroupLabel = null;
+  previewHideMarkRemoved = false;
+  previewRemoveFromGroupCb = null;
+  syncPreviewFooterActionButtons();
 }
 
 function updateCleanupSelectionBar(): void {
