@@ -571,66 +571,6 @@
 
               <!-- Step-by-Step Breakdown for Mode [M] -->
               <div class="planner-steps-body">
-                <!-- Existing Folders under Moments (Local media_organizer.db Copy) -->
-                <div class="planner-subblock" id="mode-m-folders-block">
-                  <div class="planner-subblock-header" style="gap: 0.5rem; flex-wrap: wrap;">
-                    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                      <span><strong>📁 Existing Folders under Moments</strong></span>
-                      <span class="badge badge-xs badge-purple font-mono" id="mode-m-folders-count-badge">— folders</span>
-                      <span class="badge badge-xs badge-outline font-mono" id="mode-m-folders-sync-badge" title="Queried directly from local media_organizer.db copy (zero queries to Apple Photos DB)">DB Copy</span>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
-                      <button class="btn btn-xs btn-outline" id="btn-refresh-memories-folders" title="Re-query existing Moments folders from media_organizer.db">
-                        ↻ Query DB Copy
-                      </button>
-                      <button class="btn btn-xs btn-outline" id="btn-toggle-memories-folders" title="Show or collapse the Existing Folders table">
-                        ▴ Collapse
-                      </button>
-                    </div>
-                  </div>
-                  <div id="mode-m-folders-body" class="memories-folders-body">
-                    <div class="memories-folders-toolbar">
-                      <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;" id="mode-m-folders-scope-bar">
-                        <button class="cleanup-filter-btn memories-scope-btn active" data-folders-scope="moments">Moments</button>
-                        <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="curated">Curated</button>
-                        <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="to_be_curated">ToBeCurated</button>
-                        <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="folders">Top Folders</button>
-                        <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="all">All</button>
-                      </div>
-                      <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
-                        <input
-                          type="text"
-                          class="form-control form-control-sm"
-                          id="mode-m-folders-search"
-                          placeholder="Query folders / moment names..."
-                          style="width: 220px; padding: 0.22rem 0.55rem; font-size: 0.72rem;"
-                        />
-                        <select id="mode-m-folders-sort" class="form-control form-control-sm" style="width: auto; padding: 0.2rem 0.45rem; font-size: 0.72rem;">
-                          <option value="name">Sort: Name (A–Z)</option>
-                          <option value="recent">Sort: Name (Z–A)</option>
-                          <option value="assets">Sort: Most Assets</option>
-                        </select>
-                      </div>
-                    </div>
-                    <div class="planner-table-wrap" style="max-height: 230px; overflow-y: auto;">
-                      <table class="cleanup-table planner-compact-table">
-                        <thead>
-                          <tr>
-                            <th>Folder / Moment Name</th>
-                            <th>Parent Folder</th>
-                            <th style="text-align: right;">Assets</th>
-                            <th>Stage</th>
-                            <th style="text-align: right;">Action</th>
-                          </tr>
-                        </thead>
-                        <tbody id="mode-m-folders-tbody">
-                          <tr><td colspan="5" class="text-center text-muted">Loading synced Moments folders from media_organizer.db...</td></tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-
                 <!-- Step 1: Curation Threshold & Moments Needing ToBeCurated Sync -->
                 <div class="planner-subblock" id="mode-m-step-1">
                   <div class="planner-subblock-header">
@@ -1038,6 +978,68 @@
             </div>
             <div class="moments-container pub-moments-scroll" id="featured-moments-list">
               <div class="loading-spinner">Loading published moments history...</div>
+            </div>
+          </div>
+
+          <!-- Existing Folders under Moments (Local media_organizer.db Copy) -->
+          <div class="card mb-4" id="mode-m-folders-block" style="display: none;">
+            <div class="card-header" style="margin-bottom: 0.65rem; gap: 0.5rem; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <h3 style="margin: 0; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                  📁 Existing Folders under Moments
+                  <span class="badge badge-xs badge-purple font-mono" id="mode-m-folders-count-badge">— folders</span>
+                  <span class="badge badge-xs badge-outline font-mono" id="mode-m-folders-sync-badge" title="Queried directly from local media_organizer.db copy (zero queries to Apple Photos DB)">DB Copy</span>
+                </h3>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                <button class="btn btn-xs btn-outline" id="btn-refresh-memories-folders" title="Re-query existing Moments folders from media_organizer.db">
+                  ↻ Query DB Copy
+                </button>
+                <button class="btn btn-xs btn-outline" id="btn-toggle-memories-folders" title="Show or collapse the Existing Folders table">
+                  ▴ Collapse
+                </button>
+              </div>
+            </div>
+            <div id="mode-m-folders-body" class="memories-folders-body">
+              <div class="memories-folders-toolbar">
+                <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;" id="mode-m-folders-scope-bar">
+                  <button class="cleanup-filter-btn memories-scope-btn active" data-folders-scope="moments">Moments</button>
+                  <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="curated">Curated</button>
+                  <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="to_be_curated">ToBeCurated</button>
+                  <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="folders">Top Folders</button>
+                  <button class="cleanup-filter-btn memories-scope-btn" data-folders-scope="all">All</button>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                  <input
+                    type="text"
+                    class="form-control form-control-sm"
+                    id="mode-m-folders-search"
+                    placeholder="Query folders / moment names..."
+                    style="width: 220px; padding: 0.22rem 0.55rem; font-size: 0.72rem;"
+                  />
+                  <select id="mode-m-folders-sort" class="form-control form-control-sm" style="width: auto; padding: 0.2rem 0.45rem; font-size: 0.72rem;">
+                    <option value="name">Sort: Name (A–Z)</option>
+                    <option value="recent">Sort: Name (Z–A)</option>
+                    <option value="assets">Sort: Most Assets</option>
+                  </select>
+                </div>
+              </div>
+              <div class="planner-table-wrap" style="max-height: 260px; overflow-y: auto;">
+                <table class="cleanup-table planner-compact-table">
+                  <thead>
+                    <tr>
+                      <th>Folder / Moment Name</th>
+                      <th>Parent Folder</th>
+                      <th style="text-align: right;">Assets</th>
+                      <th>Stage</th>
+                      <th style="text-align: right;">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="mode-m-folders-tbody">
+                    <tr><td colspan="5" class="text-center text-muted">Loading synced Moments folders from media_organizer.db...</td></tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </section>

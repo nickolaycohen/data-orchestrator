@@ -181,6 +181,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   const cardM = document.getElementById('planner-mode-m-card');
   const cardC = document.getElementById('media-cleanup-card');
   const cardPub = document.getElementById('published-memories-card');
+  const cardFolders = document.getElementById('mode-m-folders-block');
   const cardTrack1 = document.getElementById('track-1-reference-card');
 
   if (view === 'b') {
@@ -194,6 +195,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     if (cardM) cardM.style.display = 'none';
     if (cardC) cardC.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
+    if (cardFolders) cardFolders.style.display = 'none';
     if (cardTrack1) cardTrack1.style.display = 'block';
     if (!modeBLoaded) {
       void fetchPlannerOverview(false, 'b');
@@ -207,6 +209,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     if (cardM) cardM.style.display = 'flex';
     if (cardC) cardC.style.display = 'none';
     if (cardPub) cardPub.style.display = 'block';
+    if (cardFolders) cardFolders.style.display = 'block';
     if (cardTrack1) cardTrack1.style.display = 'none';
     if (!modeMLoaded) {
       void fetchPlannerOverview(false, 'm');
@@ -219,6 +222,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     closeCreateMomentModal();
     if (grid) grid.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
+    if (cardFolders) cardFolders.style.display = 'none';
     if (cardTrack1) cardTrack1.style.display = 'none';
     if (cardC) {
       cardC.style.display = 'block';
