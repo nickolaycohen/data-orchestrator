@@ -551,6 +551,10 @@ interface PlannerPathCard {
   badgeText: string;
   badgeClass: string;
   description: string;
+  highlightLine?: {
+    text: string;
+    tone?: 'green' | 'amber' | 'muted';
+  };
   footerMeta: string;
   targetId: string;
   linkLabel: string;
@@ -572,6 +576,9 @@ function renderPlannerPathsSummary(containerId: string, paths: PlannerPathCard[]
     .map(p => {
       const toneClass = `num-${p.numTone}`;
       const stateClass = p.active ? 'path-active' : 'path-muted';
+      const hlHtml = p.highlightLine
+        ? `<div class="planner-path-highlight ${p.highlightLine.tone ? `tone-${p.highlightLine.tone}` : ''}">${escapeHtml(p.highlightLine.text)}</div>`
+        : '';
       return `
         <div class="planner-path-card ${stateClass}">
           <div>
@@ -583,6 +590,7 @@ function renderPlannerPathsSummary(containerId: string, paths: PlannerPathCard[]
               <span class="badge badge-xs ${p.badgeClass} font-mono">${escapeHtml(p.badgeText)}</span>
             </div>
             <p class="planner-path-desc" style="margin-top: 0.4rem;">${escapeHtml(p.description)}</p>
+            ${hlHtml}
           </div>
           <div class="planner-path-footer">
             <span class="font-mono text-muted" style="font-size: 0.67rem;">${escapeHtml(p.footerMeta)}</span>
@@ -950,6 +958,20 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
     return Math.max(0, cnt - (c.duplicate_copy_count || 0)) > 0;
   }).length;
   const thDriverSummary = th.driver?.folder ? `#${th.driver.position} ${th.driver.folder}` : '';
+  const currThVal = Number(th.current || th.historical_min || 0.5315);
+  const formatMomentVsThreshold = (momentName: string, score: number) => {
+    const diff = score - currThVal;
+    const diffStr = `${diff >= 0 ? '+' : '−'}${Math.abs(diff).toFixed(4)}`;
+    const relIcon = diff >= 0 ? '≥' : '<';
+    return {
+      text: `Top: ${momentName} · Avg ${score.toFixed(4)} ${relIcon} thr ${currThVal.toFixed(4)} (${diffStr})`,
+      tone: (diff >= 0 ? 'green' : 'amber') as 'green' | 'amber'
+    };
+  };
+
+  const topRec = recs[0];
+  const topDisjoint = disjoint[0];
+
   renderPlannerPathsSummary('mode-m-paths-summary', [
     {
       num: '1',
@@ -958,7 +980,13 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       badgeText: th.aligned ? 'Threshold Aligned' : `${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0.5315).toFixed(4)}`,
       badgeClass: th.aligned && needsSync.length === 0 ? 'badge-green' : 'badge-amber',
       description: `Run Option [1] (${needsSync.length} moment(s) needing sync) and assign/ignore ${outstandingGroupsCount} outstanding unassigned group(s) until threshold aligns.`,
-      footerMeta: thDriverSummary ? `Top driver: ${thDriverSummary}` : `${rawClustersForSummary.length} total groups`,
+      highlightLine: thDriverSummary
+        ? {
+            text: `Driver: ${thDriverSummary} · Score ${currThVal.toFixed(4)}`,
+            tone: th.aligned ? 'green' : 'amber'
+          }
+        : undefined,
+      footerMeta: th.aligned ? `Target ${(th.historical_min || 0.5315).toFixed(4)} aligned` : `${rawClustersForSummary.length} total groups`,
       targetId: 'mode-m-step-1',
       linkLabel: 'Go to 1️⃣ Threshold & Groups ↓',
       active: !th.aligned || needsSync.length > 0 || outstandingGroupsCount > 0
@@ -969,7 +997,10 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       title: 'Publish Top Ready Moments',
       badgeText: `${recs.length} actionable`,
       badgeClass: recs.length > 0 ? 'badge-green' : 'badge-outline',
-      description: `Publish threshold-aligned Moments${recs[0] ? ` (top: ${recs[0].moment_name})` : ''} ready for Shutterfly / YouTube in curated batches (up to 9 assets).`,
+      description: `Publish threshold-aligned Moments ready for Shutterfly / YouTube in curated batches (up to 9 assets).`,
+      highlightLine: topRec
+        ? formatMomentVsThreshold(topRec.moment_name, Number(topRec.avg_score || 0))
+        : { text: 'Top: None currently eligible', tone: 'muted' },
       footerMeta: th.aligned ? 'Ready for publishing' : 'Recommended after Path 1',
       targetId: 'mode-m-step-2',
       linkLabel: 'Go to 2️⃣ Publishing ↓',
@@ -982,6 +1013,9 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       badgeText: `${disjoint.length} disjoint`,
       badgeClass: disjoint.length > 0 ? 'badge-amber' : 'badge-outline',
       description: `Review small single-asset disjoint Moments and merge them into neighboring chronological Moments.`,
+      highlightLine: topDisjoint
+        ? formatMomentVsThreshold(topDisjoint.moment_name, Number(topDisjoint.avg_score || 0))
+        : { text: 'Top: None needing merge', tone: 'muted' },
       footerMeta: disjoint.length > 0 ? `${disjoint.length} candidate(s)` : 'None needing merge',
       targetId: 'mode-m-step-3',
       linkLabel: 'Go to 3️⃣ Disjoint Merge ↓',
