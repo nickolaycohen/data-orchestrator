@@ -380,9 +380,10 @@
 
               <!-- Primary Suggested Action Banner for Mode [B] -->
               <div class="planner-next-action-banner" id="mode-b-primary-banner">
-                <div class="planner-banner-step-tag">NEXT STEP IF [B] SELECTED</div>
+                <div class="planner-banner-step-tag">NEXT STEPS &amp; POSSIBLE PATHS — [B] BATCH MANAGEMENT</div>
                 <div class="planner-banner-main" id="mode-b-primary-headline">Evaluating batch transition candidates...</div>
                 <div class="planner-banner-sub" id="mode-b-primary-detail">—</div>
+                <div class="planner-paths-grid" id="mode-b-paths-summary"></div>
                 <div class="planner-banner-fallback font-mono" id="mode-b-primary-secondary"></div>
               </div>
 
@@ -416,9 +417,15 @@
               <!-- Step-by-Step Candidate Queues for Mode [B] -->
               <div class="planner-steps-body">
                 <!-- Step 1: Next Unprocessed Batches for Ingest & Upload (000 -> 100 -> 200 -> 210 -> 399) -->
-                <div class="planner-subblock">
+                <div class="planner-subblock" id="mode-b-step-1">
                   <div class="planner-subblock-header">
-                    <span><strong>1️⃣ Next Unprocessed Batches for Ingest &amp; Google Upload (<code>000 ➜ 100 ➜ 200 ➜ 210 ➜ 399</code>)</strong></span>
+                    <div class="planner-subblock-title-wrap">
+                      <span class="planner-step-num step-num-blue">1</span>
+                      <div>
+                        <div class="planner-subblock-title">Next Unprocessed Batches for Ingest &amp; Google Upload (<code>000 ➜ 100 ➜ 200 ➜ 210 ➜ 399</code>)</div>
+                        <div class="planner-subblock-desc">Path 1: Schedule an unprocessed month batch for verification, export, dedup, and upload to Google Photos.</div>
+                      </div>
+                    </div>
                     <span class="badge badge-xs badge-outline font-mono" id="mode-b-000-badge">0 batches</span>
                   </div>
                   <div class="planner-table-wrap">
@@ -440,10 +447,16 @@
                   </div>
                 </div>
 
-                <!-- Step 2: Manual Curation Candidates (400 -> 500) -->
-                <div class="planner-subblock">
+                <!-- Step 2: Confirm Google AI Rated Batches (400 -> 500) -->
+                <div class="planner-subblock" id="mode-b-step-2">
                   <div class="planner-subblock-header">
-                    <span><strong>2️⃣ Manual Transition Candidates (<code>400 ➜ 500</code>)</strong> · Google Photos Curation &amp; Best-of Album</span>
+                    <div class="planner-subblock-title-wrap">
+                      <span class="planner-step-num step-num-amber">2</span>
+                      <div>
+                        <div class="planner-subblock-title">Confirm Google AI–Rated Batches &amp; Best-of Favorites (<code>400 ➜ 500</code>)</div>
+                        <div class="planner-subblock-desc">Path 2: Once Google AI generates Best-of lists and Favorites are manually added for those assets, confirm (<code>Confirm 500</code>) or bypass to advance to <code>500</code>.</div>
+                      </div>
+                    </div>
                     <span class="badge badge-xs badge-amber font-mono" id="mode-b-400-badge">0 batches</span>
                   </div>
                   <div class="planner-table-wrap">
@@ -465,10 +478,16 @@
                   </div>
                 </div>
 
-                <!-- Step 3: Pipeline Ranking & Finalization Candidates (500 -> 550 -> 600 -> 650) -->
-                <div class="planner-subblock">
+                <!-- Step 3: Schedule Confirmed Batches Ready for Favorites Pull, Ranking & Cleanup (500 -> 550 -> 600 -> 650) -->
+                <div class="planner-subblock" id="mode-b-step-3">
                   <div class="planner-subblock-header">
-                    <span><strong>3️⃣ Ready for Favorites Pull, Ranking &amp; Cleanup (<code>500 ➜ 550 ➜ 600 ➜ 650</code>)</strong></span>
+                    <div class="planner-subblock-title-wrap">
+                      <span class="planner-step-num step-num-purple">3</span>
+                      <div>
+                        <div class="planner-subblock-title">Schedule Confirmed Batches for Favorites Pull, Ranking &amp; Cleanup (<code>500 ➜ 550 ➜ 600 ➜ 650</code>)</div>
+                        <div class="planner-subblock-desc">Path 3: Schedule any batch currently in status <code>500</code>/<code>550</code> to pull Google Favorites, compute AI ranking, and clean up staging.</div>
+                      </div>
+                    </div>
                     <span class="badge badge-xs badge-purple font-mono" id="mode-b-500-badge">0 batches</span>
                   </div>
                   <div class="planner-table-wrap">
@@ -517,9 +536,10 @@
 
               <!-- Primary Suggested Action Banner for Mode [M] -->
               <div class="planner-next-action-banner banner-green" id="mode-m-primary-banner">
-                <div class="planner-banner-step-tag">NEXT STEPS IF [M] SELECTED</div>
+                <div class="planner-banner-step-tag">NEXT STEPS &amp; POSSIBLE PATHS — [M] MOMENTS ORGANIZER</div>
                 <div class="planner-banner-main" id="mode-m-primary-headline">Evaluating curation threshold &amp; moment publishing readiness...</div>
                 <div class="planner-banner-sub" id="mode-m-primary-detail">—</div>
+                <div class="planner-paths-grid" id="mode-m-paths-summary"></div>
               </div>
 
               <!-- Moment Lifecycle Stage Strip -->
@@ -612,12 +632,18 @@
                 </div>
 
                 <!-- Step 1: Curation Threshold & Moments Needing ToBeCurated Sync -->
-                <div class="planner-subblock">
+                <div class="planner-subblock" id="mode-m-step-1">
                   <div class="planner-subblock-header">
-                    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                      <span><strong>1️⃣ Curation Threshold &amp; Moments Requiring <code>ToBeCurated</code> Update (Option <code>[1]</code>)</strong></span>
-                      <span class="badge badge-xs badge-amber font-mono" id="mode-m-unassigned-summary-badge" style="display: none;">0 Unassigned</span>
-                      <span class="badge badge-xs badge-outline font-mono" id="mode-m-clusters-updated-badge" title="Cluster &amp; threshold update time and background Photos DB sync status">Updated: —</span>
+                    <div class="planner-subblock-title-wrap">
+                      <span class="planner-step-num step-num-amber">1</span>
+                      <div>
+                        <div class="planner-subblock-title">
+                          Curation Threshold &amp; Moments Requiring <code>ToBeCurated</code> Update (Option <code>[1]</code>)
+                          <span class="badge badge-xs badge-amber font-mono" id="mode-m-unassigned-summary-badge" style="display: none; margin-left: 0.35rem;">0 Unassigned</span>
+                          <span class="badge badge-xs badge-outline font-mono" id="mode-m-clusters-updated-badge" title="Cluster &amp; threshold update time and background Photos DB sync status" style="margin-left: 0.25rem;">Updated: —</span>
+                        </div>
+                        <div class="planner-subblock-desc">Path 1: Sync qualified assets to <code>ToBeCurated</code> and assign or ignore top unassigned groups until threshold aligns.</div>
+                      </div>
                     </div>
                     <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_create_moments')" title="Run Option [1]: Sync proposed assets to ToBeCurated in Apple Photos">
                       ▶ Run [1] Sync ToBeCurated
@@ -709,9 +735,15 @@
                 </div>
 
                 <!-- Step 2: Top 12 Actionable Publishing Recommendations -->
-                <div class="planner-subblock">
+                <div class="planner-subblock" id="mode-m-step-2">
                   <div class="planner-subblock-header">
-                    <span><strong>2️⃣ Top Actionable Publishing Recommendations (Ready for Shutterfly / YouTube)</strong></span>
+                    <div class="planner-subblock-title-wrap">
+                      <span class="planner-step-num step-num-green">2</span>
+                      <div>
+                        <div class="planner-subblock-title">Top Actionable Publishing Recommendations (Ready for Shutterfly / YouTube)</div>
+                        <div class="planner-subblock-desc">Path 2: Publish threshold-aligned Moments sorted by aesthetic rank (up to 9 assets per batch).</div>
+                      </div>
+                    </div>
                     <span class="badge badge-xs badge-green font-mono" id="mode-m-rec-badge">0 actionable</span>
                   </div>
                   <div class="planner-table-wrap">
@@ -734,9 +766,15 @@
                 </div>
 
                 <!-- Step 3: Disjoint Moments Needing Merge (<2 Assets) -->
-                <div class="planner-subblock">
+                <div class="planner-subblock" id="mode-m-step-3">
                   <div class="planner-subblock-header">
-                    <span><strong>3️⃣ Disjoint Moments Needing Consolidation (<code>&lt; 2</code> Qualified Assets)</strong></span>
+                    <div class="planner-subblock-title-wrap">
+                      <span class="planner-step-num step-num-purple">3</span>
+                      <div>
+                        <div class="planner-subblock-title">Disjoint Moments Needing Consolidation (<code>&lt; 2</code> Qualified Assets)</div>
+                        <div class="planner-subblock-desc">Path 3: Merge undersized single-asset disjoint Moments into suggested chronological neighbors.</div>
+                      </div>
+                    </div>
                     <span class="badge badge-xs badge-amber font-mono" id="mode-m-disjoint-badge">0 disjoint</span>
                   </div>
                   <div class="planner-table-wrap">

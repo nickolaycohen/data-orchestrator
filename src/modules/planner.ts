@@ -544,6 +544,64 @@ export async function fetchPlannerOverview(force = false, targetMode?: PlannerMo
   return runPromise;
 }
 
+interface PlannerPathCard {
+  num: string;
+  numTone: 'blue' | 'amber' | 'purple' | 'green';
+  title: string;
+  badgeText: string;
+  badgeClass: string;
+  description: string;
+  footerMeta: string;
+  targetId: string;
+  linkLabel: string;
+  active: boolean;
+}
+
+function jumpToPlannerStep(targetId: string): void {
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  el.classList.add('subblock-highlight');
+  window.setTimeout(() => el.classList.remove('subblock-highlight'), 2000);
+}
+
+function renderPlannerPathsSummary(containerId: string, paths: PlannerPathCard[]): void {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = paths
+    .map(p => {
+      const toneClass = `num-${p.numTone}`;
+      const stateClass = p.active ? 'path-active' : 'path-muted';
+      return `
+        <div class="planner-path-card ${stateClass}">
+          <div>
+            <div class="planner-path-card-head">
+              <div class="planner-path-card-title-row">
+                <span class="planner-path-num ${toneClass}">${escapeHtml(p.num)}</span>
+                <span class="planner-path-title">${escapeHtml(p.title)}</span>
+              </div>
+              <span class="badge badge-xs ${p.badgeClass} font-mono">${escapeHtml(p.badgeText)}</span>
+            </div>
+            <p class="planner-path-desc" style="margin-top: 0.4rem;">${escapeHtml(p.description)}</p>
+          </div>
+          <div class="planner-path-footer">
+            <span class="font-mono text-muted" style="font-size: 0.67rem;">${escapeHtml(p.footerMeta)}</span>
+            <a href="#${escapeHtml(p.targetId)}" class="planner-path-jump-link" data-jump-step="${escapeHtml(p.targetId)}">${escapeHtml(p.linkLabel)}</a>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  container.querySelectorAll<HTMLAnchorElement>('[data-jump-step]').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      const targetId = link.dataset.jumpStep;
+      if (targetId) jumpToPlannerStep(targetId);
+    });
+  });
+}
+
 function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
   const sb = modeB.status_breakdown || {};
   const qList = modeB.active_queue || [];
@@ -585,15 +643,58 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
   const detailEl = document.getElementById('mode-b-primary-detail');
   const secEl = document.getElementById('mode-b-primary-secondary');
 
+  const total000Batches = modeB.total_000_batches || cnt000;
+  if (headlineEl) {
+    headlineEl.textContent = `Summary: ${c400.length} at 400 (Path 2 Confirm) · ${c500.length} in 500/550 (Path 3 Schedule) · ${total000Batches} unprocessed in 000 (Path 1 Upload)`;
+  }
   if (primary) {
-    if (headlineEl) headlineEl.textContent = primary.headline;
-    if (detailEl) detailEl.textContent = `👉 ${primary.detail}`;
+    if (detailEl) detailEl.textContent = `👉 Recommended Next Step: ${primary.headline} — ${primary.detail}`;
     if (secEl) secEl.textContent = primary.secondary || '';
   } else {
-    if (headlineEl) headlineEl.textContent = 'All eligible batch transitions are queued or complete';
-    if (detailEl) detailEl.textContent = 'No pending manual or pipeline transitions detected.';
+    if (detailEl) detailEl.textContent = 'No pending manual or pipeline transitions detected across Paths 1–3.';
     if (secEl) secEl.textContent = '';
   }
+
+  const c400MonthsPreview = c400.slice(0, 3).map(x => x.month).join(', ') + (c400.length > 3 ? '…' : '');
+  const c500MonthsPreview = c500.slice(0, 3).map(x => x.month).join(', ') + (c500.length > 3 ? '…' : '');
+  renderPlannerPathsSummary('mode-b-paths-summary', [
+    {
+      num: '1',
+      numTone: 'blue',
+      title: 'Ingest & Google Upload (000 ➜ 399)',
+      badgeText: `${total000Batches} batch${total000Batches === 1 ? '' : 'es'}`,
+      badgeClass: total000Batches > 0 ? 'badge-blue' : 'badge-outline',
+      description: `Schedule an unprocessed batch${c000[0] ? ` (top: ${c000[0].month}, ${c000[0].total_assets.toLocaleString()} assets)` : ''} to verify DB, export originals, dedupe, and upload to Google Photos.`,
+      footerMeta: qList.length > 0 ? `${qList.length} currently queued` : total000Batches > 0 ? 'Ready to queue' : 'All uploaded',
+      targetId: 'mode-b-step-1',
+      linkLabel: 'Go to 1️⃣ Ingest & Upload ↓',
+      active: total000Batches > 0
+    },
+    {
+      num: '2',
+      numTone: 'amber',
+      title: 'Confirm Google AI–Rated Batches (400 ➜ 500)',
+      badgeText: `${c400.length} at 400`,
+      badgeClass: c400.length > 0 ? 'badge-amber' : 'badge-outline',
+      description: `Confirm batches rated by Google AI${c400MonthsPreview ? ` (${c400MonthsPreview})` : ''} after confirming Best-of lists are generated and Favorites are manually added (Confirm 500).`,
+      footerMeta: c400.length > 0 ? 'Awaiting confirmation / bypass' : 'None in 400',
+      targetId: 'mode-b-step-2',
+      linkLabel: 'Go to 2️⃣ Confirm 400➜500 ↓',
+      active: c400.length > 0
+    },
+    {
+      num: '3',
+      numTone: 'purple',
+      title: 'Schedule Favorites Pull & Ranking (500 ➜ 650)',
+      badgeText: `${c500.length} in 500/550`,
+      badgeClass: c500.length > 0 ? 'badge-purple' : 'badge-outline',
+      description: `Schedule any batch currently in status 500/550${c500MonthsPreview ? ` (${c500MonthsPreview})` : ''} to pull Favorites (550), run AI ranking (600), and finalize cleanup (650).`,
+      footerMeta: c500.length > 0 ? `${c500.filter(x => x.in_queue).length} scheduled` : '0 batches in 500/550',
+      targetId: 'mode-b-step-3',
+      linkLabel: 'Go to 3️⃣ Schedule 500➜650 ↓',
+      active: c500.length > 0
+    }
+  ]);
 
   // 1. Manual 400 -> 500 Table
   const b400Badge = document.getElementById('mode-b-400-badge');
@@ -842,6 +943,51 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       detailEl.textContent = `👉 No actionable moments currently ready for publishing${disjoint.length > 0 ? ` (${disjoint.length} disjoint moments ready for merge)` : ''}.`;
     }
   }
+
+  const rawClustersForSummary = modeM.unassigned_clusters || [];
+  const outstandingGroupsCount = rawClustersForSummary.filter(c => {
+    const cnt = (c.assets || []).length || c.asset_count || 0;
+    return Math.max(0, cnt - (c.duplicate_copy_count || 0)) > 0;
+  }).length;
+  const thDriverSummary = th.driver?.folder ? `#${th.driver.position} ${th.driver.folder}` : '';
+  renderPlannerPathsSummary('mode-m-paths-summary', [
+    {
+      num: '1',
+      numTone: th.aligned && needsSync.length === 0 ? 'green' : 'amber',
+      title: 'Sync ToBeCurated & Align Threshold',
+      badgeText: th.aligned ? 'Threshold Aligned' : `${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0.5315).toFixed(4)}`,
+      badgeClass: th.aligned && needsSync.length === 0 ? 'badge-green' : 'badge-amber',
+      description: `Run Option [1] (${needsSync.length} moment(s) needing sync) and assign/ignore ${outstandingGroupsCount} outstanding unassigned group(s) until threshold aligns.`,
+      footerMeta: thDriverSummary ? `Top driver: ${thDriverSummary}` : `${rawClustersForSummary.length} total groups`,
+      targetId: 'mode-m-step-1',
+      linkLabel: 'Go to 1️⃣ Threshold & Groups ↓',
+      active: !th.aligned || needsSync.length > 0 || outstandingGroupsCount > 0
+    },
+    {
+      num: '2',
+      numTone: 'green',
+      title: 'Publish Top Ready Moments',
+      badgeText: `${recs.length} actionable`,
+      badgeClass: recs.length > 0 ? 'badge-green' : 'badge-outline',
+      description: `Publish threshold-aligned Moments${recs[0] ? ` (top: ${recs[0].moment_name})` : ''} ready for Shutterfly / YouTube in curated batches (up to 9 assets).`,
+      footerMeta: th.aligned ? 'Ready for publishing' : 'Recommended after Path 1',
+      targetId: 'mode-m-step-2',
+      linkLabel: 'Go to 2️⃣ Publishing ↓',
+      active: recs.length > 0
+    },
+    {
+      num: '3',
+      numTone: 'purple',
+      title: 'Consolidate Disjoint Moments (< 2)',
+      badgeText: `${disjoint.length} disjoint`,
+      badgeClass: disjoint.length > 0 ? 'badge-amber' : 'badge-outline',
+      description: `Review small single-asset disjoint Moments and merge them into neighboring chronological Moments.`,
+      footerMeta: disjoint.length > 0 ? `${disjoint.length} candidate(s)` : 'None needing merge',
+      targetId: 'mode-m-step-3',
+      linkLabel: 'Go to 3️⃣ Disjoint Merge ↓',
+      active: disjoint.length > 0
+    }
+  ]);
 
   // Step 1: Sync Box
   const syncBox = document.getElementById('mode-m-sync-box');

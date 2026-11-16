@@ -3530,13 +3530,13 @@ def get_planner_overview(mode: str = "all"):
                     if sc_str == "400":
                         if fav_a > 0:
                             item["readiness"] = "ready"
-                            item["next_step"] = f"Confirm Google Photos Curation (400 ➜ 500) — {fav_a} favorites detected"
+                            item["next_step"] = f"Confirm Google AI rating & Best-of Favorites (400 ➜ 500) — {fav_a} favorites detected"
                         elif elapsed_days is not None and elapsed_days < 3.0:
                             item["readiness"] = "cooldown"
-                            item["next_step"] = f"Wait for Google AI curation ({elapsed_days:.1f}d / 3.0d elapsed)"
+                            item["next_step"] = f"Google AI rating window ({elapsed_days:.1f}d / 3.0d) — confirm once Best-of lists are generated & Favorites manually added"
                         else:
                             item["readiness"] = "action_needed"
-                            item["next_step"] = "Star favorites in Google Photos album or Bypass to Direct-Rank (400 ➜ 500)"
+                            item["next_step"] = "Confirm Google AI rating (Best-of lists generated & Favorites manually added) via Confirm 500 or Bypass"
                         manual_400_candidates.append(item)
                     elif sc_str in ("500", "550"):
                         item["transition_path"] = "500 ➜ 550 (Pull Favorites) ➜ 600 (Rank & Export) ➜ 650 (Cloud Retain)"
