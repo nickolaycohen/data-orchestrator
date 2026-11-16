@@ -550,11 +550,8 @@ interface PlannerPathCard {
   title: string;
   badgeText: string;
   badgeClass: string;
+  badgeTitle?: string;
   description: string;
-  highlightLine?: {
-    text: string;
-    tone?: 'green' | 'amber' | 'muted';
-  };
   footerMeta: string;
   targetId: string;
   linkLabel: string;
@@ -576,9 +573,7 @@ function renderPlannerPathsSummary(containerId: string, paths: PlannerPathCard[]
     .map(p => {
       const toneClass = `num-${p.numTone}`;
       const stateClass = p.active ? 'path-active' : 'path-muted';
-      const hlHtml = p.highlightLine
-        ? `<div class="planner-path-highlight ${p.highlightLine.tone ? `tone-${p.highlightLine.tone}` : ''}">${escapeHtml(p.highlightLine.text)}</div>`
-        : '';
+      const titleAttr = p.badgeTitle ? ` title="${escapeHtml(p.badgeTitle)}"` : '';
       return `
         <div class="planner-path-card ${stateClass}">
           <div>
@@ -587,10 +582,9 @@ function renderPlannerPathsSummary(containerId: string, paths: PlannerPathCard[]
                 <span class="planner-path-num ${toneClass}">${escapeHtml(p.num)}</span>
                 <span class="planner-path-title">${escapeHtml(p.title)}</span>
               </div>
-              <span class="badge badge-xs ${p.badgeClass} font-mono">${escapeHtml(p.badgeText)}</span>
+              <span class="badge badge-xs ${p.badgeClass} font-mono"${titleAttr}>${escapeHtml(p.badgeText)}</span>
             </div>
             <p class="planner-path-desc" style="margin-top: 0.4rem;">${escapeHtml(p.description)}</p>
-            ${hlHtml}
           </div>
           <div class="planner-path-footer">
             <span class="font-mono text-muted" style="font-size: 0.67rem;">${escapeHtml(p.footerMeta)}</span>
@@ -958,15 +952,9 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
     return Math.max(0, cnt - (c.duplicate_copy_count || 0)) > 0;
   }).length;
   const thDriverSummary = th.driver?.folder ? `#${th.driver.position} ${th.driver.folder}` : '';
-  const currThVal = Number(th.current || th.historical_min || 0.5315);
-  const formatMomentVsThreshold = (momentName: string, score: number) => {
-    const diff = score - currThVal;
-    const diffStr = `${diff >= 0 ? '+' : '−'}${Math.abs(diff).toFixed(4)}`;
-    const relIcon = diff >= 0 ? '≥' : '<';
-    return {
-      text: `Top: ${momentName} · Avg ${score.toFixed(4)} ${relIcon} thr ${currThVal.toFixed(4)} (${diffStr})`,
-      tone: (diff >= 0 ? 'green' : 'amber') as 'green' | 'amber'
-    };
+  const formatMomentScoreBadge = (momentName: string, score: number) => {
+    const shortName = momentName.length > 28 ? `${momentName.slice(0, 26)}…` : momentName;
+    return `${shortName} · ${score.toFixed(4)}`;
   };
 
   const topRec = recs[0];
@@ -977,16 +965,13 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       num: '1',
       numTone: th.aligned && needsSync.length === 0 ? 'green' : 'amber',
       title: 'Sync ToBeCurated & Align Threshold',
-      badgeText: th.aligned ? 'Threshold Aligned' : `${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0.5315).toFixed(4)}`,
+      badgeText: th.aligned
+        ? `Aligned · ${(th.current || 0.5315).toFixed(4)}`
+        : `${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0.5315).toFixed(4)}`,
       badgeClass: th.aligned && needsSync.length === 0 ? 'badge-green' : 'badge-amber',
+      badgeTitle: thDriverSummary ? `Top driver: ${thDriverSummary}` : undefined,
       description: `Run Option [1] (${needsSync.length} moment(s) needing sync) and assign/ignore ${outstandingGroupsCount} outstanding unassigned group(s) until threshold aligns.`,
-      highlightLine: thDriverSummary
-        ? {
-            text: `Driver: ${thDriverSummary} · Score ${currThVal.toFixed(4)}`,
-            tone: th.aligned ? 'green' : 'amber'
-          }
-        : undefined,
-      footerMeta: th.aligned ? `Target ${(th.historical_min || 0.5315).toFixed(4)} aligned` : `${rawClustersForSummary.length} total groups`,
+      footerMeta: thDriverSummary ? `Driver: ${thDriverSummary}` : `${rawClustersForSummary.length} total groups`,
       targetId: 'mode-m-step-1',
       linkLabel: 'Go to 1️⃣ Threshold & Groups ↓',
       active: !th.aligned || needsSync.length > 0 || outstandingGroupsCount > 0
@@ -995,13 +980,11 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       num: '2',
       numTone: 'green',
       title: 'Publish Top Ready Moments',
-      badgeText: `${recs.length} actionable`,
+      badgeText: topRec ? formatMomentScoreBadge(topRec.moment_name, Number(topRec.avg_score || 0)) : '0 actionable',
       badgeClass: recs.length > 0 ? 'badge-green' : 'badge-outline',
+      badgeTitle: topRec ? `Top publishing candidate: ${topRec.moment_name} (${Number(topRec.avg_score || 0).toFixed(4)})` : undefined,
       description: `Publish threshold-aligned Moments ready for Shutterfly / YouTube in curated batches (up to 9 assets).`,
-      highlightLine: topRec
-        ? formatMomentVsThreshold(topRec.moment_name, Number(topRec.avg_score || 0))
-        : { text: 'Top: None currently eligible', tone: 'muted' },
-      footerMeta: th.aligned ? 'Ready for publishing' : 'Recommended after Path 1',
+      footerMeta: `${recs.length} actionable${th.aligned ? '' : ' · after Path 1'}`,
       targetId: 'mode-m-step-2',
       linkLabel: 'Go to 2️⃣ Publishing ↓',
       active: recs.length > 0
@@ -1010,13 +993,11 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       num: '3',
       numTone: 'purple',
       title: 'Consolidate Disjoint Moments (< 2)',
-      badgeText: `${disjoint.length} disjoint`,
+      badgeText: topDisjoint ? formatMomentScoreBadge(topDisjoint.moment_name, Number(topDisjoint.avg_score || 0)) : '0 disjoint',
       badgeClass: disjoint.length > 0 ? 'badge-amber' : 'badge-outline',
+      badgeTitle: topDisjoint ? `Top disjoint candidate: ${topDisjoint.moment_name} (${Number(topDisjoint.avg_score || 0).toFixed(4)})` : undefined,
       description: `Review small single-asset disjoint Moments and merge them into neighboring chronological Moments.`,
-      highlightLine: topDisjoint
-        ? formatMomentVsThreshold(topDisjoint.moment_name, Number(topDisjoint.avg_score || 0))
-        : { text: 'Top: None needing merge', tone: 'muted' },
-      footerMeta: disjoint.length > 0 ? `${disjoint.length} candidate(s)` : 'None needing merge',
+      footerMeta: disjoint.length > 0 ? `${disjoint.length} disjoint` : '0 disjoint',
       targetId: 'mode-m-step-3',
       linkLabel: 'Go to 3️⃣ Disjoint Merge ↓',
       active: disjoint.length > 0
