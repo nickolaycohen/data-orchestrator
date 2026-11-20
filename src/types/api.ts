@@ -395,6 +395,44 @@ export interface CreateMomentResponse {
   ignored_db_updated?: number;
 }
 
+export interface PublishMomentAssetItem {
+  asset_id: string;
+  filename: string;
+  score: number;
+  media_type: 'photo' | 'video';
+  local_files?: string[];
+}
+
+export interface PublishMomentInfoResponse {
+  ok: boolean;
+  error?: string;
+  moment_name?: string;
+  memory_stage?: string;
+  shutterfly_url?: string;
+  youtube_url?: string;
+  curated_count?: number;
+  published_count?: number;
+  unpublished_count?: number;
+  curated_dir?: string;
+  curated_dir_exists?: boolean;
+  assets?: PublishMomentAssetItem[];
+}
+
+export interface PublishMomentResponse {
+  ok: boolean;
+  error?: string;
+  moment_name?: string;
+  inserted_count?: number;
+  skipped_count?: number;
+  photos_count?: number;
+  videos_count?: number;
+  total_published?: number;
+  curated_total?: number;
+  new_stage?: string;
+  shutterfly_url?: string;
+  youtube_url?: string;
+}
+
 export type TriggerTaskFn = (
   taskId: string,
   args?: Record<string, any> | null,

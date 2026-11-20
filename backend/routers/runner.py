@@ -77,6 +77,13 @@ TASK_DEFINITIONS = {
         "cwd_repo": "media-organizer-pipeline",
         "cmd": ["python3", "-u", "scripts/create_apple_moments_albums.py"]
     },
+    "media_export_curated": {
+        "name": "Export Curated Moment Album (Option [2])",
+        "pillar": "media-organizer-pipeline",
+        "description": "Exports curated album originals from Apple Photos Curated folder to LaCie (Option [2]).",
+        "cwd_repo": "media-organizer-pipeline",
+        "cmd": ["python3", "-u", "scripts/export_curated_album.py"]
+    },
     "media_pipeline_planner": {
         "name": "Media Pipeline Planner CLI",
         "pillar": "media-organizer-pipeline",

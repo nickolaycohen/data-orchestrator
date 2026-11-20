@@ -18,6 +18,8 @@ from fastapi.responses import FileResponse, Response
 from backend.config import MEDIA_DB_PATH, REPOS, get_db_connection
 
 APPLE_PHOTOS_LIBRARY_PATH = Path("/Volumes/Extreme Pro/Photos Library/All-Media.photoslibrary")
+CURATED_LACIE_DIR = Path("/Volumes/LaCie/Media Organizer/Curated")
+VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mpg"}
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -4458,3 +4460,323 @@ def create_moment_via_applescript(req: CreateMomentRequest):
         "ignored_photos_added": ignored_photos_added,
         "ignored_db_updated": ignored_db_updated,
     }
+
+
+class PublishMomentRequest(BaseModel):
+    moment_name: str
+    asset_ids: list[str]
+    shutterfly_url: Optional[str] = None
+    youtube_url: Optional[str] = None
+    account: Optional[str] = "nickolay.cohen@gmail.com"
+    custom_platform: Optional[str] = None
+
+
+class OpenCuratedFolderRequest(BaseModel):
+    moment_name: str
+
+
+def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
+    """Return curated assets (asset_id, original_filename, score_normalized, is_published) for a Moment."""
+    cur.execute(
+        """
+        SELECT DISTINCT moaa.asset_id
+        FROM media_organizer_album_assets moaa
+        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+        """
+    )
+    excluded_aids = {r[0] for r in cur.fetchall()}
+
+    cur.execute(
+        """
+        SELECT DISTINCT moaa.asset_id
+        FROM media_organizer_album_assets moaa
+        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+        WHERE moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
+        """
+    )
+    all_curated_album_aids = {r[0] for r in cur.fetchall()}
+
+    cur.execute("SELECT DISTINCT asset_uuid FROM publications WHERE moment_name = ?", (moment_name,))
+    moment_pub_aids = {r[0] for r in cur.fetchall()}
+    cur.execute("SELECT DISTINCT asset_uuid FROM publications")
+    all_pub_aids = {r[0] for r in cur.fetchall()}
+
+    cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+    min_row = cur.fetchone()
+    hist_min_raw = float(min_row[0]) if min_row and min_row[0] else 0.5315
+
+    # Match the same curated set used in _compute_mode_m_from_db
+    by_aid: dict[str, tuple[str, str, float]] = {}
+    cur.execute(
+        """
+        SELECT v.asset_id, COALESCE(v.original_filename, a.original_filename, ''), v.score_normalized
+        FROM ranked_assets_view v
+        JOIN month_batches mb ON v.month = mb.month
+        LEFT JOIN assets a ON a.asset_id = v.asset_id
+        WHERE mb.status_code >= '600'
+          AND TRIM(COALESCE(v.MomentsAlbumName, '')) = TRIM(?)
+          AND v.score_normalized > ?
+        """,
+        (moment_name, hist_min_raw),
+    )
+    for aid, fn, sc in cur.fetchall():
+        if aid in excluded_aids or aid not in all_curated_album_aids:
+            continue
+        by_aid[aid] = (aid, fn or "", float(sc or 0.0))
+
+    # Also include rows recorded directly in moment_exports (curation_stage='curated') if missing above
+    cur.execute(
+        """
+        SELECT me.asset_id, COALESCE(v.original_filename, a.original_filename, ''), COALESCE(v.score_normalized, 0.0)
+        FROM moment_exports me
+        LEFT JOIN ranked_assets_view v ON me.asset_id = v.asset_id
+        LEFT JOIN assets a ON me.asset_id = a.asset_id
+        WHERE TRIM(me.album_name) = TRIM(?) AND me.curation_stage = 'curated'
+        """,
+        (moment_name,),
+    )
+    for aid, fn, sc in cur.fetchall():
+        if aid in excluded_aids or aid in by_aid:
+            continue
+        by_aid[aid] = (aid, fn or "", float(sc or 0.0))
+
+    rows = []
+    for aid, fn, sc in by_aid.values():
+        is_pub = (aid in moment_pub_aids) or (aid in all_pub_aids)
+        rows.append((aid, fn, sc, is_pub))
+
+    rows.sort(key=lambda x: (-x[2], os.path.splitext(x[1])[0].lower(), x[0]))
+    return rows, moment_pub_aids
+
+
+@router.get("/memories/publish-info")
+def get_moment_publish_info(moment_name: str):
+    """Return curated unpublished batch (top 9), existing URLs, and LaCie curated folder status for a Moment."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    m_name = (moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+
+    _ensure_published_url_schema()
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT memory_stage, shutterfly_url, youtube_url FROM curated_moments WHERE moment_name = ?",
+                (m_name,),
+            )
+            cm_row = cur.fetchone()
+            stage = (cm_row[0] if cm_row and cm_row[0] else "M400")
+            sf_url = (cm_row[1] if cm_row and cm_row[1] else "") or ""
+            yt_url = (cm_row[2] if cm_row and cm_row[2] else "") or ""
+
+            rows, moment_pub_aids = _get_curated_asset_rows_for_moment(cur, m_name)
+            curated_total = len(rows)
+            unpublished_rows = [(aid, fn, sc) for aid, fn, sc, is_pub in rows if not is_pub]
+            top_batch = unpublished_rows[:9]
+
+            moment_dir = CURATED_LACIE_DIR / m_name
+            dir_exists = moment_dir.exists() and moment_dir.is_dir()
+            local_by_base: dict[str, list[str]] = {}
+            if dir_exists:
+                try:
+                    for entry in os.listdir(moment_dir):
+                        if not entry.startswith(".") and (moment_dir / entry).is_file():
+                            b = os.path.splitext(entry)[0].lower()
+                            local_by_base.setdefault(b, []).append(entry)
+                except Exception:
+                    pass
+
+            assets_out = []
+            for aid, fn, sc in top_batch:
+                ext = os.path.splitext(fn or "")[1].lower()
+                base = os.path.splitext(fn or "")[0].lower()
+                assets_out.append(
+                    {
+                        "asset_id": aid,
+                        "filename": fn,
+                        "score": round(sc, 4),
+                        "media_type": "video" if ext in VIDEO_EXTENSIONS else "photo",
+                        "local_files": local_by_base.get(base, []),
+                    }
+                )
+
+            return {
+                "ok": True,
+                "moment_name": m_name,
+                "memory_stage": stage,
+                "shutterfly_url": sf_url,
+                "youtube_url": yt_url,
+                "curated_count": curated_total,
+                "published_count": len(moment_pub_aids),
+                "unpublished_count": len(unpublished_rows),
+                "curated_dir": str(moment_dir),
+                "curated_dir_exists": dir_exists,
+                "assets": assets_out,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/memories/open-curated-folder")
+def open_curated_moment_folder(req: OpenCuratedFolderRequest):
+    """Open the Curated Moment folder on LaCie in macOS Finder."""
+    m_name = (req.moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+    target = CURATED_LACIE_DIR / m_name
+    if not target.exists():
+        if CURATED_LACIE_DIR.exists():
+            target = CURATED_LACIE_DIR
+        else:
+            return {"ok": False, "error": f"Folder not found: {CURATED_LACIE_DIR / m_name}"}
+    try:
+        subprocess.run(["open", str(target)], check=True)
+        return {"ok": True, "opened": str(target)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/memories/publish")
+def publish_moment_assets(req: PublishMomentRequest):
+    """Record publication/republication of Moment assets in media_organizer.db (Shutterfly/YouTube + URLs)."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    m_name = (req.moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+
+    clean_ids = []
+    seen = set()
+    for raw_aid in req.asset_ids or []:
+        s = (raw_aid or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            clean_ids.append(s)
+    if not clean_ids:
+        return {"ok": False, "error": "Select at least one asset to record publication"}
+
+    _ensure_published_url_schema()
+    account = (req.account or "nickolay.cohen@gmail.com").strip() or "nickolay.cohen@gmail.com"
+    custom_plat = (req.custom_platform or "").strip() or None
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT shutterfly_url, youtube_url FROM curated_moments WHERE moment_name = ?",
+                (m_name,),
+            )
+            cm_row = cur.fetchone()
+            existing_sf = cm_row[0] if cm_row and cm_row[0] else None
+            existing_yt = cm_row[1] if cm_row and cm_row[1] else None
+
+            sf_url_val = (req.shutterfly_url or "").strip() or existing_sf
+            yt_url_val = (req.youtube_url or "").strip() or existing_yt
+
+            cur.execute("SELECT asset_uuid FROM publications WHERE moment_name = ?", (m_name,))
+            already_published = {r[0] for r in cur.fetchall()}
+
+            to_insert_ids = [aid for aid in clean_ids if aid not in already_published]
+            skipped_count = len(clean_ids) - len(to_insert_ids)
+
+            ph = ",".join("?" for _ in clean_ids)
+            cur.execute(
+                f"SELECT asset_id, COALESCE(original_filename, '') FROM assets WHERE asset_id IN ({ph})",
+                clean_ids,
+            )
+            fn_map = {r[0]: (r[1] or "") for r in cur.fetchall()}
+
+            pub_rows = []
+            photos_cnt = 0
+            videos_cnt = 0
+            for aid in to_insert_ids:
+                fn = fn_map.get(aid, "")
+                ext = os.path.splitext(fn)[1].lower()
+                is_video = ext in VIDEO_EXTENSIONS
+                if custom_plat:
+                    platform = custom_plat
+                    pub_url = sf_url_val if "shutterfly" in custom_plat.lower() else (yt_url_val if "youtube" in custom_plat.lower() else (sf_url_val or yt_url_val))
+                elif is_video:
+                    platform = "YouTube"
+                    pub_url = yt_url_val
+                    videos_cnt += 1
+                else:
+                    platform = "Shutterfly"
+                    pub_url = sf_url_val
+                    photos_cnt += 1
+                pub_rows.append((aid, fn, m_name, platform, account, pub_url))
+
+            if pub_rows:
+                cur.executemany(
+                    """
+                    INSERT INTO publications (asset_uuid, filename, moment_name, platform, account, published_url, published_at_utc)
+                    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                    """,
+                    pub_rows,
+                )
+
+            curated_rows, _ = _get_curated_asset_rows_for_moment(cur, m_name)
+            curated_total = len(curated_rows)
+            total_pub_after = len(already_published) + len(pub_rows)
+            new_stage = (
+                "M500"
+                if (curated_total > 0 and total_pub_after >= curated_total)
+                else ("M450" if total_pub_after > 0 else "M400")
+            )
+
+            cur.execute(
+                """
+                INSERT INTO curated_moments (moment_name, memory_stage, shutterfly_url, youtube_url)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(moment_name) DO UPDATE SET
+                    memory_stage = excluded.memory_stage,
+                    shutterfly_url = COALESCE(excluded.shutterfly_url, curated_moments.shutterfly_url),
+                    youtube_url = COALESCE(excluded.youtube_url, curated_moments.youtube_url)
+                """,
+                (m_name, new_stage, sf_url_val, yt_url_val),
+            )
+
+            if sf_url_val:
+                cur.execute(
+                    """
+                    UPDATE publications SET published_url = ?
+                    WHERE moment_name = ? AND LOWER(COALESCE(platform, '')) LIKE '%shutterfly%'
+                    """,
+                    (sf_url_val, m_name),
+                )
+            if yt_url_val:
+                cur.execute(
+                    """
+                    UPDATE publications SET published_url = ?
+                    WHERE moment_name = ? AND LOWER(COALESCE(platform, '')) LIKE '%youtube%'
+                    """,
+                    (yt_url_val, m_name),
+                )
+
+            conn.commit()
+            return {
+                "ok": True,
+                "moment_name": m_name,
+                "inserted_count": len(pub_rows),
+                "skipped_count": skipped_count,
+                "photos_count": photos_cnt,
+                "videos_count": videos_cnt,
+                "total_published": total_pub_after,
+                "curated_total": curated_total,
+                "new_stage": new_stage,
+                "shutterfly_url": sf_url_val or "",
+                "youtube_url": yt_url_val or "",
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

@@ -36,7 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupRefresh();
   setupUtilities();
   setupMediaCleanup();
-  setupPlannerOverview(fetchExecutorMonitor);
+  setupPlannerOverview(fetchExecutorMonitor, fetchMediaMetrics);
 
   // Initial data loading
   fetchAllMetrics();

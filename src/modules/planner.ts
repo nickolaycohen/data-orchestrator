@@ -12,7 +12,10 @@ import type {
   ModeMDedupPreviewResponse,
   PlannerModeB,
   PlannerModeM,
-  PlannerOverviewResponse
+  PlannerOverviewResponse,
+  PublishMomentAssetItem,
+  PublishMomentInfoResponse,
+  PublishMomentResponse
 } from '../types/api.ts';
 import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../utils/formatters.ts';
 import { openCleanupPreviewModal } from './cleanup.ts';
@@ -35,6 +38,7 @@ const selectedDedupAssetIds = new Set<string>();
 let isRunningDedupPreview = false;
 let isApplyingDedupIgnore = false;
 let plannerRefreshExecutorCb: (() => void) | undefined;
+let plannerRefreshMediaMetricsCb: (() => void) | undefined;
 
 let memoriesFoldersScope: 'moments' | 'curated' | 'to_be_curated' | 'folders' | 'all' = 'moments';
 let memoriesFoldersQuery = '';
@@ -55,6 +59,12 @@ let createMomentCompleted = false;
 let createMomentCheckTimer: number | null = null;
 let groupingRulesPanelCollapsed = true;
 let isUpdatingGroupingRules = false;
+
+let publishMomentName = '';
+let publishMomentAssets: PublishMomentAssetItem[] = [];
+const publishSelectedAssetIds = new Set<string>();
+let isSubmittingPublishMoment = false;
+let publishMomentCompleted = false;
 
 type ClustersSyncLockMode = 'idle' | 'running' | 'awaiting';
 let clustersSyncLockMode: ClustersSyncLockMode = 'idle';
@@ -187,6 +197,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   if (view === 'b') {
     closeIntakeDedupModal();
     closeCreateMomentModal();
+    closePublishMomentModal();
     if (grid) {
       grid.style.display = 'grid';
       grid.classList.add('single-col');
@@ -220,6 +231,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   } else if (view === 'c') {
     closeIntakeDedupModal();
     closeCreateMomentModal();
+    closePublishMomentModal();
     if (grid) grid.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardFolders) cardFolders.style.display = 'none';
@@ -230,8 +242,9 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   }
 }
 
-export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
+export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMediaMetrics?: () => void): void {
   plannerRefreshExecutorCb = onRefreshExecutor;
+  plannerRefreshMediaMetricsCb = onRefreshMediaMetrics;
 
   // Mode view tabs ([B] | [M] | [C])
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(tab => {
@@ -421,6 +434,41 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void): void {
   document.getElementById('create-moment-empty-only')?.addEventListener('change', () => updateCreateMomentAssetsUI());
   document.getElementById('btn-submit-create-moment')?.addEventListener('click', () => {
     void submitCreateMoment();
+  });
+
+  // Publish / Republish Moment Modal wiring
+  document.querySelectorAll<HTMLElement>('.btn-close-publish-moment-modal').forEach(btn => {
+    btn.addEventListener('click', () => closePublishMomentModal());
+  });
+  document.getElementById('modal-publish-moment')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement)?.id === 'modal-publish-moment') {
+      closePublishMomentModal();
+    }
+  });
+  document.getElementById('btn-publish-toggle-all')?.addEventListener('click', () => {
+    if (!publishMomentAssets.length) return;
+    const allSelected = publishMomentAssets.every(a => publishSelectedAssetIds.has(a.asset_id));
+    if (allSelected) {
+      publishSelectedAssetIds.clear();
+    } else {
+      publishMomentAssets.forEach(a => publishSelectedAssetIds.add(a.asset_id));
+    }
+    renderPublishMomentAssets();
+  });
+  document.getElementById('btn-publish-open-folder')?.addEventListener('click', () => {
+    if (!publishMomentName) return;
+    void openCuratedFolderForPublish(publishMomentName);
+  });
+  document.getElementById('btn-publish-export-curated')?.addEventListener('click', () => {
+    if (!publishMomentName) return;
+    void window.triggerTask('media_export_curated', [publishMomentName] as any, true, null, () => {
+      void openPublishMomentModal(publishMomentName);
+    });
+  });
+  document.getElementById('publish-moment-sf-url')?.addEventListener('input', () => syncPublishOpenLinks());
+  document.getElementById('publish-moment-yt-url')?.addEventListener('input', () => syncPublishOpenLinks());
+  document.getElementById('btn-submit-publish-moment')?.addEventListener('click', () => {
+    void submitPublishMoment();
   });
 
   // Grouping Rules Panel toggle & reset
@@ -1091,16 +1139,15 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       recTbody.innerHTML = recs
         .map(r => {
           const isRepub = r.action.startsWith('Republish');
-          const actionBadge = isRepub
-            ? `<span class="badge badge-xs badge-purple">${escapeHtml(r.action)}</span>`
-            : `<span class="badge badge-xs badge-green">${escapeHtml(r.action)}</span>`;
+          const actionBtnClass = isRepub ? 'btn-purple' : 'btn-green';
+          const actionBtn = `<button type="button" class="btn btn-xs ${actionBtnClass} btn-open-publish-moment" data-moment-name="${escapeHtml(r.moment_name)}" title="Open Publish / Republish workflow for '${escapeHtml(r.moment_name)}'">${escapeHtml(r.action)}</button>`;
           return `
           <tr>
             <td><strong class="text-primary">${escapeHtml(r.moment_name)}</strong></td>
             <td style="text-align: right;" class="font-mono text-amber">${r.avg_score.toFixed(4)}</td>
             <td style="text-align: right;" class="font-mono">${r.files}</td>
             <td style="text-align: right;" class="font-mono">${r.published}</td>
-            <td>${actionBadge}</td>
+            <td>${actionBtn}</td>
             <td class="font-mono text-muted" style="font-size: 0.69rem; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.details)}">
               ${escapeHtml(r.details)}
             </td>
@@ -1108,6 +1155,12 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
         `;
         })
         .join('');
+      recTbody.querySelectorAll<HTMLButtonElement>('.btn-open-publish-moment').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const momentName = btn.dataset.momentName || '';
+          if (momentName) void openPublishMomentModal(momentName);
+        });
+      });
     }
   }
 
@@ -2975,6 +3028,298 @@ async function updateGroupingRules(payload: {
     return false;
   } finally {
     isUpdatingGroupingRules = false;
+  }
+}
+
+function setPublishModalCompletedState(completed: boolean): void {
+  publishMomentCompleted = completed;
+  const btnCancel = document.getElementById('btn-cancel-publish-moment') as HTMLButtonElement | null;
+  const btnSubmit = document.getElementById('btn-submit-publish-moment') as HTMLButtonElement | null;
+  if (btnCancel) {
+    btnCancel.style.display = completed ? 'none' : '';
+    btnCancel.disabled = false;
+  }
+  if (btnSubmit) {
+    btnSubmit.disabled = false;
+    if (completed) {
+      btnSubmit.className = 'btn btn-green';
+      btnSubmit.textContent = '✅ OK';
+    } else {
+      btnSubmit.className = 'btn btn-purple';
+      btnSubmit.textContent = '✅ Record Publication';
+    }
+  }
+}
+
+function closePublishMomentModal(): void {
+  document.getElementById('modal-publish-moment')?.classList.remove('open');
+}
+
+function syncPublishOpenLinks(): void {
+  const sfInp = document.getElementById('publish-moment-sf-url') as HTMLInputElement | null;
+  const ytInp = document.getElementById('publish-moment-yt-url') as HTMLInputElement | null;
+  const sfLink = document.getElementById('publish-sf-open-link') as HTMLAnchorElement | null;
+  const ytLink = document.getElementById('publish-yt-open-link') as HTMLAnchorElement | null;
+  if (sfLink) {
+    const val = (sfInp?.value || '').trim();
+    sfLink.href = /^https?:\/\//i.test(val) ? val : 'https://photos.shutterfly.com/';
+  }
+  if (ytLink) {
+    const val = (ytInp?.value || '').trim();
+    ytLink.href = /^https?:\/\//i.test(val) ? val : 'https://www.youtube.com/';
+  }
+}
+
+function updatePublishMomentSelectionSummary(): void {
+  const pill = document.getElementById('publish-moment-selected-pill');
+  const breakdownEl = document.getElementById('publish-moment-breakdown');
+  const selected = publishMomentAssets.filter(a => publishSelectedAssetIds.has(a.asset_id));
+  const photosCnt = selected.filter(a => a.media_type !== 'video').length;
+  const videosCnt = selected.filter(a => a.media_type === 'video').length;
+  if (pill) {
+    pill.textContent = `${selected.length} / ${publishMomentAssets.length} selected`;
+  }
+  if (breakdownEl) {
+    breakdownEl.textContent = selected.length
+      ? `📷 ${photosCnt} Photo(s) → Shutterfly · 🎥 ${videosCnt} Video(s) → YouTube`
+      : 'Select at least 1 asset to record';
+  }
+}
+
+function renderPublishMomentAssets(): void {
+  const listEl = document.getElementById('publish-moment-asset-list');
+  if (!listEl) return;
+
+  if (!publishMomentAssets.length) {
+    listEl.innerHTML =
+      '<div class="text-center text-muted" style="padding: 1rem;">No unpublished curated assets remain for this Moment.</div>';
+    updatePublishMomentSelectionSummary();
+    return;
+  }
+
+  listEl.innerHTML = publishMomentAssets
+    .map((a, idx) => {
+      const checked = publishSelectedAssetIds.has(a.asset_id);
+      const typeBadge =
+        a.media_type === 'video'
+          ? '<span class="badge badge-xs badge-purple font-mono">VIDEO</span>'
+          : '<span class="badge badge-xs badge-green font-mono">PHOTO</span>';
+      const localNote =
+        a.local_files && a.local_files.length > 0
+          ? `<span class="badge badge-xs badge-outline font-mono" title="Exported on LaCie: ${escapeHtml(a.local_files.join(', '))}">✓ LaCie</span>`
+          : '<span class="badge badge-xs badge-amber font-mono" title="Not yet exported in LaCie Curated folder">Not exported</span>';
+      return `
+        <div class="publish-asset-row">
+          <label class="publish-asset-left" style="cursor: pointer;">
+            <input type="checkbox" class="publish-asset-checkbox" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} />
+            <img class="publish-asset-thumb" src="/api/media/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.filename)}" loading="lazy" />
+            <div style="min-width: 0; flex: 1;">
+              <div class="font-mono" style="font-size: 0.75rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                #${idx + 1} · ${escapeHtml(a.filename || a.asset_id)}
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
+                ${typeBadge}
+                <span class="font-mono text-amber" style="font-size: 0.69rem;">Score ${a.score.toFixed(4)}</span>
+                ${localNote}
+              </div>
+            </div>
+          </label>
+        </div>
+      `;
+    })
+    .join('');
+
+  listEl.querySelectorAll<HTMLInputElement>('.publish-asset-checkbox').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const aid = cb.dataset.assetId || '';
+      if (!aid) return;
+      if (cb.checked) publishSelectedAssetIds.add(aid);
+      else publishSelectedAssetIds.delete(aid);
+      updatePublishMomentSelectionSummary();
+    });
+  });
+
+  updatePublishMomentSelectionSummary();
+}
+
+async function openCuratedFolderForPublish(momentName: string): Promise<void> {
+  try {
+    const res = await fetch('/api/media/memories/open-curated-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ moment_name: momentName })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(`Could not open folder: ${data.error || 'Unknown error'}`);
+    }
+  } catch (err: any) {
+    alert(`Error opening folder: ${err?.message || 'Unknown error'}`);
+  }
+}
+
+async function openPublishMomentModal(momentName: string): Promise<void> {
+  const modal = document.getElementById('modal-publish-moment');
+  const titleEl = document.getElementById('publish-moment-modal-title');
+  const stageBadgeEl = document.getElementById('publish-moment-stage-badge');
+  const summaryEl = document.getElementById('publish-moment-summary-banner');
+  const folderBarEl = document.getElementById('publish-moment-folder-bar');
+  const curatedDirEl = document.getElementById('publish-moment-curated-dir');
+  const sfInp = document.getElementById('publish-moment-sf-url') as HTMLInputElement | null;
+  const ytInp = document.getElementById('publish-moment-yt-url') as HTMLInputElement | null;
+  const statusEl = document.getElementById('publish-moment-status');
+  const openFolderBtn = document.getElementById('btn-publish-open-folder') as HTMLButtonElement | null;
+  const exportBtn = document.getElementById('btn-publish-export-curated') as HTMLButtonElement | null;
+  if (!modal) return;
+
+  publishMomentName = momentName;
+  publishMomentAssets = [];
+  publishSelectedAssetIds.clear();
+  setPublishModalCompletedState(false);
+
+  if (titleEl) titleEl.textContent = `📢 Publish / Republish: ${momentName}`;
+  if (stageBadgeEl) stageBadgeEl.textContent = '…';
+  if (summaryEl) {
+    summaryEl.innerHTML = '<div class="spinner-sm"></div><span>Loading curated assets and publication URLs...</span>';
+  }
+  if (folderBarEl) folderBarEl.style.display = 'none';
+  if (statusEl) {
+    statusEl.style.display = 'none';
+    statusEl.innerHTML = '';
+  }
+  renderPublishMomentAssets();
+  modal.classList.add('open');
+
+  try {
+    const params = new URLSearchParams({ moment_name: momentName });
+    const res = await fetch(`/api/media/memories/publish-info?${params.toString()}`);
+    const data: PublishMomentInfoResponse = await res.json();
+    if (!data.ok) {
+      if (summaryEl) {
+        summaryEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || 'Failed to load publish info')}</span>`;
+      }
+      return;
+    }
+
+    if (stageBadgeEl) stageBadgeEl.textContent = data.memory_stage || 'M400';
+    if (sfInp) sfInp.value = data.shutterfly_url || '';
+    if (ytInp) ytInp.value = data.youtube_url || '';
+    syncPublishOpenLinks();
+
+    if (summaryEl) {
+      const pubCount = data.published_count ?? 0;
+      const curCount = data.curated_count ?? 0;
+      const unpubCount = data.unpublished_count ?? 0;
+      const isRepublish = pubCount > 0;
+      summaryEl.innerHTML = `
+        <span>
+          <strong>${isRepublish ? '🔄 Republish' : '✨ First Publish'}</strong> ·
+          Curated: <strong>${curCount}</strong> ·
+          Already Published: <strong>${pubCount}</strong> ·
+          Remaining Unpublished: <strong>${unpubCount}</strong>
+        </span>
+      `;
+    }
+
+    if (folderBarEl && curatedDirEl) {
+      folderBarEl.style.display = 'flex';
+      curatedDirEl.textContent = data.curated_dir || '—';
+      if (openFolderBtn) openFolderBtn.disabled = !data.curated_dir_exists;
+      if (exportBtn) {
+        exportBtn.textContent = data.curated_dir_exists ? '🔄 Re-export Curated [2]' : '📤 Export Curated [2]';
+      }
+    }
+
+    publishMomentAssets = data.assets || [];
+    publishMomentAssets.forEach(a => publishSelectedAssetIds.add(a.asset_id));
+    renderPublishMomentAssets();
+  } catch (err: any) {
+    if (summaryEl) {
+      summaryEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  }
+}
+
+async function submitPublishMoment(): Promise<void> {
+  if (publishMomentCompleted) {
+    closePublishMomentModal();
+    return;
+  }
+  if (isSubmittingPublishMoment || !publishMomentName) return;
+
+  const assetIds = publishMomentAssets
+    .filter(a => publishSelectedAssetIds.has(a.asset_id))
+    .map(a => a.asset_id);
+  const statusEl = document.getElementById('publish-moment-status');
+  const btnCancel = document.getElementById('btn-cancel-publish-moment') as HTMLButtonElement | null;
+  const btnSubmit = document.getElementById('btn-submit-publish-moment') as HTMLButtonElement | null;
+  const sfInp = document.getElementById('publish-moment-sf-url') as HTMLInputElement | null;
+  const ytInp = document.getElementById('publish-moment-yt-url') as HTMLInputElement | null;
+  const accInp = document.getElementById('publish-moment-account') as HTMLInputElement | null;
+
+  if (!assetIds.length) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">⚠️ Select at least one asset to record as published.</span>';
+    }
+    return;
+  }
+
+  isSubmittingPublishMoment = true;
+  if (btnCancel) btnCancel.disabled = true;
+  if (btnSubmit) {
+    btnSubmit.disabled = true;
+    btnSubmit.textContent = 'Recording...';
+  }
+  if (statusEl) {
+    statusEl.style.display = 'flex';
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Recording publication of ${assetIds.length} asset(s) for <code>${escapeHtml(publishMomentName)}</code>...</span>`;
+  }
+
+  let succeeded = false;
+  try {
+    const res = await fetch('/api/media/memories/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        moment_name: publishMomentName,
+        asset_ids: assetIds,
+        shutterfly_url: (sfInp?.value || '').trim() || null,
+        youtube_url: (ytInp?.value || '').trim() || null,
+        account: (accInp?.value || 'nickolay.cohen@gmail.com').trim() || 'nickolay.cohen@gmail.com'
+      })
+    });
+    const data: PublishMomentResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    await Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
+    if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
+
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `
+        <span class="text-green">
+          ✅ Recorded <strong>${data.inserted_count ?? 0}</strong> asset(s) for
+          <code>${escapeHtml(data.moment_name || publishMomentName)}</code>
+          (Stage: <strong>${escapeHtml(data.new_stage || 'M450')}</strong> · Total Published: ${data.total_published ?? 0}/${data.curated_total ?? 0}).
+        </span>
+      `;
+    }
+    succeeded = true;
+  } catch (err: any) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  } finally {
+    isSubmittingPublishMoment = false;
+    setPublishModalCompletedState(succeeded);
   }
 }
 

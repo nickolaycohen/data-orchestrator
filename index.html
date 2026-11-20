@@ -2090,6 +2090,82 @@
           </div>
         </div>
       </div>
+
+      <!-- Modal: Publish / Republish Moment Batch -->
+      <div class="modal-backdrop" id="modal-publish-moment">
+        <div class="modal-dialog" style="max-width: 780px; width: 94vw; max-height: 90vh; display: flex; flex-direction: column;">
+          <div class="modal-header">
+            <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+              <h3 style="margin: 0; font-size: 1.05rem;" id="publish-moment-modal-title">📢 Publish / Republish Moment</h3>
+              <span class="badge badge-xs badge-purple font-mono" id="publish-moment-stage-badge">M400</span>
+            </div>
+            <button class="btn btn-xs btn-icon btn-close-publish-moment-modal" aria-label="Close">✕</button>
+          </div>
+          <div class="modal-body" style="padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem; overflow-y: auto; flex: 1;">
+            <div id="publish-moment-summary-banner" class="dedup-status-banner" style="padding: 0.55rem 0.75rem; font-size: 0.76rem;">
+              <div class="spinner-sm"></div>
+              <span>Loading curated assets and publication status...</span>
+            </div>
+
+            <div class="publish-folder-bar" id="publish-moment-folder-bar" style="display: none;">
+              <div style="min-width: 0; flex: 1;">
+                <span class="font-mono text-muted" style="font-size: 0.68rem; display: block;">Curated LaCie Folder</span>
+                <code id="publish-moment-curated-dir" style="font-size: 0.72rem; word-break: break-all;">—</code>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0;">
+                <button type="button" class="btn btn-xs btn-outline" id="btn-publish-open-folder" title="Open curated folder in macOS Finder">
+                  📂 Open Folder
+                </button>
+                <button type="button" class="btn btn-xs btn-outline" id="btn-publish-export-curated" title="Run Option [2]: Export Curated Album to LaCie">
+                  📤 Export Curated [2]
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
+                <strong style="font-size: 0.8rem;" id="publish-moment-assets-heading">Next Batch to Publish (up to 9 assets)</strong>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <span class="badge badge-xs badge-green font-mono" id="publish-moment-selected-pill">0 selected</span>
+                  <button type="button" class="btn btn-xs btn-outline" id="btn-publish-toggle-all">Toggle All</button>
+                </div>
+              </div>
+              <div class="publish-asset-list" id="publish-moment-asset-list"></div>
+            </div>
+
+            <div class="publish-urls-grid">
+              <div>
+                <label class="font-mono text-muted" style="font-size: 0.69rem; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem;">
+                  <span>📷 Shutterfly Album URL (Photos)</span>
+                  <a id="publish-sf-open-link" href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-shutterfly" style="font-size: 0.68rem;">Open Shutterfly ↗</a>
+                </label>
+                <input type="text" id="publish-moment-sf-url" class="form-control" placeholder="https://photos3.shutterfly.com/album/..." style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
+              </div>
+              <div>
+                <label class="font-mono text-muted" style="font-size: 0.69rem; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem;">
+                  <span>🎥 YouTube Video / Playlist URL (Videos)</span>
+                  <a id="publish-yt-open-link" href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer" class="pub-live-link link-youtube" style="font-size: 0.68rem;">Open YouTube ↗</a>
+                </label>
+                <input type="text" id="publish-moment-yt-url" class="form-control" placeholder="https://youtube.com/playlist?list=..." style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
+              </div>
+            </div>
+
+            <div>
+              <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Account</label>
+              <input type="text" id="publish-moment-account" class="form-control" value="nickolay.cohen@gmail.com" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
+            </div>
+
+            <div id="publish-moment-status" class="dedup-status-banner" style="display: none; font-size: 0.76rem;"></div>
+          </div>
+          <div class="modal-footer" style="justify-content: space-between;">
+            <span class="font-mono text-muted" style="font-size: 0.7rem;" id="publish-moment-breakdown">—</span>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <button class="btn btn-outline btn-close-publish-moment-modal" id="btn-cancel-publish-moment">Cancel</button>
+              <button class="btn btn-purple" id="btn-submit-publish-moment">✅ Record Publication</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
