@@ -415,6 +415,16 @@ export interface PublishMomentInfoResponse {
   unpublished_count?: number;
   curated_dir?: string;
   curated_dir_exists?: boolean;
+  pub_rec_dir?: string;
+  pub_rec_dir_exists?: boolean;
+  pub_rec_sync?: {
+    synced?: boolean;
+    copied?: number;
+    removed?: number;
+    removed_folder?: boolean;
+    reason?: string;
+    expected_files?: string[];
+  };
   assets?: PublishMomentAssetItem[];
 }
 
@@ -431,6 +441,13 @@ export interface PublishMomentResponse {
   new_stage?: string;
   shutterfly_url?: string;
   youtube_url?: string;
+  pub_rec_sync?: {
+    synced?: boolean;
+    copied?: number;
+    removed?: number;
+    removed_folder?: boolean;
+    pub_rec_dir?: string;
+  };
 }
 
 export type TriggerTaskFn = (

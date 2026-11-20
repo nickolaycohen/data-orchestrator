@@ -457,7 +457,40 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   });
   document.getElementById('btn-publish-open-folder')?.addEventListener('click', () => {
     if (!publishMomentName) return;
-    void openCuratedFolderForPublish(publishMomentName);
+    void openCuratedFolderForPublish(publishMomentName, 'pub_rec');
+  });
+  document.getElementById('btn-publish-open-curated')?.addEventListener('click', () => {
+    if (!publishMomentName) return;
+    void openCuratedFolderForPublish(publishMomentName, 'curated');
+  });
+  document.getElementById('btn-open-all-pub-rec-folder')?.addEventListener('click', () => {
+    void openCuratedFolderForPublish('', 'pub_rec');
+  });
+  document.getElementById('btn-sync-all-pub-rec-folder')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    const prev = btn.textContent || '🔄 Sync Pub. Rec Folder';
+    btn.disabled = true;
+    btn.textContent = '🔄 Syncing...';
+    try {
+      const res = await fetch('/api/media/memories/sync-publishing-recommendations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(`Sync failed: ${data.error || 'Unknown error'}`);
+        return;
+      }
+      btn.textContent = `✅ Synced ${data.active_folders ?? 0} folders (+${data.copied ?? 0})`;
+      window.setTimeout(() => {
+        btn.textContent = prev;
+      }, 3200);
+    } catch (err: any) {
+      alert(`Error syncing Publishing Recommendation folder: ${err?.message || 'Unknown error'}`);
+    } finally {
+      btn.disabled = false;
+    }
   });
   document.getElementById('btn-publish-export-curated')?.addEventListener('click', () => {
     if (!publishMomentName) return;
@@ -3142,12 +3175,15 @@ function renderPublishMomentAssets(): void {
   updatePublishMomentSelectionSummary();
 }
 
-async function openCuratedFolderForPublish(momentName: string): Promise<void> {
+async function openCuratedFolderForPublish(
+  momentName: string,
+  folderKind: 'pub_rec' | 'curated' = 'pub_rec'
+): Promise<void> {
   try {
     const res = await fetch('/api/media/memories/open-curated-folder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ moment_name: momentName })
+      body: JSON.stringify({ moment_name: momentName, folder_kind: folderKind })
     });
     const data = await res.json();
     if (!data.ok) {
@@ -3211,20 +3247,28 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
       const curCount = data.curated_count ?? 0;
       const unpubCount = data.unpublished_count ?? 0;
       const isRepublish = pubCount > 0;
+      const syncInfo = data.pub_rec_sync;
+      const syncNote = syncInfo?.synced
+        ? ` · <span class="text-green">✓ Pub. Rec Synced (${syncInfo.expected_files?.length ?? 0} files${syncInfo.copied ? `, +${syncInfo.copied} copied` : ''}${syncInfo.removed ? `, -${syncInfo.removed} removed` : ''})</span>`
+        : syncInfo?.reason
+          ? ` · <span class="text-amber">⚠️ ${escapeHtml(syncInfo.reason)}</span>`
+          : '';
       summaryEl.innerHTML = `
         <span>
           <strong>${isRepublish ? '🔄 Republish' : '✨ First Publish'}</strong> ·
           Curated: <strong>${curCount}</strong> ·
           Already Published: <strong>${pubCount}</strong> ·
-          Remaining Unpublished: <strong>${unpubCount}</strong>
+          Remaining Unpublished: <strong>${unpubCount}</strong>${syncNote}
         </span>
       `;
     }
 
     if (folderBarEl && curatedDirEl) {
       folderBarEl.style.display = 'flex';
-      curatedDirEl.textContent = data.curated_dir || '—';
-      if (openFolderBtn) openFolderBtn.disabled = !data.curated_dir_exists;
+      curatedDirEl.textContent = data.pub_rec_dir || data.curated_dir || '—';
+      if (openFolderBtn) openFolderBtn.disabled = !(data.pub_rec_dir_exists || data.curated_dir_exists);
+      const openCuratedBtn = document.getElementById('btn-publish-open-curated') as HTMLButtonElement | null;
+      if (openCuratedBtn) openCuratedBtn.disabled = !data.curated_dir_exists;
       if (exportBtn) {
         exportBtn.textContent = data.curated_dir_exists ? '🔄 Re-export Curated [2]' : '📤 Export Curated [2]';
       }
@@ -3302,12 +3346,18 @@ async function submitPublishMoment(): Promise<void> {
     if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
 
     if (statusEl) {
+      const syncInfo = data.pub_rec_sync;
+      const syncSuffix = syncInfo?.removed_folder
+        ? ' · Pub. Rec folder removed (M500 complete)'
+        : syncInfo?.synced
+          ? ` · Pub. Rec folder updated (+${syncInfo.copied ?? 0} copied, -${syncInfo.removed ?? 0} removed)`
+          : '';
       statusEl.style.display = 'flex';
       statusEl.innerHTML = `
         <span class="text-green">
           ✅ Recorded <strong>${data.inserted_count ?? 0}</strong> asset(s) for
           <code>${escapeHtml(data.moment_name || publishMomentName)}</code>
-          (Stage: <strong>${escapeHtml(data.new_stage || 'M450')}</strong> · Total Published: ${data.total_published ?? 0}/${data.curated_total ?? 0}).
+          (Stage: <strong>${escapeHtml(data.new_stage || 'M450')}</strong> · Total Published: ${data.total_published ?? 0}/${data.curated_total ?? 0}${escapeHtml(syncSuffix)}).
         </span>
       `;
     }

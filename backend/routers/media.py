@@ -5,6 +5,7 @@ import math
 import json
 import time
 import errno
+import shutil
 import signal
 import subprocess
 import sqlite3
@@ -19,6 +20,7 @@ from backend.config import MEDIA_DB_PATH, REPOS, get_db_connection
 
 APPLE_PHOTOS_LIBRARY_PATH = Path("/Volumes/Extreme Pro/Photos Library/All-Media.photoslibrary")
 CURATED_LACIE_DIR = Path("/Volumes/LaCie/Media Organizer/Curated")
+PUBLISHING_RECOMMENDATION_DIR = Path("/Volumes/LaCie/Media Organizer/Publishing Recommendation")
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mpg"}
 
 router = APIRouter(prefix="/api/media", tags=["media"])
@@ -4473,6 +4475,11 @@ class PublishMomentRequest(BaseModel):
 
 class OpenCuratedFolderRequest(BaseModel):
     moment_name: str
+    folder_kind: Optional[str] = "pub_rec"  # "pub_rec" | "curated"
+
+
+class SyncPublishingRecRequest(BaseModel):
+    moment_name: Optional[str] = None
 
 
 def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
@@ -4550,9 +4557,126 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
     return rows, moment_pub_aids
 
 
+def _sync_publishing_recommendation_for_moment(cur: sqlite3.Cursor, moment_name: str) -> dict:
+    """Sync /Volumes/LaCie/Media Organizer/Publishing Recommendation/<moment> from Curated/<moment> matching CLI logic."""
+    src_dir = CURATED_LACIE_DIR / moment_name
+    dest_dir = PUBLISHING_RECOMMENDATION_DIR / moment_name
+
+    if not PUBLISHING_RECOMMENDATION_DIR.parent.exists():
+        return {
+            "synced": False,
+            "reason": "LaCie volume unavailable",
+            "pub_rec_dir": str(dest_dir),
+            "pub_rec_dir_exists": dest_dir.exists(),
+            "copied": 0,
+            "removed": 0,
+            "expected_files": [],
+        }
+
+    rows, _ = _get_curated_asset_rows_for_moment(cur, moment_name)
+    unpublished_rows = [(aid, fn, sc) for aid, fn, sc, is_pub in rows if not is_pub]
+    top_batch = unpublished_rows[:9]
+
+    if not top_batch or len(rows) < 2:
+        removed_folder = False
+        if dest_dir.exists() and dest_dir.is_dir():
+            try:
+                shutil.rmtree(dest_dir)
+                removed_folder = True
+            except Exception:
+                pass
+        return {
+            "synced": True,
+            "removed_folder": removed_folder,
+            "pub_rec_dir": str(dest_dir),
+            "pub_rec_dir_exists": dest_dir.exists(),
+            "copied": 0,
+            "removed": 0,
+            "expected_files": [],
+        }
+
+    base_to_files: dict[str, list[str]] = {}
+    if src_dir.exists() and src_dir.is_dir():
+        try:
+            for entry in os.listdir(src_dir):
+                if not entry.startswith(".") and (src_dir / entry).is_file():
+                    b = os.path.splitext(entry)[0].lower()
+                    base_to_files.setdefault(b, []).append(entry)
+        except Exception:
+            pass
+
+    proposed_files: list[str] = []
+    for _aid, fn, _sc in top_batch:
+        if fn:
+            b = os.path.splitext(fn)[0].lower()
+            proposed_files.extend(base_to_files.get(b, []))
+
+    cur.execute(
+        "SELECT filename FROM publications WHERE TRIM(moment_name) = TRIM(?)",
+        (moment_name,),
+    )
+    published_files: list[str] = []
+    for (p_fn,) in cur.fetchall():
+        if p_fn:
+            b = os.path.splitext(p_fn)[0].lower()
+            published_files.extend(base_to_files.get(b, []))
+
+    seen_files: set[str] = set()
+    sync_files: list[str] = []
+    for f in published_files + proposed_files:
+        if f not in seen_files:
+            seen_files.add(f)
+            sync_files.append(f)
+
+    if not sync_files:
+        return {
+            "synced": False,
+            "reason": "Curated source files not exported on LaCie yet",
+            "pub_rec_dir": str(dest_dir),
+            "pub_rec_dir_exists": dest_dir.exists(),
+            "copied": 0,
+            "removed": 0,
+            "expected_files": [],
+        }
+
+    PUBLISHING_RECOMMENDATION_DIR.mkdir(parents=True, exist_ok=True)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    removed_cnt = 0
+    try:
+        for f in os.listdir(dest_dir):
+            if f.startswith("."):
+                continue
+            fp = dest_dir / f
+            if fp.is_file() and f not in seen_files:
+                fp.unlink()
+                removed_cnt += 1
+    except Exception:
+        pass
+
+    copied_cnt = 0
+    for f in sync_files:
+        src_f = src_dir / f
+        dst_f = dest_dir / f
+        if src_f.exists() and not dst_f.exists():
+            shutil.copy2(src_f, dst_f)
+            copied_cnt += 1
+
+    return {
+        "synced": True,
+        "pub_rec_dir": str(dest_dir),
+        "pub_rec_dir_exists": dest_dir.exists(),
+        "copied": copied_cnt,
+        "removed": removed_cnt,
+        "expected_files": sync_files,
+        "proposed_count": len(proposed_files),
+        "published_count": len(published_files),
+    }
+
+
 @router.get("/memories/publish-info")
 def get_moment_publish_info(moment_name: str):
-    """Return curated unpublished batch (top 9), existing URLs, and LaCie curated folder status for a Moment."""
+    """Return curated unpublished batch (top 9), existing URLs, and LaCie Curated / Publishing Recommendation status."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"ok": False, "error": "Media database unavailable"}
     m_name = (moment_name or "").strip()
@@ -4572,6 +4696,8 @@ def get_moment_publish_info(moment_name: str):
             stage = (cm_row[0] if cm_row and cm_row[0] else "M400")
             sf_url = (cm_row[1] if cm_row and cm_row[1] else "") or ""
             yt_url = (cm_row[2] if cm_row and cm_row[2] else "") or ""
+
+            sync_res = _sync_publishing_recommendation_for_moment(cur, m_name)
 
             rows, moment_pub_aids = _get_curated_asset_rows_for_moment(cur, m_name)
             curated_total = len(rows)
@@ -4604,6 +4730,7 @@ def get_moment_publish_info(moment_name: str):
                     }
                 )
 
+            pub_rec_dir = PUBLISHING_RECOMMENDATION_DIR / m_name
             return {
                 "ok": True,
                 "moment_name": m_name,
@@ -4615,6 +4742,9 @@ def get_moment_publish_info(moment_name: str):
                 "unpublished_count": len(unpublished_rows),
                 "curated_dir": str(moment_dir),
                 "curated_dir_exists": dir_exists,
+                "pub_rec_dir": str(pub_rec_dir),
+                "pub_rec_dir_exists": pub_rec_dir.exists() and pub_rec_dir.is_dir(),
+                "pub_rec_sync": sync_res,
                 "assets": assets_out,
             }
         finally:
@@ -4625,19 +4755,80 @@ def get_moment_publish_info(moment_name: str):
 
 @router.post("/memories/open-curated-folder")
 def open_curated_moment_folder(req: OpenCuratedFolderRequest):
-    """Open the Curated Moment folder on LaCie in macOS Finder."""
+    """Open Publishing Recommendation or Curated Moment folder on LaCie in macOS Finder."""
     m_name = (req.moment_name or "").strip()
+    kind = (req.folder_kind or "pub_rec").strip().lower()
+    base_dir = CURATED_LACIE_DIR if kind == "curated" else PUBLISHING_RECOMMENDATION_DIR
     if not m_name:
-        return {"ok": False, "error": "moment_name is required"}
-    target = CURATED_LACIE_DIR / m_name
+        target = base_dir
+    else:
+        target = base_dir / m_name
+        if not target.exists() and base_dir.exists():
+            target = base_dir
     if not target.exists():
-        if CURATED_LACIE_DIR.exists():
-            target = CURATED_LACIE_DIR
-        else:
-            return {"ok": False, "error": f"Folder not found: {CURATED_LACIE_DIR / m_name}"}
+        return {"ok": False, "error": f"Folder not found: {target}"}
     try:
         subprocess.run(["open", str(target)], check=True)
         return {"ok": True, "opened": str(target)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/memories/sync-publishing-recommendations")
+def sync_publishing_recommendations(req: SyncPublishingRecRequest):
+    """Sync Publishing Recommendation folder(s) on LaCie from Curated exports (matching CLI behavior)."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    if not PUBLISHING_RECOMMENDATION_DIR.parent.exists():
+        return {"ok": False, "error": "LaCie volume is not mounted"}
+
+    m_name = (req.moment_name or "").strip()
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=20)
+        try:
+            cur = conn.cursor()
+            if m_name:
+                res = _sync_publishing_recommendation_for_moment(cur, m_name)
+                return {"ok": True, "mode": "single", "moment_name": m_name, **res}
+
+            # Full sync across all actionable/pending curated moments
+            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+            min_row = cur.fetchone()
+            db_hist_min = float(min_row[0]) if min_row and min_row[0] else 0.5315
+            mode_m_live = _compute_mode_m_from_db(cur, db_hist_min, None)
+
+            active_names: set[str] = set()
+            total_copied = 0
+            total_removed = 0
+            for rec in mode_m_live.get("actionable_recs", []):
+                mn = rec.get("moment_name")
+                if not mn:
+                    continue
+                res = _sync_publishing_recommendation_for_moment(cur, mn)
+                if res.get("expected_files"):
+                    active_names.add(mn)
+                total_copied += int(res.get("copied") or 0)
+                total_removed += int(res.get("removed") or 0)
+
+            deleted_folders = 0
+            if PUBLISHING_RECOMMENDATION_DIR.exists():
+                for entry in os.listdir(PUBLISHING_RECOMMENDATION_DIR):
+                    ep = PUBLISHING_RECOMMENDATION_DIR / entry
+                    if ep.is_dir() and not entry.startswith(".") and entry not in active_names:
+                        shutil.rmtree(ep)
+                        deleted_folders += 1
+
+            return {
+                "ok": True,
+                "mode": "all",
+                "active_folders": len(active_names),
+                "copied": total_copied,
+                "removed": total_removed,
+                "deleted_folders": deleted_folders,
+                "pub_rec_dir": str(PUBLISHING_RECOMMENDATION_DIR),
+            }
+        finally:
+            conn.close()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -4763,6 +4954,7 @@ def publish_moment_assets(req: PublishMomentRequest):
                 )
 
             conn.commit()
+            pub_rec_sync = _sync_publishing_recommendation_for_moment(cur, m_name)
             return {
                 "ok": True,
                 "moment_name": m_name,
@@ -4775,6 +4967,7 @@ def publish_moment_assets(req: PublishMomentRequest):
                 "new_stage": new_stage,
                 "shutterfly_url": sf_url_val or "",
                 "youtube_url": yt_url_val or "",
+                "pub_rec_sync": pub_rec_sync,
             }
         finally:
             conn.close()
