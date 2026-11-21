@@ -2239,30 +2239,25 @@
             </div>
 
             <div style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 0.6rem;">
-              <strong style="font-size: 0.8rem;">Merge Into Existing Neighbor OR Organize Under Subfolder</strong>
+              <strong style="font-size: 0.8rem;">Target Flat Moment &amp; Organizer Folder</strong>
               <div>
                 <span class="font-mono text-muted" style="font-size: 0.68rem; display: block; margin-bottom: 0.3rem;">Nearby Multi-Asset Candidates (click to fill target):</span>
                 <div class="disjoint-target-chips" id="resolve-disjoint-nearby-chips"></div>
               </div>
               <div class="publish-urls-grid">
                 <div>
-                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Moment Album Name</label>
+                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Moment Album Name (Flat)</label>
                   <input type="text" id="resolve-disjoint-target-input" class="form-control" placeholder="e.g. Skiing at CamelBack - Winter 2020" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
                 </div>
                 <div>
-                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Moments Subfolder (Existing or Create New)</label>
+                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Folder (under Media Organizer on LaCie)</label>
                   <select id="resolve-disjoint-parent-select" class="form-control" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;">
-                    <option value="Moments">Moments (Root)</option>
-                    <option value="__NEW_SUBFOLDER__">➕ Create new subfolder under Moments...</option>
+                    <option value="Moments">Moments (default)</option>
                     <option value="Generic Moments">Generic Moments</option>
                     <option value="Curated">Curated</option>
                     <option value="ToBeCurated">ToBeCurated</option>
                   </select>
                 </div>
-              </div>
-              <div id="resolve-disjoint-new-subfolder-wrap" style="display: none;">
-                <label class="font-mono text-muted" style="font-size: 0.68rem; display: block; margin-bottom: 0.2rem;">New Subfolder Name (created inside <code>Media Organizer on LaCie/Moments/</code>)</label>
-                <input type="text" id="resolve-disjoint-new-subfolder-input" class="form-control" placeholder="e.g. Skiing &amp; Snow, Fishing, Sports" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
               </div>
               <div class="font-mono text-muted" style="font-size: 0.69rem;">
                 Target Path: <code id="resolve-disjoint-target-path-preview">Media Organizer on LaCie / Moments / —</code>

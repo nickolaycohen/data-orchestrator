@@ -531,13 +531,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     });
     updateResolveDisjointTargetPreview();
   });
-  document.getElementById('resolve-disjoint-parent-select')?.addEventListener('change', (e) => {
-    const val = (e.target as HTMLSelectElement)?.value || 'Moments';
-    const newWrap = document.getElementById('resolve-disjoint-new-subfolder-wrap');
-    if (newWrap) newWrap.style.display = val === '__NEW_SUBFOLDER__' ? 'block' : 'none';
-    updateResolveDisjointTargetPreview();
-  });
-  document.getElementById('resolve-disjoint-new-subfolder-input')?.addEventListener('input', () => {
+  document.getElementById('resolve-disjoint-parent-select')?.addEventListener('change', () => {
     updateResolveDisjointTargetPreview();
   });
   [
@@ -3631,24 +3625,14 @@ function updateResolveDisjointComposedHeadline(): void {
   }
 }
 
-function getEffectiveResolveDisjointParentFolder(): string {
-  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
-  const newInp = document.getElementById('resolve-disjoint-new-subfolder-input') as HTMLInputElement | null;
-  const raw = parentSel?.value || 'Moments';
-  if (raw === '__NEW_SUBFOLDER__') {
-    const cleanSub = (newInp?.value || '').trim().replace(/^\/+|\/+$/g, '');
-    return cleanSub ? `Moments/${cleanSub}` : 'Moments/<New Subfolder>';
-  }
-  return raw;
-}
-
 function updateResolveDisjointTargetPreview(): void {
   const previewEl = document.getElementById('resolve-disjoint-target-path-preview');
+  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   if (!previewEl) return;
-  const parentPath = getEffectiveResolveDisjointParentFolder();
+  const parentName = parentSel?.value || 'Moments';
   const targetName = (targetInp?.value || '').trim() || '—';
-  previewEl.textContent = `Media Organizer on LaCie / ${parentPath.split('/').join(' / ')} / ${targetName}`;
+  previewEl.textContent = `Media Organizer on LaCie / ${parentName} / ${targetName}`;
 }
 
 async function openResolveDisjointModal(momentName: string, suggestedTarget = ''): Promise<void> {
@@ -3666,8 +3650,6 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   const chipsEl = document.getElementById('resolve-disjoint-nearby-chips');
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
-  const newSubWrap = document.getElementById('resolve-disjoint-new-subfolder-wrap');
-  const newSubInp = document.getElementById('resolve-disjoint-new-subfolder-input') as HTMLInputElement | null;
   const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
   const statusEl = document.getElementById('resolve-disjoint-status');
 
@@ -3689,8 +3671,6 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   if (chipsEl) chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">Searching nearby Moments...</span>';
   if (targetInp) targetInp.value = suggestedTarget || '';
   if (parentSel) parentSel.value = 'Moments';
-  if (newSubWrap) newSubWrap.style.display = 'none';
-  if (newSubInp) newSubInp.value = '';
   if (delSrcCb) delSrcCb.checked = true;
   if (actInp) actInp.value = '';
   if (locInp) locInp.value = '';
@@ -3762,7 +3742,7 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
         <span>
           <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
           ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s) inside Apple Photos albums` : ''}.
-          Merge into an existing Moment, apply the new Moment Name Suggestion + Subfolder, move to <code>Moments/SkipPublishing</code>, or Ignore.
+          Merge into an existing Moment, rename using the flat Memory Naming Engine, move to <code>Moments/SkipPublishing</code>, or Ignore.
         </span>
       `;
     }
@@ -3775,9 +3755,6 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
       if (pplInp) pplInp.value = sug.people || '';
       if (whenInp) whenInp.value = sug.when || '';
       if (sugPreviewEl) sugPreviewEl.textContent = sug.suggested_name || composeResolveDisjointSuggestedName();
-      if (newSubInp && sug.subfolder_hint) {
-        newSubInp.value = sug.subfolder_hint;
-      }
 
       if (locChipsEl && sug.location_candidates?.length) {
         locChipsEl.innerHTML = sug.location_candidates
@@ -3814,22 +3791,6 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
           });
         });
       }
-    }
-
-    // Populate Subfolder dropdown from existing Moments subfolders + standard organizer folders
-    if (parentSel) {
-      const existingSubfolders = data.existing_subfolders || [];
-      const opts: string[] = ['<option value="Moments">Moments (Root)</option>'];
-      existingSubfolders.forEach(sf => {
-        const display = sf.replace(/^Moments\//, 'Moments / ');
-        opts.push(`<option value="${escapeHtml(sf)}">📁 ${escapeHtml(display)}</option>`);
-      });
-      opts.push('<option value="__NEW_SUBFOLDER__">➕ Create new subfolder under Moments...</option>');
-      opts.push('<option value="Generic Moments">Generic Moments</option>');
-      opts.push('<option value="Curated">Curated</option>');
-      opts.push('<option value="ToBeCurated">ToBeCurated</option>');
-      parentSel.innerHTML = opts.join('');
-      parentSel.value = 'Moments';
     }
 
     const albumsPresent = data.albums_present || [];
@@ -3896,7 +3857,6 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
 
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
-  const newSubInp = document.getElementById('resolve-disjoint-new-subfolder-input') as HTMLInputElement | null;
   const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
   const statusEl = document.getElementById('resolve-disjoint-status');
   const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
@@ -3912,19 +3872,7 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
     return;
   }
 
-  let resolvedParent = parentSel?.value || 'Moments';
-  if (action === 'merge' && resolvedParent === '__NEW_SUBFOLDER__') {
-    const newSub = (newSubInp?.value || '').trim().replace(/^\/+|\/+$/g, '');
-    if (!newSub) {
-      if (statusEl) {
-        statusEl.style.display = 'flex';
-        statusEl.innerHTML = '<span class="text-red">❌ Enter a new Subfolder name or pick an existing folder from the dropdown.</span>';
-      }
-      return;
-    }
-    resolvedParent = newSub.toLowerCase().startsWith('moments/') ? newSub : `Moments/${newSub}`;
-  }
-
+  const resolvedParent = parentSel?.value || 'Moments';
   const assetIds = Array.from(resolveDisjointSelectedIds);
   if ((action === 'skip_publishing' || action === 'ignore') && !assetIds.length) {
     if (statusEl) {
@@ -3941,7 +3889,7 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
 
   const actionLabel =
     action === 'merge'
-      ? `Organizing into "${resolvedParent}/${targetMoment}" via AppleScript...`
+      ? `Merging into "${resolvedParent}/${targetMoment}" via AppleScript...`
       : action === 'skip_publishing'
         ? 'Moving selected asset(s) to Moments/SkipPublishing...'
         : 'Excluding selected asset(s) via ignore pipeline...';
