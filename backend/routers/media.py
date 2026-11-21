@@ -5297,16 +5297,53 @@ def _build_moment_name_suggestion(
             activity = act_label
             break
 
-    # People: detected faces > album keywords > non-shared device owners
+    # Optional Family Member cues (computed before People so family names are not double-tagged in both)
+    family_pool = ["Niki", "Milena", "Roberto", "Eva", "Benny"]
+    family_map = {
+        "niki": "Niki",
+        "nickolay": "Niki",
+        "nickolay c.": "Niki",
+        "milena": "Milena",
+        "roberto": "Roberto",
+        "eva": "Eva",
+        "benny": "Benny",
+    }
     people_objs = photos_meta.get("people") or []
-    people_names = [p["short_name"] for p in people_objs if p.get("short_name")]
+    detected_family: list[str] = []
+    seen_fam: set[str] = set()
+    for src_val in [
+        *(p.get("short_name", "") for p in people_objs),
+        *(p.get("name", "") for p in people_objs),
+        *(a.get("primary_owner", "") for a in assets_out),
+    ]:
+        tok = (src_val or "").strip().lower()
+        first_tok = tok.split()[0] if tok else ""
+        mapped = family_map.get(tok) or family_map.get(first_tok)
+        if mapped and mapped.lower() not in seen_fam:
+            seen_fam.add(mapped.lower())
+            detected_family.append(mapped)
+    for k, canonical in family_map.items():
+        if k in moment_name.lower() and canonical.lower() not in seen_fam:
+            seen_fam.add(canonical.lower())
+            detected_family.append(canonical)
+
+    # People: non-family detected faces / companions (avoid duplicating Family Member pills)
+    fam_tokens_lc = seen_fam | set(family_map.keys())
+    non_family_people_objs = [
+        p
+        for p in people_objs
+        if (p.get("short_name") or "").strip().lower() not in fam_tokens_lc
+        and (p.get("name") or "").split()[0].strip().lower() not in fam_tokens_lc
+    ]
+    people_names = [p["short_name"] for p in non_family_people_objs if p.get("short_name")]
     if not people_names:
         owner_counts: dict[str, int] = {}
         for a in assets_out:
             own = (a.get("primary_owner") or "").strip()
             if own and own != "Shared/Other":
                 short_own = own.split()[0]
-                owner_counts[short_own] = owner_counts.get(short_own, 0) + 1
+                if short_own.lower() not in fam_tokens_lc:
+                    owner_counts[short_own] = owner_counts.get(short_own, 0) + 1
         people_names = [k for k, _ in sorted(owner_counts.items(), key=lambda kv: -kv[1])]
     people_str = ", ".join(people_names[:3])
 
@@ -5348,35 +5385,6 @@ def _build_moment_name_suggestion(
     head = " ".join(parts).strip() or moment_name
     suggested_name = f"{head} - {when_str}" if when_str else head
 
-    # Optional Family Member cues (default excluded from Moment name, recorded in DB tags)
-    family_pool = ["Niki", "Milena", "Roberto", "Eva", "Benny"]
-    family_map = {
-        "niki": "Niki",
-        "nickolay": "Niki",
-        "nickolay c.": "Niki",
-        "milena": "Milena",
-        "roberto": "Roberto",
-        "eva": "Eva",
-        "benny": "Benny",
-    }
-    detected_family: list[str] = []
-    seen_fam: set[str] = set()
-    for src_val in [
-        *(p.get("short_name", "") for p in people_objs),
-        *(p.get("name", "") for p in people_objs),
-        *(a.get("primary_owner", "") for a in assets_out),
-    ]:
-        tok = (src_val or "").strip().lower()
-        first_tok = tok.split()[0] if tok else ""
-        mapped = family_map.get(tok) or family_map.get(first_tok)
-        if mapped and mapped.lower() not in seen_fam:
-            seen_fam.add(mapped.lower())
-            detected_family.append(mapped)
-    for k, canonical in family_map.items():
-        if k in moment_name.lower() and canonical.lower() not in seen_fam:
-            seen_fam.add(canonical.lower())
-            detected_family.append(canonical)
-
     return {
         "activity": activity,
         "location": location,
@@ -5386,7 +5394,7 @@ def _build_moment_name_suggestion(
         "family_member_pool": family_pool,
         "suggested_name": suggested_name,
         "location_candidates": location_candidates[:6],
-        "people_candidates": people_objs[:8],
+        "people_candidates": non_family_people_objs[:8],
     }
 
 
@@ -5711,6 +5719,51 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
         return {"ok": False, "error": str(e)}
 
 
+_VALID_MOMENT_TAG_CATS = {"activity", "location", "people", "when", "family_member"}
+
+
+def _normalize_unique_moment_tags(items: list[SaveMomentTagItem]) -> list[dict]:
+    """Deduplicate tags by normalized value (and category) so an asset/Moment is never double-tagged with the same tag."""
+    by_val_lc: dict[str, dict] = {}
+    ordered_keys: list[str] = []
+    for t in items or []:
+        cat = (t.category or "").strip().lower()
+        val = re.sub(r"\s+", " ", (t.tag_value or "").strip())
+        if cat not in _VALID_MOMENT_TAG_CATS or not val:
+            continue
+        k = val.lower()
+        inc = bool(t.include_in_name)
+        if k not in by_val_lc:
+            by_val_lc[k] = {"category": cat, "tag_value": val, "include_in_name": inc}
+            ordered_keys.append(k)
+        else:
+            existing = by_val_lc[k]
+            # Prefer family_member over people if same name was provided in both; keep include_in_name if either is checked
+            if cat == "family_member" and existing["category"] == "people":
+                existing["category"] = "family_member"
+            existing["include_in_name"] = existing["include_in_name"] or inc
+    return [by_val_lc[k] for k in ordered_keys]
+
+
+def _compute_tag_db_counts(cur: sqlite3.Cursor) -> dict:
+    """Return exact distinct tagged asset & moment counts per lowercase tag value."""
+    cur.execute(
+        """
+        SELECT
+            LOWER(tag_value) AS tv,
+            COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS assets_cnt,
+            COUNT(DISTINCT LOWER(moment_name)) AS moments_cnt
+        FROM moment_tags
+        GROUP BY LOWER(tag_value)
+        """
+    )
+    return {
+        r[0]: {"assets": int(r[1] or 0), "moments": int(r[2] or 0)}
+        for r in cur.fetchall()
+        if r[0]
+    }
+
+
 @router.post("/memories/tags/save")
 def save_moment_tags(req: SaveMomentTagsRequest):
     """Record Moment/asset tags & tagging session in media_organizer.db (does not rename folders unless user applies name)."""
@@ -5721,19 +5774,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
     if not m_name:
         return {"ok": False, "error": "moment_name is required"}
 
-    valid_cats = {"activity", "location", "people", "when", "family_member"}
-    clean_tags: list[dict] = []
-    seen_pairs: set[tuple[str, str]] = set()
-    for t in req.tags or []:
-        cat = (t.category or "").strip().lower()
-        val = re.sub(r"\s+", " ", (t.tag_value or "").strip())
-        if cat not in valid_cats or not val:
-            continue
-        key = (cat, val.lower())
-        if key in seen_pairs:
-            continue
-        seen_pairs.add(key)
-        clean_tags.append({"category": cat, "tag_value": val, "include_in_name": bool(t.include_in_name)})
+    clean_tags = _normalize_unique_moment_tags(req.tags or [])
 
     clean_aids: list[str] = []
     seen_aids: set[str] = set()
@@ -5815,6 +5856,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 "SELECT created_at_utc FROM moment_tag_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
+            tag_db_counts = _compute_tag_db_counts(cur)
             conn.commit()
             return {
                 "ok": True,
@@ -5825,6 +5867,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 "tags_saved": len(clean_tags),
                 "assets_tagged": len(clean_aids),
                 "created_at_utc": row_ts[0] if row_ts else "",
+                "tag_db_counts": tag_db_counts,
             }
         finally:
             conn.close()
@@ -6388,36 +6431,19 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 _delete_source_albums_from_db(cur, sm)
 
         # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
-        valid_cats = {"activity", "location", "people", "when", "family_member"}
-
-        def _clean_tag_list(items: list[SaveMomentTagItem]) -> list[dict]:
-            cleaned: list[dict] = []
-            seen_pairs: set[tuple[str, str]] = set()
-            for t in items or []:
-                cat = (t.category or "").strip().lower()
-                val = re.sub(r"\s+", " ", (t.tag_value or "").strip())
-                if cat not in valid_cats or not val:
-                    continue
-                tk = (cat, val.lower())
-                if tk in seen_pairs:
-                    continue
-                seen_pairs.add(tk)
-                cleaned.append({"category": cat, "tag_value": val, "include_in_name": bool(t.include_in_name)})
-            return cleaned
-
-        clean_apply_tags = _clean_tag_list(req.apply_tags)
+        clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
         clean_groups: list[tuple[list[str], list[dict]]] = []
         union_tags: list[dict] = list(clean_apply_tags)
-        seen_union = {(t["category"], t["tag_value"].lower()) for t in union_tags}
+        seen_union_vals = {t["tag_value"].lower() for t in union_tags}
         for grp in req.moment_tag_groups or []:
-            g_tags = _clean_tag_list(grp.tags)
+            g_tags = _normalize_unique_moment_tags(grp.tags)
             g_aids = [s.strip() for s in (grp.asset_ids or []) if s and s.strip()]
             if g_tags and g_aids:
                 clean_groups.append((g_aids, g_tags))
                 for t in g_tags:
-                    tk = (t["category"], t["tag_value"].lower())
-                    if tk not in seen_union:
-                        seen_union.add(tk)
+                    tv_lc = t["tag_value"].lower()
+                    if tv_lc not in seen_union_vals:
+                        seen_union_vals.add(tv_lc)
                         union_tags.append(t)
 
         if clean_apply_tags or clean_groups:

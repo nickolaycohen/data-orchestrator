@@ -528,6 +528,7 @@ export interface SaveMomentTagsResponse {
   tags_saved?: number;
   assets_tagged?: number;
   created_at_utc?: string;
+  tag_db_counts?: Record<string, { assets: number; moments: number }>;
 }
 
 export interface TagLookupAssetItem {

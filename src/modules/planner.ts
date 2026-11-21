@@ -162,14 +162,22 @@ const candidateTagState: TaggingEngineState = createEmptyTaggingState(
   () => Array.from(previewedCandidateSelectedIds)
 );
 candidateTagState.onCopyFromDisjoint = () => {
+  let skippedDups = 0;
   sourceTagState.tags.forEach(srcT => {
     const exists = candidateTagState.tags.some(
-      ct => ct.category === srcT.category && ct.tag_value.toLowerCase() === srcT.tag_value.toLowerCase()
+      ct => ct.tag_value.toLowerCase() === srcT.tag_value.toLowerCase()
     );
     if (!exists) {
       candidateTagState.tags.push({ ...srcT });
+    } else {
+      skippedDups += 1;
     }
   });
+  candidateTagState.saveStatusOk = true;
+  candidateTagState.saveStatusMsg =
+    skippedDups > 0
+      ? `ℹ️ Copied new tags from Disjoint (${skippedDups} duplicate tag(s) skipped).`
+      : 'ℹ️ Copied tags from Disjoint Moment.';
   candidateTagState.onTagsChanged();
   renderTaggingEngineCard(candidateTagState);
 };
@@ -3790,38 +3798,39 @@ function buildTagListFromSuggestion(
   savedTags?: MomentTagItem[],
   sug?: DisjointNameSuggestion | null
 ): MomentTagItem[] {
-  if (savedTags && savedTags.length > 0) {
-    return savedTags.map(t => ({
-      category: t.category,
-      tag_value: t.tag_value,
-      include_in_name: t.include_in_name,
-      tagged_asset_count: t.tagged_asset_count
-    }));
-  }
   const out: MomentTagItem[] = [];
-  const pushUnique = (category: MomentTagItem['category'], val: string, include: boolean): void => {
+  const pushUniqueGlobal = (category: MomentTagItem['category'], val: string, include: boolean, taggedCnt?: number): void => {
     const clean = (val || '').replace(/\s+/g, ' ').trim();
     if (!clean) return;
-    if (!out.some(x => x.category === category && x.tag_value.toLowerCase() === clean.toLowerCase())) {
-      out.push({ category, tag_value: clean, include_in_name: include });
+    const existing = out.find(x => x.tag_value.toLowerCase() === clean.toLowerCase());
+    if (!existing) {
+      out.push({ category, tag_value: clean, include_in_name: include, tagged_asset_count: taggedCnt });
+    } else if (category === 'family_member' && existing.category === 'people') {
+      existing.category = 'family_member';
     }
   };
+
+  if (savedTags && savedTags.length > 0) {
+    savedTags.forEach(t => pushUniqueGlobal(t.category, t.tag_value, t.include_in_name, t.tagged_asset_count));
+    return out;
+  }
+
   if (sug) {
-    if (sug.activity) pushUnique('activity', sug.activity, true);
-    if (sug.location) pushUnique('location', sug.location, true);
+    if (sug.activity) pushUniqueGlobal('activity', sug.activity, true);
+    if (sug.location) pushUniqueGlobal('location', sug.location, true);
     (sug.location_candidates || []).forEach(lc => {
       if (lc && lc.toLowerCase() !== (sug.location || '').toLowerCase()) {
-        pushUnique('location', lc, false);
+        pushUniqueGlobal('location', lc, false);
       }
     });
+    (sug.family_members || []).forEach(fm => pushUniqueGlobal('family_member', fm, false));
     (sug.people_candidates || []).forEach((pc, idx) => {
-      if (pc.short_name) pushUnique('people', pc.short_name, idx < 3);
+      if (pc.short_name) pushUniqueGlobal('people', pc.short_name, idx < 3);
     });
     if (!sug.people_candidates?.length && sug.people) {
-      sug.people.split(',').forEach(p => pushUnique('people', p, true));
+      sug.people.split(',').forEach(p => pushUniqueGlobal('people', p, true));
     }
-    if (sug.when) pushUnique('when', sug.when, true);
-    (sug.family_members || []).forEach(fm => pushUnique('family_member', fm, false));
+    if (sug.when) pushUniqueGlobal('when', sug.when, true);
   }
   return out;
 }
@@ -3844,7 +3853,7 @@ function renderPropagateTagsPreview(): void {
   }
   combinedExtraMoments.forEach((entry, mName) => {
     const mTags = shareDisjoint
-      ? [...entry.tags, ...sourceTagState.tags.filter(st => !entry.tags.some(et => et.category === st.category && et.tag_value.toLowerCase() === st.tag_value.toLowerCase()))]
+      ? [...entry.tags, ...sourceTagState.tags.filter(st => !entry.tags.some(et => et.tag_value.toLowerCase() === st.tag_value.toLowerCase()))]
       : entry.tags;
     const pills = mTags.length
       ? mTags.map(t => `${escapeHtml(t.category)}: ${escapeHtml(t.tag_value)}`).join(' · ')
@@ -4118,17 +4127,25 @@ function addTagToEngineState(
   const clean = rawValue.replace(/\s+/g, ' ').trim();
   if (!clean) return;
   const effInclude = includeInName !== undefined ? includeInName : category !== 'family_member';
-  const existing = state.tags.find(
-    t => t.category === category && t.tag_value.toLowerCase() === clean.toLowerCase()
-  );
+  const existing = state.tags.find(t => t.tag_value.toLowerCase() === clean.toLowerCase());
   if (existing) {
-    existing.include_in_name = effInclude;
+    if (existing.category === category) {
+      state.saveStatusOk = true;
+      state.saveStatusMsg = `ℹ️ Tag "${existing.tag_value}" already exists — no duplicate added.`;
+    } else {
+      const prevCat = existing.category;
+      existing.category = category;
+      existing.include_in_name = effInclude;
+      state.saveStatusOk = true;
+      state.saveStatusMsg = `ℹ️ Moved "${existing.tag_value}" from ${prevCat} to ${category} (duplicate avoided).`;
+    }
   } else {
     state.tags.push({
       category,
       tag_value: clean,
       include_in_name: effInclude
     });
+    state.saveStatusMsg = '';
   }
   state.onTagsChanged();
   renderTaggingEngineCard(state);
@@ -4501,14 +4518,15 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
       asset_count: data.assets_tagged ?? assetIds.length,
       created_at_utc: data.created_at_utc || ''
     };
-    state.tags.forEach(t => {
-      const k = t.tag_value.toLowerCase();
-      const prev = state.tagDbCounts[k] || { assets: 0, moments: 0 };
-      state.tagDbCounts[k] = {
-        assets: Math.max(prev.assets, data.assets_tagged ?? assetIds.length),
-        moments: Math.max(prev.moments, 1)
-      };
-    });
+    if (data.tag_db_counts) {
+      sourceTagState.tagDbCounts = data.tag_db_counts;
+      candidateTagState.tagDbCounts = data.tag_db_counts;
+      if (state === candidateTagState && sourceTagState.momentName) {
+        renderTaggingEngineCard(sourceTagState);
+      } else if (state === sourceTagState && candidateTagState.momentName) {
+        renderTaggingEngineCard(candidateTagState);
+      }
+    }
 
     if (applyToFolderName && composed) {
       state.onUseForName(composed);
