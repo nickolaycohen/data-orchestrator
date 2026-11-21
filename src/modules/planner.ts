@@ -5226,13 +5226,47 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     if (action === 'merge_new' && (savePerSource || shareDisjoint)) {
       const tagSummary = formatUnifiedMetadataSummary(sourceTagState.tags);
       stepsHtml.push(
-        `<strong>Update DB &amp; active JSON tag metadata:</strong> Reassign kept assets' <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code>, sync <code>media_organizer_album_assets</code>, and record active tags/flags ${shareDisjoint ? '(copied across combined assets)' : '(saved per source Moment)'} <code>${escapeHtml(tagSummary)}</code>.`
+        `<strong>Update DB &amp; active JSON tag metadata (assets):</strong> Reassign kept assets' <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code>, sync <code>media_organizer_album_assets</code>, and record active tags/flags ${shareDisjoint ? '(copied across combined assets)' : '(saved per source Moment)'} <code>${escapeHtml(tagSummary)}</code>.`
       );
     } else {
       stepsHtml.push(
         `<strong>Update local DB:</strong> Reassign kept assets' <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code> and sync <code>media_organizer_album_assets</code>.`
       );
     }
+
+    const unionMap = new Map<string, MomentTagItem>();
+    const pushUnion = (list: MomentTagItem[]) => {
+      list.forEach(t => {
+        const k = t.tag_value.trim().toLowerCase();
+        if (k && !unionMap.has(k)) unionMap.set(k, t);
+      });
+    };
+    if (action === 'merge_new' && (savePerSource || shareDisjoint)) {
+      pushUnion(sourceTagState.tags);
+      if (savePerSource) {
+        extraEntries.forEach(e => pushUnion(e.tags));
+      }
+    } else {
+      pushUnion(
+        sourceTagState.tags.filter(
+          t => (t.tagged_asset_count ?? 0) > 0 || Boolean(sourceTagState.tagDbCounts[t.tag_value.toLowerCase()]?.assets)
+        )
+      );
+      extraEntries.forEach(e =>
+        pushUnion(
+          e.tags.filter(
+            t => (t.tagged_asset_count ?? 0) > 0 || Boolean(sourceTagState.tagDbCounts[t.tag_value.toLowerCase()]?.assets)
+          )
+        )
+      );
+    }
+    const unionTags = Array.from(unionMap.values());
+    const unionSummary = unionTags.length ? formatUnifiedMetadataSummary(unionTags) : '';
+    stepsHtml.push(
+      unionTags.length
+        ? `<strong>Tag Moment folder itself (New Tagging Paradigm):</strong> Save union of all asset tags onto <code>${escapeHtml(fullTargetPath)}</code> in <code>moments</code> &amp; <code>media_organizer_albums</code> (<code>tagging_paradigm = new_paradigm_v1</code>) as secondary confirmation: <code>${escapeHtml(unionSummary)}</code>.`
+        : `<strong>Tag Moment folder itself (New Tagging Paradigm):</strong> Aggregate any DB asset tags onto <code>${escapeHtml(fullTargetPath)}</code> in <code>moments</code> &amp; <code>media_organizer_albums</code> once tags are present.`
+    );
 
     if (autoIncludedName) {
       const incCnt = combinedExtraMoments.get(autoIncludedName)?.assetIds.size ?? 0;
@@ -5426,7 +5460,10 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
         const tagNote = data.tags_applied
           ? ` · ${data.tags_applied} DB tag(s) applied (session #${data.tag_session_id ?? '—'})`
           : '';
-        statusEl.innerHTML = `<span class="text-green">✅ Consolidated ${(data.combined_moments || [resolveDisjointMomentName]).length} Moment(s) into <code>${escapeHtml(data.target_moment || targetMoment)}</code> (${data.photos_added ?? 0} asset(s) added, ${data.albums_deleted ?? 0} source album(s) deleted, ${data.db_updated ?? 0} DB row(s) updated${escapeHtml(tagNote)}).</span>`;
+        const paradigmNote = data.moment_paradigm_confirmed
+          ? ` · ✓ Moment folder tagged (New Tagging Paradigm · ${data.moment_tags_union?.length ?? 0} union tag(s))`
+          : '';
+        statusEl.innerHTML = `<span class="text-green">✅ Consolidated ${(data.combined_moments || [resolveDisjointMomentName]).length} Moment(s) into <code>${escapeHtml(data.target_moment || targetMoment)}</code> (${data.photos_added ?? 0} asset(s) added, ${data.albums_deleted ?? 0} source album(s) deleted, ${data.db_updated ?? 0} DB row(s) updated${escapeHtml(tagNote)}${escapeHtml(paradigmNote)}).</span>`;
       } else if (action === 'skip_publishing') {
         statusEl.innerHTML = `<span class="text-green">✅ Moved ${data.photos_added ?? assetIds.length} asset(s) to <code>Moments/SkipPublishing</code> (updated ${data.db_updated ?? 0} DB row(s)).</span>`;
       } else {

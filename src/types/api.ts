@@ -526,6 +526,7 @@ export interface DisjointDetailResponse {
   tag_catalog_by_category?: Record<string, TagCatalogItem[]>;
   metadata_summary?: string;
   metadata_struct?: Record<string, any>;
+  moment_tagging_paradigm?: string;
   existing_albums?: Array<{ album_name: string; parent_folder_name: string; asset_count: number }>;
   nearby_candidates?: Array<{
     moment_name: string;
@@ -552,6 +553,8 @@ export interface SaveMomentTagsResponse {
   tag_catalog_by_category?: Record<string, TagCatalogItem[]>;
   metadata_summary?: string;
   metadata_struct?: Record<string, any>;
+  moment_tags_union?: MomentTagItem[];
+  moment_paradigm_confirmed?: boolean;
 }
 
 export interface TagLookupAssetItem {
@@ -612,6 +615,8 @@ export interface MomentAssetsPreviewResponse {
   tag_catalog_by_category?: Record<string, TagCatalogItem[]>;
   metadata_summary?: string;
   metadata_struct?: Record<string, any>;
+  moment_tags_union?: MomentTagItem[];
+  moment_paradigm_confirmed?: boolean;
 }
 
 export interface ResolveDisjointResponse {
@@ -627,6 +632,8 @@ export interface ResolveDisjointResponse {
   db_updated?: number;
   tag_session_id?: number | null;
   tags_applied?: number;
+  moment_tags_union?: MomentTagItem[];
+  moment_paradigm_confirmed?: boolean;
 }
 
 export type TriggerTaskFn = (

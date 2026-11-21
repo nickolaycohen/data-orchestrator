@@ -6028,6 +6028,144 @@ def _sync_asset_metadata_json(
     )
 
 
+def _sync_moment_folder_metadata_json(
+    cur: sqlite3.Cursor,
+    moment_name: str,
+    session_id: Optional[int],
+    asset_ids_hint: Optional[list[str]] = None,
+    extra_union_tags: Optional[list[dict]] = None,
+    paradigm: str = "new_paradigm_v1",
+) -> list[dict]:
+    """Compute union of asset tags and persist Moment-level metadata + tagging_paradigm confirmation onto moments & media_organizer_albums."""
+    m_name = (moment_name or "").strip()
+    if not m_name:
+        return []
+
+    collected: list[dict] = []
+    # 1. Active per-asset rows in moment_tags for this Moment
+    cur.execute(
+        """
+        SELECT category, tag_value, include_in_name
+        FROM moment_tags
+        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+          AND asset_id != ''
+        ORDER BY id ASC
+        """,
+        (m_name,),
+    )
+    for cat, val, inc in cur.fetchall():
+        clean_v = re.sub(r"\s+", " ", (val or "").strip())
+        clean_c = (cat or "").strip().lower()
+        if clean_c in _TAG_CAT_DISPLAY and clean_v:
+            collected.append({"category": clean_c, "tag_value": clean_v, "include_in_name": bool(inc)})
+
+    # 2. Active tags inside assets.tags_metadata_json for assets in this Moment
+    hint_ids = [s.strip() for s in (asset_ids_hint or []) if s and s.strip()]
+    if hint_ids:
+        ph = ",".join("?" for _ in hint_ids)
+        cur.execute(
+            f"""
+            SELECT asset_id FROM assets
+            WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))
+               OR asset_id IN ({ph})
+            """,
+            [m_name, *hint_ids],
+        )
+    else:
+        cur.execute(
+            "SELECT asset_id FROM assets WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
+            (m_name,),
+        )
+    for (aid,) in cur.fetchall():
+        if aid:
+            collected.extend(_read_asset_metadata_tags(cur, aid))
+
+    # 3. Any additional incoming tags passed for this confirmation
+    for t in extra_union_tags or []:
+        clean_v = re.sub(r"\s+", " ", (t.get("tag_value") or "").strip())
+        clean_c = (t.get("category") or "").strip().lower()
+        if clean_c in _TAG_CAT_DISPLAY and clean_v:
+            collected.append(
+                {
+                    "category": clean_c,
+                    "tag_value": clean_v,
+                    "include_in_name": bool(t.get("include_in_name", True)),
+                }
+            )
+
+    # Fallback: include existing Moment-level moment_tags rows if no asset rows exist yet
+    if not collected:
+        cur.execute(
+            """
+            SELECT category, tag_value, include_in_name
+            FROM moment_tags
+            WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+              AND asset_id = ''
+            ORDER BY id ASC
+            """,
+            (m_name,),
+        )
+        for cat, val, inc in cur.fetchall():
+            clean_v = re.sub(r"\s+", " ", (val or "").strip())
+            clean_c = (cat or "").strip().lower()
+            if clean_c in _TAG_CAT_DISPLAY and clean_v:
+                collected.append({"category": clean_c, "tag_value": clean_v, "include_in_name": bool(inc)})
+
+    union_tags = _normalize_unique_moment_tags(collected)
+    if not union_tags:
+        return []
+
+    # Refresh Moment-level summary rows (asset_id = '') cleanly with the exact asset union
+    cur.execute(
+        "DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ''",
+        (m_name,),
+    )
+    for t in union_tags:
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
+            VALUES (?, '', ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                m_name,
+                t["category"],
+                t["tag_value"],
+                1 if t["include_in_name"] else 0,
+                session_id,
+            ),
+        )
+
+    payload = _build_tag_metadata_struct(union_tags, session_id=session_id, moment_name=m_name)
+    payload["scope"] = "moment"
+    payload["tagging_paradigm"] = paradigm
+    payload["asset_tag_union_count"] = len(union_tags)
+    payload_json = json.dumps(payload)
+
+    cur.execute(
+        """
+        UPDATE moments
+        SET tags_metadata_json = ?,
+            tagging_paradigm = ?,
+            tagged_at_utc = datetime('now')
+        WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+        """,
+        (payload_json, paradigm, m_name),
+    )
+    cur.execute(
+        """
+        UPDATE media_organizer_albums
+        SET tags_metadata_json = ?,
+            tagging_paradigm = ?,
+            tagged_at_utc = datetime('now')
+        WHERE is_folder = 0
+          AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'memories', 'curated', 'tobecurated', 'generic moments')
+        """,
+        (payload_json, paradigm, m_name),
+    )
+    return union_tags
+
+
 def _read_asset_metadata_tags(cur: sqlite3.Cursor, asset_id: str) -> list[dict]:
     """Read active_tags list stored inside assets.tags_metadata_json for one asset."""
     if not asset_id:
@@ -6145,6 +6283,14 @@ def _ensure_moment_tag_tables(cur: sqlite3.Cursor) -> int:
     asset_cols = {r[1] for r in cur.execute("PRAGMA table_info(assets)").fetchall()}
     if "tags_metadata_json" not in asset_cols:
         cur.execute("ALTER TABLE assets ADD COLUMN tags_metadata_json TEXT")
+    for tbl in ("moments", "media_organizer_albums"):
+        tbl_cols = {r[1] for r in cur.execute(f"PRAGMA table_info({tbl})").fetchall()}
+        if "tags_metadata_json" not in tbl_cols:
+            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN tags_metadata_json TEXT")
+        if "tagging_paradigm" not in tbl_cols:
+            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN tagging_paradigm TEXT")
+        if "tagged_at_utc" not in tbl_cols:
+            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN tagged_at_utc TEXT")
     _backfill_assets_tags_metadata(cur)
     return removed_on_upgrade
 
@@ -6527,17 +6673,24 @@ def get_disjoint_moment_detail_post(req: DisjointDetailPostRequest):
 _VALID_MOMENT_TAG_CATS = {"activity", "location", "people", "when", "family_member"}
 
 
-def _normalize_unique_moment_tags(items: list[SaveMomentTagItem]) -> list[dict]:
+def _normalize_unique_moment_tags(items: list) -> list[dict]:
     """Deduplicate tags by normalized value (and category) so an asset/Moment is never double-tagged with the same tag."""
     by_val_lc: dict[str, dict] = {}
     ordered_keys: list[str] = []
     for t in items or []:
-        cat = (t.category or "").strip().lower()
-        val = re.sub(r"\s+", " ", (t.tag_value or "").strip())
+        if isinstance(t, dict):
+            raw_cat = t.get("category")
+            raw_val = t.get("tag_value")
+            inc = bool(t.get("include_in_name", True))
+        else:
+            raw_cat = t.category
+            raw_val = t.tag_value
+            inc = bool(t.include_in_name)
+        cat = (raw_cat or "").strip().lower()
+        val = re.sub(r"\s+", " ", (raw_val or "").strip())
         if cat not in _VALID_MOMENT_TAG_CATS or not val:
             continue
         k = val.lower()
-        inc = bool(t.include_in_name)
         if k not in by_val_lc:
             by_val_lc[k] = {"category": cat, "tag_value": val, "include_in_name": inc}
             ordered_keys.append(k)
@@ -6853,6 +7006,13 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                         session_id,
                     ),
                 )
+            moment_union_tags = _sync_moment_folder_metadata_json(
+                cur,
+                m_name,
+                session_id,
+                asset_ids_hint=clean_aids,
+                extra_union_tags=moment_summary_tags,
+            )
 
             cur.execute(
                 """
@@ -6903,6 +7063,8 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 "created_at_utc": row_ts[0] if row_ts else "",
                 "tag_db_counts": tag_db_counts,
                 "tag_catalog_by_category": tag_catalog_by_category,
+                "moment_tags_union": moment_union_tags,
+                "moment_paradigm_confirmed": bool(moment_union_tags),
             }
         finally:
             conn.close()
@@ -7563,6 +7725,14 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                         _sync_asset_metadata_json(cur, aid, target_moment, cur_aid_tags, tag_session_id)
                 tags_applied_count = len(union_tags)
 
+            moment_union_tags = _sync_moment_folder_metadata_json(
+                cur,
+                target_moment,
+                tag_session_id,
+                asset_ids_hint=combined_asset_ids,
+                extra_union_tags=union_tags,
+            )
+
             conn.commit()
         finally:
             conn.close()
@@ -7582,4 +7752,6 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
         "db_updated": len(combined_asset_ids),
         "tag_session_id": tag_session_id,
         "tags_applied": tags_applied_count,
+        "moment_tags_union": moment_union_tags,
+        "moment_paradigm_confirmed": bool(moment_union_tags),
     }
