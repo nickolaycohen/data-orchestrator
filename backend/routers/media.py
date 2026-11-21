@@ -5006,13 +5006,21 @@ on run argv
         end if
         set topFolder to folder topFolderName
 
+        set targetParent to topFolder
         if targetParentName is not "" and targetParentName is not topFolderName then
-            if not (exists folder targetParentName of topFolder) then
-                make new folder named targetParentName at topFolder
-            end if
-            set targetParent to folder targetParentName of topFolder
-        else
-            set targetParent to topFolder
+            set oldDelims to AppleScript's text item delimiters
+            set AppleScript's text item delimiters to "/"
+            set folderSegments to text items of targetParentName
+            set AppleScript's text item delimiters to oldDelims
+            repeat with segName in folderSegments
+                set segStr to (segName as string)
+                if segStr is not "" then
+                    if not (exists folder segStr of targetParent) then
+                        make new folder named segStr at targetParent
+                    end if
+                    set targetParent to folder segStr of targetParent
+                end if
+            end repeat
         end if
 
         set targetAction to "created"
@@ -5033,19 +5041,31 @@ on run argv
 
         set itemsToAdd to {}
         set candidateItems to {}
+        set sourceFolders to {}
         set folderNamesToCheck to {"Moments", "Curated", "ToBeCurated", "Generic Moments"}
         repeat with fName in folderNamesToCheck
             if exists folder (fName as string) of topFolder then
                 set subF to folder (fName as string) of topFolder
-                if exists album srcAlbumName of subF then
-                    set srcAlb to album srcAlbumName of subF
-                    if (count of assetIds) is 0 then
-                        try
-                            repeat with mIt in (every media item of srcAlb)
-                                copy mIt to end of candidateItems
-                            end repeat
-                        end try
-                    end if
+                copy subF to end of sourceFolders
+                if (fName as string) is "Moments" then
+                    try
+                        repeat with nestedF in (every folder of subF)
+                            copy nestedF to end of sourceFolders
+                        end repeat
+                    end try
+                end if
+            end if
+        end repeat
+
+        repeat with subF in sourceFolders
+            if exists album srcAlbumName of subF then
+                set srcAlb to album srcAlbumName of subF
+                if (count of assetIds) is 0 then
+                    try
+                        repeat with mIt in (every media item of srcAlb)
+                            copy mIt to end of candidateItems
+                        end repeat
+                    end try
                 end if
             end if
         end repeat
@@ -5088,11 +5108,10 @@ on run argv
 
         set deletedCount to 0
         if deleteSource then
-            repeat with fName in folderNamesToCheck
-                if exists folder (fName as string) of topFolder then
-                    set subF to folder (fName as string) of topFolder
-                    if exists album srcAlbumName of subF then
-                        set srcAlb to album srcAlbumName of subF
+            repeat with subF in sourceFolders
+                if exists album srcAlbumName of subF then
+                    set srcAlb to album srcAlbumName of subF
+                    if (id of srcAlb) is not (id of targetAlbum) then
                         try
                             delete album id (id of srcAlb)
                             set deletedCount to deletedCount + 1
@@ -5115,7 +5134,10 @@ def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> No
         SELECT album_pk FROM media_organizer_albums
         WHERE is_folder = 0
           AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+          AND (
+            LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+            OR LOWER(COALESCE(full_path, '')) LIKE 'media organizer on lacie/moments/%'
+          )
         """,
         (source_moment,),
     ).fetchall()
@@ -5133,6 +5155,203 @@ def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> No
                 shutil.rmtree(folder)
             except Exception:
                 pass
+
+
+def _load_photos_moment_metadata(asset_ids: list[str]) -> dict:
+    """Load ZMOMENT locations and ZPERSON named faces from the unlocked Photos.sqlite replica."""
+    info: dict = {"moments": [], "people": []}
+    if not asset_ids:
+        return info
+    replica_candidates = [
+        Path("/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite"),
+        Path("/Volumes/Macintosh HD/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite"),
+    ]
+    replica_path = next((p for p in replica_candidates if p.exists()), None)
+    if not replica_path:
+        return info
+
+    moment_counts: dict[str, int] = {}
+    people_counts: dict[str, int] = {}
+    try:
+        rconn = sqlite3.connect(f"file:{replica_path}?mode=ro&immutable=1", uri=True, timeout=3)
+        try:
+            rcur = rconn.cursor()
+            chunk_size = 450
+            for i in range(0, len(asset_ids), chunk_size):
+                chunk = asset_ids[i:i + chunk_size]
+                ph = ",".join("?" for _ in chunk)
+                rcur.execute(
+                    f"""
+                    SELECT m.ZTITLE, m.ZSUBTITLE, COUNT(*)
+                    FROM ZASSET a
+                    JOIN ZMOMENT m ON a.ZMOMENT = m.Z_PK
+                    WHERE a.ZUUID IN ({ph})
+                    GROUP BY m.ZTITLE, m.ZSUBTITLE
+                    """,
+                    chunk,
+                )
+                for title, subtitle, cnt in rcur.fetchall():
+                    parts = [p.replace("\xa0", " ").strip() for p in (title, subtitle) if p and p.replace("\xa0", " ").strip()]
+                    if parts:
+                        label = " - ".join(parts)
+                        moment_counts[label] = moment_counts.get(label, 0) + int(cnt or 1)
+
+                rcur.execute(
+                    f"""
+                    SELECT
+                        COALESCE(NULLIF(TRIM(p.ZFULLNAME), ''), NULLIF(TRIM(p.ZDISPLAYNAME), '')) AS pname,
+                        COUNT(DISTINCT a.ZUUID) AS hits
+                    FROM ZASSET a
+                    JOIN ZDETECTEDFACE df ON df.ZASSETFORFACE = a.Z_PK
+                    JOIN ZPERSON p ON COALESCE(df.ZPERSONFORFACE, df.ZPERSONFORTORSO, df.ZPERSONFORTEMPORALDETECTEDFACES) = p.Z_PK
+                    WHERE a.ZUUID IN ({ph})
+                      AND COALESCE(df.ZHIDDEN, 0) = 0
+                      AND COALESCE(df.ZISINTRASH, 0) = 0
+                    GROUP BY pname
+                    HAVING pname IS NOT NULL AND pname != ''
+                    """,
+                    chunk,
+                )
+                for pname, hits in rcur.fetchall():
+                    clean_name = re.sub(r"\s+", " ", (pname or "").strip())
+                    if clean_name:
+                        people_counts[clean_name] = people_counts.get(clean_name, 0) + int(hits or 1)
+        finally:
+            rconn.close()
+    except Exception:
+        pass
+
+    info["moments"] = [
+        {"label": k, "count": v}
+        for k, v in sorted(moment_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    raw_people = [
+        {"name": k, "count": v}
+        for k, v in sorted(people_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    first_names: dict[str, int] = {}
+    for p in raw_people:
+        fn = p["name"].split()[0]
+        first_names[fn.lower()] = first_names.get(fn.lower(), 0) + 1
+    for p in raw_people:
+        fn = p["name"].split()[0]
+        p["short_name"] = fn if first_names.get(fn.lower(), 0) == 1 else p["name"]
+    info["people"] = raw_people
+    return info
+
+
+_ACTIVITY_RULES: list[tuple[tuple[str, ...], str, str]] = [
+    (("camelback", "blue mountain", "pico", "hunter", "killington", "stowe", "okemo", "ski", "snowboard", "snow"), "Skiing", "Skiing & Snow"),
+    (("fishing", "manasquan outlet", "inlet", "charter boat"), "Ocean Fishing", "Fishing"),
+    (("manasquan", "spring lake", "point pleasant", "asbury", "boardwalk", "jenkinson", "beach", "shore", "primorsko", "sozopol", "chanioti", "ocean grove"), "Beach & Coast", "Beach & Coast"),
+    (("soccer", "futbol"), "Soccer", "Sports"),
+    (("basketball",), "Basketball", "Sports"),
+    (("karting", "go-kart"), "Go-Karting", "Activities"),
+    (("waterfall", "rila", "lakes", "vitosha", "trigrad", "meteora", "trail", "hike", "hiking", "niagara"), "Hiking & Sightseeing", "Travel & Outdoors"),
+    (("six flags",), "Amusement Park", "Trips & Parks"),
+    (("lion king", "broadway", "concert", "show", "theater"), "Show & Outing", "Events & Shows"),
+    (("bday", "birthday",), "Birthday Celebration", "Family & Celebrations"),
+    (("shower",), "Baby Shower", "Family & Celebrations"),
+    (("new year", "newyear", "christmas", "thanksgiving"), "Holiday Celebration", "Family & Celebrations"),
+    (("nyc", "manhattan", "thessaloniki"), "City Exploration", "Travel & Outdoors"),
+]
+
+
+def _build_moment_name_suggestion(
+    moment_name: str,
+    assets_out: list[dict],
+    qual_dates: list[datetime],
+    photos_meta: dict,
+) -> dict:
+    """Synthesize a structured [Activity] [Location] [People] [When] suggestion and subfolder hint."""
+    # Strip YYYY-MM-DD / YYYY-MM / YYYY prefix from legacy album name
+    suffix = re.sub(r"^\d{4}(?:[-/\s]+(?:[A-Za-z]+|\d{2})(?:[-/\s]+\d{2})?)?\s*(?:[-–]\s*)?", "", moment_name).strip()
+    if suffix.endswith(")") and "(" not in suffix:
+        suffix = suffix[:-1].strip()
+
+    anchor_dt = qual_dates[len(qual_dates) // 2] if qual_dates else (_parse_utc_dt(assets_out[0]["date_created_utc"]) if assets_out else None)
+    when_str = ""
+    season_name = ""
+    if anchor_dt:
+        m = anchor_dt.month
+        season_name = "Winter" if m in (12, 1, 2) else ("Spring" if m in (3, 4, 5) else ("Summer" if m in (6, 7, 8) else "Fall"))
+        when_str = f"{season_name} {anchor_dt.year}"
+    elif assets_out and assets_out[0].get("month"):
+        when_str = str(assets_out[0]["month"])
+
+    # Determine Activity & Subfolder hint
+    search_blob = " ".join(
+        [moment_name, suffix] + [str(pm.get("label") or "") for pm in (photos_meta.get("moments") or [])[:3]]
+    ).lower()
+    activity = ""
+    subfolder_hint = ""
+    for keywords, act_label, sf_label in _ACTIVITY_RULES:
+        if any(kw in search_blob for kw in keywords):
+            activity = act_label
+            subfolder_hint = sf_label
+            break
+
+    # People: detected faces > album keywords > non-shared device owners
+    people_objs = photos_meta.get("people") or []
+    people_names = [p["short_name"] for p in people_objs if p.get("short_name")]
+    if not people_names:
+        owner_counts: dict[str, int] = {}
+        for a in assets_out:
+            own = (a.get("primary_owner") or "").strip()
+            if own and own != "Shared/Other":
+                short_own = own.split()[0]
+                owner_counts[short_own] = owner_counts.get(short_own, 0) + 1
+        people_names = [k for k, _ in sorted(owner_counts.items(), key=lambda kv: -kv[1])]
+    people_str = ", ".join(people_names[:3])
+
+    # Location: prefer suffix if it looks like a venue/place rather than purely an event/person description
+    zmoment_labels = [pm["label"] for pm in (photos_meta.get("moments") or []) if pm.get("label")]
+    non_place_suffix = any(tok in suffix.lower() for tok in ("soccer player", "birthday", "bday", "baby shower", "graduation", "new year", "newyear"))
+    location = ""
+    if suffix and not non_place_suffix:
+        location = suffix
+    elif zmoment_labels:
+        location = zmoment_labels[0]
+    elif suffix:
+        location = suffix
+
+    if not activity:
+        if assets_out and all(a.get("media_type") == "video" for a in assets_out):
+            activity = "Video Clips"
+        elif people_names:
+            activity = "Family Outing"
+        elif location:
+            activity = "Day Trip"
+        else:
+            activity = "Moment"
+
+    location_candidates: list[str] = []
+    for cand in [suffix, *zmoment_labels]:
+        c = (cand or "").strip()
+        if c and c.lower() not in {x.lower() for x in location_candidates}:
+            location_candidates.append(c)
+
+    # Compose canonical readable label: [Activity] at [Location] with [People] - [When]
+    parts: list[str] = []
+    if activity:
+        parts.append(activity)
+    if location:
+        parts.append(f"at {location}")
+    if people_str:
+        parts.append(f"with {people_str}")
+    head = " ".join(parts).strip() or moment_name
+    suggested_name = f"{head} - {when_str}" if when_str else head
+
+    return {
+        "activity": activity,
+        "location": location,
+        "people": people_str,
+        "when": when_str,
+        "suggested_name": suggested_name,
+        "subfolder_hint": subfolder_hint or activity,
+        "location_candidates": location_candidates[:6],
+        "people_candidates": people_objs[:8],
+    }
 
 
 @router.get("/memories/disjoint-detail")
@@ -5225,7 +5444,10 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
                 SELECT parent_folder_name, asset_count, full_path
                 FROM media_organizer_albums
                 WHERE is_folder = 0 AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+                  AND (
+                    LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+                    OR LOWER(COALESCE(full_path, '')) LIKE 'media organizer on lacie/moments/%'
+                  )
                 """,
                 (m_name,),
             )
@@ -5233,6 +5455,24 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
                 {"parent": r[0], "asset_count": int(r[1] or 0), "full_path": r[2]}
                 for r in cur.fetchall()
             ]
+
+            cur.execute(
+                """
+                SELECT album_name, full_path
+                FROM media_organizer_albums
+                WHERE is_folder = 1
+                  AND LOWER(COALESCE(full_path, '')) LIKE 'media organizer on lacie/moments/%'
+                ORDER BY full_path ASC
+                """
+            )
+            existing_moment_subfolders = []
+            for sf_name, sf_path in cur.fetchall():
+                rel = sf_path[len("Media Organizer on LaCie/"):] if sf_path.startswith("Media Organizer on LaCie/") else sf_path
+                if rel and rel not in existing_moment_subfolders:
+                    existing_moment_subfolders.append(rel)
+
+            photos_meta = _load_photos_moment_metadata([a["asset_id"] for a in assets_out])
+            name_suggestion = _build_moment_name_suggestion(m_name, assets_out, qual_dates, photos_meta)
 
             # Build nearby multi-asset merge candidates
             cur.execute(
@@ -5287,6 +5527,8 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
                 "suggested_target": suggested_target,
                 "assets": assets_out,
                 "albums_present": albums_present,
+                "existing_subfolders": existing_moment_subfolders,
+                "name_suggestion": name_suggestion,
                 "nearby_candidates": nearby_candidates[:10],
             }
         finally:
@@ -5310,15 +5552,18 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
 
     top_folder = "Media Organizer on LaCie"
     target_moment = (req.target_moment or "").strip()
-    target_parent = (req.target_parent_folder or "Moments").strip() or "Moments"
+    raw_parent = (req.target_parent_folder or "Moments").strip() or "Moments"
+    parent_segments = [seg.strip() for seg in raw_parent.split("/") if seg.strip() and seg.strip() not in (".", "..")]
+    target_parent = "/".join(parent_segments) if parent_segments else "Moments"
+    leaf_parent = parent_segments[-1] if parent_segments else "Moments"
 
     if action == "merge":
         if not target_moment:
             return {"ok": False, "error": "Target Moment name is required to merge"}
         if target_moment.lower() == src_moment.lower() and target_parent.lower() == "moments":
             return {"ok": False, "error": "Target Moment must differ from source Moment"}
-        if "/" in target_moment or "/" in target_parent:
-            return {"ok": False, "error": "Moment and folder names cannot contain '/'"}
+        if "/" in target_moment or "\\" in target_moment or "\\" in target_parent or ".." in raw_parent.split("/"):
+            return {"ok": False, "error": "Invalid characters in target Moment or folder path"}
 
     clean_ids: list[str] = []
     seen: set[str] = set()
@@ -5459,6 +5704,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
             "source_moment": src_moment,
             "photos_added": photos_added,
             "asset_count": len(clean_ids),
+            "db_updated": len(clean_ids),
         }
 
     # action == "merge"
@@ -5489,6 +5735,43 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
     conn.execute("PRAGMA busy_timeout = 30000")
     try:
         cur = conn.cursor()
+        # Ensure any nested parent folders (e.g. Moments/Skiing) exist in media_organizer_albums
+        walk_path = top_folder
+        walk_parent_pk = None
+        walk_parent_name = top_folder
+        root_row = cur.execute(
+            "SELECT album_pk FROM media_organizer_albums WHERE is_folder = 1 AND LOWER(full_path) = LOWER(?) LIMIT 1",
+            (top_folder,),
+        ).fetchone()
+        if root_row:
+            walk_parent_pk = int(root_row[0])
+
+        for depth_idx, seg in enumerate(parent_segments, start=2):
+            walk_path = f"{walk_path}/{seg}"
+            seg_row = cur.execute(
+                """
+                SELECT album_pk FROM media_organizer_albums
+                WHERE is_folder = 1
+                  AND (LOWER(full_path) = LOWER(?) OR (LOWER(album_name) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?)))
+                LIMIT 1
+                """,
+                (walk_path, seg, walk_parent_name),
+            ).fetchone()
+            if seg_row:
+                seg_pk = int(seg_row[0])
+            else:
+                seg_pk = _allocate_synthetic_album_pk(cur)
+                cur.execute(
+                    """
+                    INSERT INTO media_organizer_albums
+                        (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, 4000, 0, datetime('now'))
+                    """,
+                    (seg_pk, seg, walk_parent_pk, walk_parent_name, walk_path, depth_idx),
+                )
+            walk_parent_pk = seg_pk
+            walk_parent_name = seg
+
         full_path = f"{top_folder}/{target_parent}/{target_moment}"
         tgt_row = cur.execute(
             """
@@ -5497,35 +5780,30 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
               AND (LOWER(full_path) = LOWER(?) OR (LOWER(album_name) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?)))
             LIMIT 1
             """,
-            (full_path, target_moment, target_parent),
+            (full_path, target_moment, leaf_parent),
         ).fetchone()
         if tgt_row:
             tgt_pk = int(tgt_row[0])
         else:
-            p_row = cur.execute(
-                "SELECT album_pk FROM media_organizer_albums WHERE is_folder = 1 AND LOWER(album_name) = LOWER(?) LIMIT 1",
-                (target_parent,),
-            ).fetchone()
-            p_pk = int(p_row[0]) if p_row else None
             tgt_pk = _allocate_synthetic_album_pk(cur)
             cur.execute(
                 """
                 INSERT INTO media_organizer_albums
                     (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
-                VALUES (?, ?, ?, ?, ?, 0, 3, 2, 0, datetime('now'))
+                VALUES (?, ?, ?, ?, ?, 0, ?, 2, 0, datetime('now'))
                 """,
-                (tgt_pk, target_moment, p_pk, target_parent, full_path),
+                (tgt_pk, target_moment, walk_parent_pk, leaf_parent, full_path, 2 + len(parent_segments)),
             )
 
-        if target_parent.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments"):
+        if target_parent.lower().startswith("moments") or leaf_parent.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments"):
             m_exists = cur.execute(
                 "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
                 (target_moment,),
             ).fetchone()
             if not m_exists:
                 cur.execute(
-                    "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, ?)",
-                    (tgt_pk, target_moment, target_parent),
+                    "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, ?, ?)",
+                    (tgt_pk, target_moment, walk_parent_pk, leaf_parent),
                 )
 
         # Collect all asset IDs from source Moment in DB if delete_source_albums (even lower-rated ones)
@@ -5581,4 +5859,5 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
         "target_action": target_action,
         "photos_added": photos_added,
         "albums_deleted": albums_deleted,
+        "db_updated": len(merge_db_ids),
     }

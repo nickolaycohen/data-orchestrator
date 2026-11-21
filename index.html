@@ -2197,6 +2197,39 @@
 
             <div id="resolve-disjoint-albums-bar" class="publish-folder-bar" style="display: none; font-size: 0.72rem;"></div>
 
+            <div class="disjoint-suggestion-box" id="resolve-disjoint-suggestion-box">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                  <strong style="font-size: 0.84rem; color: #f5f3ff;">✨ Moment Name Suggestion Engine</strong>
+                  <span class="badge badge-xs badge-purple font-mono">[Activity] [Location] [People] [When]</span>
+                </div>
+                <button type="button" class="btn btn-xs btn-purple" id="btn-apply-disjoint-suggestion" title="Copy composed suggestion into Target Moment Album Name">
+                  ✨ Use as Target Name
+                </button>
+              </div>
+              <div class="disjoint-suggested-headline" id="resolve-disjoint-suggested-preview">—</div>
+              <div class="disjoint-paradigm-grid">
+                <div>
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.2rem;">Activity</label>
+                  <input type="text" id="resolve-disjoint-field-activity" class="form-control" placeholder="e.g. Skiing, Ocean Fishing" style="width: 100%; font-size: 0.76rem; padding: 0.35rem 0.55rem;" />
+                </div>
+                <div>
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.2rem;">Location</label>
+                  <input type="text" id="resolve-disjoint-field-location" class="form-control" placeholder="e.g. CamelBack" style="width: 100%; font-size: 0.76rem; padding: 0.35rem 0.55rem;" />
+                  <div class="disjoint-mini-chips" id="resolve-disjoint-loc-chips"></div>
+                </div>
+                <div>
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.2rem;">People</label>
+                  <input type="text" id="resolve-disjoint-field-people" class="form-control" placeholder="e.g. Roberto, Eva" style="width: 100%; font-size: 0.76rem; padding: 0.35rem 0.55rem;" />
+                  <div class="disjoint-mini-chips" id="resolve-disjoint-people-chips"></div>
+                </div>
+                <div>
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.2rem;">When</label>
+                  <input type="text" id="resolve-disjoint-field-when" class="form-control" placeholder="e.g. Winter 2020" style="width: 100%; font-size: 0.76rem; padding: 0.35rem 0.55rem;" />
+                </div>
+              </div>
+            </div>
+
             <div>
               <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
                 <strong style="font-size: 0.8rem;">Assets in Disjoint Moment (click thumbnail to preview)</strong>
@@ -2206,7 +2239,7 @@
             </div>
 
             <div style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 0.6rem;">
-              <strong style="font-size: 0.8rem;">Merge Into Chronological / Parent Moment</strong>
+              <strong style="font-size: 0.8rem;">Merge Into Existing Neighbor OR Organize Under Subfolder</strong>
               <div>
                 <span class="font-mono text-muted" style="font-size: 0.68rem; display: block; margin-bottom: 0.3rem;">Nearby Multi-Asset Candidates (click to fill target):</span>
                 <div class="disjoint-target-chips" id="resolve-disjoint-nearby-chips"></div>
@@ -2214,17 +2247,25 @@
               <div class="publish-urls-grid">
                 <div>
                   <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Moment Album Name</label>
-                  <input type="text" id="resolve-disjoint-target-input" class="form-control" placeholder="e.g. 2020-02-16 - Blue Mountain" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
+                  <input type="text" id="resolve-disjoint-target-input" class="form-control" placeholder="e.g. Skiing at CamelBack - Winter 2020" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
                 </div>
                 <div>
-                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Folder (under Media Organizer on LaCie)</label>
+                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Moments Subfolder (Existing or Create New)</label>
                   <select id="resolve-disjoint-parent-select" class="form-control" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;">
-                    <option value="Moments">Moments (default)</option>
+                    <option value="Moments">Moments (Root)</option>
+                    <option value="__NEW_SUBFOLDER__">➕ Create new subfolder under Moments...</option>
                     <option value="Generic Moments">Generic Moments</option>
                     <option value="Curated">Curated</option>
                     <option value="ToBeCurated">ToBeCurated</option>
                   </select>
                 </div>
+              </div>
+              <div id="resolve-disjoint-new-subfolder-wrap" style="display: none;">
+                <label class="font-mono text-muted" style="font-size: 0.68rem; display: block; margin-bottom: 0.2rem;">New Subfolder Name (created inside <code>Media Organizer on LaCie/Moments/</code>)</label>
+                <input type="text" id="resolve-disjoint-new-subfolder-input" class="form-control" placeholder="e.g. Skiing &amp; Snow, Fishing, Sports" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
+              </div>
+              <div class="font-mono text-muted" style="font-size: 0.69rem;">
+                Target Path: <code id="resolve-disjoint-target-path-preview">Media Organizer on LaCie / Moments / —</code>
               </div>
               <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem; cursor: pointer; color: var(--text-secondary);">
                 <input type="checkbox" id="resolve-disjoint-delete-source" checked />

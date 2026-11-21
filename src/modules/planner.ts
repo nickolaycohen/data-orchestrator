@@ -529,6 +529,37 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     document.querySelectorAll<HTMLButtonElement>('#resolve-disjoint-nearby-chips .disjoint-target-chip').forEach(chip => {
       chip.classList.toggle('active', (chip.dataset.targetMoment || '') === val && val !== '');
     });
+    updateResolveDisjointTargetPreview();
+  });
+  document.getElementById('resolve-disjoint-parent-select')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLSelectElement)?.value || 'Moments';
+    const newWrap = document.getElementById('resolve-disjoint-new-subfolder-wrap');
+    if (newWrap) newWrap.style.display = val === '__NEW_SUBFOLDER__' ? 'block' : 'none';
+    updateResolveDisjointTargetPreview();
+  });
+  document.getElementById('resolve-disjoint-new-subfolder-input')?.addEventListener('input', () => {
+    updateResolveDisjointTargetPreview();
+  });
+  [
+    'resolve-disjoint-field-activity',
+    'resolve-disjoint-field-location',
+    'resolve-disjoint-field-people',
+    'resolve-disjoint-field-when'
+  ].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', () => {
+      updateResolveDisjointComposedHeadline();
+    });
+  });
+  document.getElementById('btn-apply-disjoint-suggestion')?.addEventListener('click', () => {
+    const composed = composeResolveDisjointSuggestedName();
+    const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+    if (targetInp && composed) {
+      targetInp.value = composed;
+      document.querySelectorAll<HTMLButtonElement>('#resolve-disjoint-nearby-chips .disjoint-target-chip').forEach(c => {
+        c.classList.toggle('active', (c.dataset.targetMoment || '') === composed);
+      });
+      updateResolveDisjointTargetPreview();
+    }
   });
   document.getElementById('btn-submit-resolve-disjoint')?.addEventListener('click', () => {
     if (resolveDisjointCompleted) {
@@ -1252,7 +1283,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
           const firstAssetId = assetIds[0] || '';
           const thumbHtml = firstAssetId
             ? `<button type="button" class="disjoint-row-thumb-btn btn-preview-disjoint-asset" data-asset-id="${escapeHtml(firstAssetId)}" data-moment-name="${escapeHtml(d.moment_name)}" title="Preview assets in ${escapeHtml(d.moment_name)}">
-                <img src="/api/media/thumbnail/${encodeURIComponent(firstAssetId)}" alt="${escapeHtml(d.moment_name)}" loading="lazy" />
+                <img src="/api/media/cleanup/thumbnail/${encodeURIComponent(firstAssetId)}" alt="${escapeHtml(d.moment_name)}" loading="lazy" />
               </button>`
             : '';
           const sugTarget = d.suggested_target || '';
@@ -3231,7 +3262,7 @@ function renderPublishMomentAssets(): void {
         <div class="publish-asset-row">
           <label class="publish-asset-left" style="cursor: pointer;">
             <input type="checkbox" class="publish-asset-checkbox" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} />
-            <img class="publish-asset-thumb" src="/api/media/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.filename)}" loading="lazy" />
+            <img class="publish-asset-thumb" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.filename)}" loading="lazy" />
             <div style="min-width: 0; flex: 1;">
               <div class="font-mono" style="font-size: 0.75rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                 #${idx + 1} · ${escapeHtml(a.filename || a.asset_id)}
@@ -3533,7 +3564,7 @@ function renderResolveDisjointAssets(): void {
           <div class="publish-asset-left">
             <input type="checkbox" class="resolve-disjoint-asset-cb" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer;" />
             <button type="button" class="disjoint-row-thumb-btn btn-preview-disjoint-modal-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="Open full preview" style="width: 40px; height: 40px;">
-              <img src="/api/media/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
+              <img src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
             </button>
             <div style="min-width: 0; flex: 1;">
               <div class="font-mono" style="font-size: 0.75rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
@@ -3578,6 +3609,48 @@ function renderResolveDisjointAssets(): void {
   updateResolveDisjointSelectionSummary();
 }
 
+function composeResolveDisjointSuggestedName(): string {
+  const act = ((document.getElementById('resolve-disjoint-field-activity') as HTMLInputElement | null)?.value || '').trim();
+  const loc = ((document.getElementById('resolve-disjoint-field-location') as HTMLInputElement | null)?.value || '').trim();
+  const ppl = ((document.getElementById('resolve-disjoint-field-people') as HTMLInputElement | null)?.value || '').trim();
+  const when = ((document.getElementById('resolve-disjoint-field-when') as HTMLInputElement | null)?.value || '').trim();
+
+  const parts: string[] = [];
+  if (act) parts.push(act);
+  if (loc) parts.push(act ? `at ${loc}` : loc);
+  if (ppl) parts.push(`with ${ppl}`);
+  const head = parts.join(' ').trim();
+  if (!head) return when || resolveDisjointMomentName;
+  return when ? `${head} - ${when}` : head;
+}
+
+function updateResolveDisjointComposedHeadline(): void {
+  const headlineEl = document.getElementById('resolve-disjoint-suggested-preview');
+  if (headlineEl) {
+    headlineEl.textContent = composeResolveDisjointSuggestedName() || '—';
+  }
+}
+
+function getEffectiveResolveDisjointParentFolder(): string {
+  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
+  const newInp = document.getElementById('resolve-disjoint-new-subfolder-input') as HTMLInputElement | null;
+  const raw = parentSel?.value || 'Moments';
+  if (raw === '__NEW_SUBFOLDER__') {
+    const cleanSub = (newInp?.value || '').trim().replace(/^\/+|\/+$/g, '');
+    return cleanSub ? `Moments/${cleanSub}` : 'Moments/<New Subfolder>';
+  }
+  return raw;
+}
+
+function updateResolveDisjointTargetPreview(): void {
+  const previewEl = document.getElementById('resolve-disjoint-target-path-preview');
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  if (!previewEl) return;
+  const parentPath = getEffectiveResolveDisjointParentFolder();
+  const targetName = (targetInp?.value || '').trim() || '—';
+  previewEl.textContent = `Media Organizer on LaCie / ${parentPath.split('/').join(' / ')} / ${targetName}`;
+}
+
 async function openResolveDisjointModal(momentName: string, suggestedTarget = ''): Promise<void> {
   resolveDisjointMomentName = momentName;
   resolveDisjointAssets = [];
@@ -3593,8 +3666,18 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   const chipsEl = document.getElementById('resolve-disjoint-nearby-chips');
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
+  const newSubWrap = document.getElementById('resolve-disjoint-new-subfolder-wrap');
+  const newSubInp = document.getElementById('resolve-disjoint-new-subfolder-input') as HTMLInputElement | null;
   const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
   const statusEl = document.getElementById('resolve-disjoint-status');
+
+  const actInp = document.getElementById('resolve-disjoint-field-activity') as HTMLInputElement | null;
+  const locInp = document.getElementById('resolve-disjoint-field-location') as HTMLInputElement | null;
+  const pplInp = document.getElementById('resolve-disjoint-field-people') as HTMLInputElement | null;
+  const whenInp = document.getElementById('resolve-disjoint-field-when') as HTMLInputElement | null;
+  const sugPreviewEl = document.getElementById('resolve-disjoint-suggested-preview');
+  const locChipsEl = document.getElementById('resolve-disjoint-loc-chips');
+  const pplChipsEl = document.getElementById('resolve-disjoint-people-chips');
 
   if (titleEl) titleEl.textContent = `🔀 Resolve Disjoint Moment · ${momentName}`;
   if (badgeEl) badgeEl.textContent = 'loading...';
@@ -3606,7 +3689,17 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   if (chipsEl) chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">Searching nearby Moments...</span>';
   if (targetInp) targetInp.value = suggestedTarget || '';
   if (parentSel) parentSel.value = 'Moments';
+  if (newSubWrap) newSubWrap.style.display = 'none';
+  if (newSubInp) newSubInp.value = '';
   if (delSrcCb) delSrcCb.checked = true;
+  if (actInp) actInp.value = '';
+  if (locInp) locInp.value = '';
+  if (pplInp) pplInp.value = '';
+  if (whenInp) whenInp.value = '';
+  if (sugPreviewEl) sugPreviewEl.textContent = 'Analyzing asset cues...';
+  if (locChipsEl) locChipsEl.innerHTML = '';
+  if (pplChipsEl) pplChipsEl.innerHTML = '';
+  updateResolveDisjointTargetPreview();
   if (statusEl) {
     statusEl.style.display = 'none';
     statusEl.innerHTML = '';
@@ -3669,9 +3762,74 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
         <span>
           <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
           ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s) inside Apple Photos albums` : ''}.
-          Merge into an existing Moment, move to <code>Moments/SkipPublishing</code>, or Ignore.
+          Merge into an existing Moment, apply the new Moment Name Suggestion + Subfolder, move to <code>Moments/SkipPublishing</code>, or Ignore.
         </span>
       `;
+    }
+
+    // Populate Moment Name Suggestion Engine fields + quick-pick chips
+    const sug = data.name_suggestion;
+    if (sug) {
+      if (actInp) actInp.value = sug.activity || '';
+      if (locInp) locInp.value = sug.location || '';
+      if (pplInp) pplInp.value = sug.people || '';
+      if (whenInp) whenInp.value = sug.when || '';
+      if (sugPreviewEl) sugPreviewEl.textContent = sug.suggested_name || composeResolveDisjointSuggestedName();
+      if (newSubInp && sug.subfolder_hint) {
+        newSubInp.value = sug.subfolder_hint;
+      }
+
+      if (locChipsEl && sug.location_candidates?.length) {
+        locChipsEl.innerHTML = sug.location_candidates
+          .map(lc => `<button type="button" class="disjoint-mini-chip" data-loc="${escapeHtml(lc)}">${escapeHtml(lc)}</button>`)
+          .join('');
+        locChipsEl.querySelectorAll<HTMLButtonElement>('.disjoint-mini-chip').forEach(btn => {
+          btn.addEventListener('click', () => {
+            if (locInp) locInp.value = btn.dataset.loc || '';
+            updateResolveDisjointComposedHeadline();
+          });
+        });
+      }
+
+      if (pplChipsEl && sug.people_candidates?.length) {
+        pplChipsEl.innerHTML = sug.people_candidates
+          .map(
+            pc =>
+              `<button type="button" class="disjoint-mini-chip" data-person="${escapeHtml(pc.short_name)}" title="${escapeHtml(pc.name)} (${pc.count} photo(s))">+ ${escapeHtml(pc.short_name)}</button>`
+          )
+          .join('');
+        pplChipsEl.querySelectorAll<HTMLButtonElement>('.disjoint-mini-chip').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const pName = (btn.dataset.person || '').trim();
+            if (!pplInp || !pName) return;
+            const current = pplInp.value
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean);
+            if (!current.some(c => c.toLowerCase() === pName.toLowerCase())) {
+              current.push(pName);
+              pplInp.value = current.join(', ');
+            }
+            updateResolveDisjointComposedHeadline();
+          });
+        });
+      }
+    }
+
+    // Populate Subfolder dropdown from existing Moments subfolders + standard organizer folders
+    if (parentSel) {
+      const existingSubfolders = data.existing_subfolders || [];
+      const opts: string[] = ['<option value="Moments">Moments (Root)</option>'];
+      existingSubfolders.forEach(sf => {
+        const display = sf.replace(/^Moments\//, 'Moments / ');
+        opts.push(`<option value="${escapeHtml(sf)}">📁 ${escapeHtml(display)}</option>`);
+      });
+      opts.push('<option value="__NEW_SUBFOLDER__">➕ Create new subfolder under Moments...</option>');
+      opts.push('<option value="Generic Moments">Generic Moments</option>');
+      opts.push('<option value="Curated">Curated</option>');
+      opts.push('<option value="ToBeCurated">ToBeCurated</option>');
+      parentSel.innerHTML = opts.join('');
+      parentSel.value = 'Moments';
     }
 
     const albumsPresent = data.albums_present || [];
@@ -3691,7 +3849,7 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
       }
     }
 
-    const effectiveSuggested = data.suggested_target || suggestedTarget || '';
+    const effectiveSuggested = data.suggested_target || suggestedTarget || sug?.suggested_name || '';
     if (targetInp && !targetInp.value.trim() && effectiveSuggested) {
       targetInp.value = effectiveSuggested;
     }
@@ -3699,7 +3857,7 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
     const candidates = data.nearby_candidates || [];
     if (chipsEl) {
       if (!candidates.length) {
-        chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">No nearby multi-asset Moments found — enter any target Moment name below.</span>';
+        chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">No nearby multi-asset Moments found — click "Use as Target Name" or enter a Moment name below.</span>';
       } else {
         const currentTarget = (targetInp?.value || '').trim();
         chipsEl.innerHTML = candidates
@@ -3718,11 +3876,13 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
             if (targetInp) targetInp.value = val;
             chipsEl.querySelectorAll('.disjoint-target-chip').forEach(c => c.classList.remove('active'));
             chip.classList.add('active');
+            updateResolveDisjointTargetPreview();
           });
         });
       }
     }
 
+    updateResolveDisjointTargetPreview();
     renderResolveDisjointAssets();
   } catch (err: any) {
     if (summaryEl) {
@@ -3736,6 +3896,7 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
 
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
+  const newSubInp = document.getElementById('resolve-disjoint-new-subfolder-input') as HTMLInputElement | null;
   const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
   const statusEl = document.getElementById('resolve-disjoint-status');
   const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
@@ -3749,6 +3910,19 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
       statusEl.innerHTML = '<span class="text-red">❌ Enter or pick a Target Moment Album Name before merging.</span>';
     }
     return;
+  }
+
+  let resolvedParent = parentSel?.value || 'Moments';
+  if (action === 'merge' && resolvedParent === '__NEW_SUBFOLDER__') {
+    const newSub = (newSubInp?.value || '').trim().replace(/^\/+|\/+$/g, '');
+    if (!newSub) {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = '<span class="text-red">❌ Enter a new Subfolder name or pick an existing folder from the dropdown.</span>';
+      }
+      return;
+    }
+    resolvedParent = newSub.toLowerCase().startsWith('moments/') ? newSub : `Moments/${newSub}`;
   }
 
   const assetIds = Array.from(resolveDisjointSelectedIds);
@@ -3767,7 +3941,7 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
 
   const actionLabel =
     action === 'merge'
-      ? `Merging into "${targetMoment}" via AppleScript...`
+      ? `Organizing into "${resolvedParent}/${targetMoment}" via AppleScript...`
       : action === 'skip_publishing'
         ? 'Moving selected asset(s) to Moments/SkipPublishing...'
         : 'Excluding selected asset(s) via ignore pipeline...';
@@ -3786,7 +3960,7 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
         source_moment: resolveDisjointMomentName,
         action,
         target_moment: action === 'merge' ? targetMoment : null,
-        target_parent_folder: parentSel?.value || 'Moments',
+        target_parent_folder: resolvedParent,
         asset_ids: assetIds,
         delete_source_albums: Boolean(delSrcCb?.checked ?? true)
       })

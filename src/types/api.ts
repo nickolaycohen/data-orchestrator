@@ -468,6 +468,17 @@ export interface DisjointDetailAsset {
   qualified: boolean;
 }
 
+export interface DisjointNameSuggestion {
+  activity: string;
+  location: string;
+  people: string;
+  when: string;
+  suggested_name: string;
+  subfolder_hint?: string;
+  location_candidates?: string[];
+  people_candidates?: Array<{ name: string; short_name: string; count: number }>;
+}
+
 export interface DisjointDetailResponse {
   ok: boolean;
   error?: string;
@@ -476,6 +487,8 @@ export interface DisjointDetailResponse {
   suggested_target?: string;
   assets?: DisjointDetailAsset[];
   albums_present?: Array<{ parent: string; asset_count: number; full_path: string }>;
+  existing_subfolders?: string[];
+  name_suggestion?: DisjointNameSuggestion;
   nearby_candidates?: Array<{
     moment_name: string;
     qualified_count: number;
