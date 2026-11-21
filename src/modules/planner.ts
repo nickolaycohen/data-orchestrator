@@ -4785,12 +4785,25 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
 
 function updateResolveDisjointTargetPreview(): void {
   const previewEl = document.getElementById('resolve-disjoint-target-path-preview');
+  const statusNoteEl = document.getElementById('resolve-disjoint-target-status-note');
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
   const parentName = parentSel?.value || 'Moments';
   const targetName = (targetInp?.value || '').trim() || '—';
   const existingInfo = targetName !== '—' ? getExistingTargetAlbumInfo(parentName, targetName) : { exists: false, assetCount: 0 };
+
+  if (statusNoteEl) {
+    if (targetName === '—') {
+      statusNoteEl.textContent = '';
+    } else if (existingInfo.exists) {
+      statusNoteEl.style.color = '#a7f3d0';
+      statusNoteEl.textContent = `(existing folder · ${existingInfo.assetCount} asset(s) — copies missing only)`;
+    } else {
+      statusNoteEl.style.color = '';
+      statusNoteEl.textContent = '(new folder)';
+    }
+  }
 
   if (previewEl) {
     const statusNote =

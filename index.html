@@ -2245,22 +2245,6 @@
                 <div id="resolve-disjoint-candidate-tagging-mount"></div>
               </div>
 
-              <div class="publish-urls-grid">
-                <div>
-                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Moment Album Name (Default: New Paradigm Format)</label>
-                  <input type="text" id="resolve-disjoint-target-input" class="form-control" placeholder="e.g. Skiing at CamelBack - Winter 2020" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
-                </div>
-                <div>
-                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Folder (under Media Organizer on LaCie)</label>
-                  <select id="resolve-disjoint-parent-select" class="form-control" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;">
-                    <option value="Moments">Moments (default)</option>
-                    <option value="Generic Moments">Generic Moments</option>
-                    <option value="Curated">Curated</option>
-                    <option value="ToBeCurated">ToBeCurated</option>
-                  </select>
-                </div>
-              </div>
-
               <div id="resolve-disjoint-propagate-tags-box" style="padding: 0.45rem 0.6rem; border-radius: 6px; background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); display: flex; flex-direction: column; gap: 0.32rem;">
                 <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: #ede9fe; font-weight: 500;">
                   <input type="checkbox" id="resolve-disjoint-save-per-source-tags" checked />
@@ -2278,8 +2262,19 @@
               </div>
 
               <div class="disjoint-target-path-box">
-                <span class="font-mono text-muted" style="font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.18rem;">Final Merge Destination · Target Path</span>
-                <code id="resolve-disjoint-target-path-preview">Media Organizer on LaCie / Moments / —</code>
+                <span class="font-mono text-muted" style="font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.28rem;">Final Merge Destination · Target Path</span>
+                <div class="disjoint-target-path-inline">
+                  <span class="disjoint-target-prefix font-mono">Media Organizer on LaCie /</span>
+                  <select id="resolve-disjoint-parent-select" class="form-control disjoint-target-parent-select" aria-label="Target Folder">
+                    <option value="Moments">Moments</option>
+                    <option value="Generic Moments">Generic Moments</option>
+                    <option value="Curated">Curated</option>
+                    <option value="ToBeCurated">ToBeCurated</option>
+                  </select>
+                  <span class="disjoint-target-slash font-mono">/</span>
+                  <input type="text" id="resolve-disjoint-target-input" class="form-control disjoint-target-leaf-input" placeholder="e.g. Skiing at CamelBack - Winter 2020" aria-label="Target Moment Album Name" />
+                  <span id="resolve-disjoint-target-status-note" class="font-mono text-muted" style="font-size: 0.74rem; font-weight: 500; white-space: nowrap;"></span>
+                </div>
               </div>
               <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem; cursor: pointer; color: var(--text-secondary);">
                 <input type="checkbox" id="resolve-disjoint-delete-source" checked />
