@@ -7152,20 +7152,13 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                         (tgt_pk, target_moment, target_parent),
                     )
 
-            # Collect all asset IDs from all source Moments in DB if delete_source_albums (even lower-rated ones)
-            merge_db_ids = list(combined_asset_ids)
-            seen_db = set(merge_db_ids)
-            if req.delete_source_albums:
-                for sm in combined_src_moments:
-                    all_src_rows = cur.execute(
-                        "SELECT asset_id FROM assets WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
-                        (sm,),
-                    ).fetchall()
-                    for (aid,) in all_src_rows:
-                        if aid and aid not in seen_db:
-                            seen_db.add(aid)
-                            merge_db_ids.append(aid)
-
+            # Collect only selected/combined asset IDs into target album; clear orphaned Moment ref on skipped/unchecked items when deleting source
+            if combined_asset_ids:
+                ph = ",".join("?" for _ in combined_asset_ids)
+                cur.execute(
+                    f"UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph})",
+                    [target_moment, *combined_asset_ids],
+                )
             for aid in combined_asset_ids:
                 _insert_album_asset_row_if_missing(cur, tgt_pk, aid)
             cur.execute(
@@ -7173,20 +7166,41 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 (tgt_pk, tgt_pk),
             )
 
-            if merge_db_ids:
-                ph = ",".join("?" for _ in merge_db_ids)
-                cur.execute(
-                    f"UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph})",
-                    [target_moment, *merge_db_ids],
-                )
+            explicit_selection_sent = bool((req.asset_ids or []) or (req.additional_asset_ids or []))
             if req.delete_source_albums:
                 for sm in combined_src_moments:
                     if sm.lower() == target_moment.lower():
+                        # Remove any duplicate album copies for same name in other organizer folders (e.g. ToBeCurated/Curated)
+                        extra_pks = [
+                            int(r[0])
+                            for r in cur.execute(
+                                """
+                                SELECT album_pk FROM media_organizer_albums
+                                WHERE is_folder = 0
+                                  AND album_pk != ?
+                                  AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+                                """,
+                                (tgt_pk, sm),
+                            ).fetchall()
+                        ]
+                        if extra_pks:
+                            ph_e = ",".join("?" for _ in extra_pks)
+                            cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_e})", extra_pks)
+                            cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_e})", extra_pks)
                         continue
-                    cur.execute(
-                        "UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
-                        (target_moment, sm),
-                    )
+
+                    if explicit_selection_sent:
+                        # Any assets not selected (e.g. skipped duplicate copies like .MOV paired with .HEIC) are detached from deleted source rather than added to target
+                        cur.execute(
+                            "UPDATE assets SET MomentsAlbumName = NULL, updated_at_utc = datetime('now') WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
+                            (sm,),
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
+                            (target_moment, sm),
+                        )
                     cur.execute(
                         """
                         UPDATE OR IGNORE moment_tags
@@ -7225,7 +7239,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                         target_moment,
                         target_moment,
                         json.dumps(union_tags),
-                        len(merge_db_ids),
+                        len(combined_asset_ids),
                         f"Consolidated from: {', '.join(combined_src_moments)}",
                     ),
                 )
@@ -7255,9 +7269,9 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     _upsert_tag_rows([""], union_tags)
                 for g_aids, g_tags in clean_groups:
                     _upsert_tag_rows(g_aids, g_tags)
-                if clean_apply_tags and merge_db_ids:
-                    _upsert_tag_rows(merge_db_ids, clean_apply_tags)
-                for aid in merge_db_ids:
+                if clean_apply_tags and combined_asset_ids:
+                    _upsert_tag_rows(combined_asset_ids, clean_apply_tags)
+                for aid in combined_asset_ids:
                     cur_aid_rows = cur.execute(
                         """
                         SELECT category, tag_value, include_in_name
@@ -7291,7 +7305,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
         "target_action": target_action,
         "photos_added": photos_added,
         "albums_deleted": albums_deleted,
-        "db_updated": len(merge_db_ids),
+        "db_updated": len(combined_asset_ids),
         "tag_session_id": tag_session_id,
         "tags_applied": tags_applied_count,
     }

@@ -116,6 +116,7 @@ let momentSearchTimer: number | null = null;
 let lastAutoSyncedTargetName = '';
 let targetNameManuallyEdited = false;
 const existingTargetAlbumsMap = new Map<string, number>();
+let existingAlbumsList: Array<{ album_name: string; parent_folder_name: string; asset_count: number }> = [];
 
 function getExistingTargetAlbumInfo(parentFolder: string, targetName: string): { exists: boolean; assetCount: number } {
   const cleanName = targetName.trim().toLowerCase();
@@ -741,26 +742,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     renderCandidateMomentChips(displayedCandidateMomentsList);
   });
   document.getElementById('btn-candidate-add-combine')?.addEventListener('click', () => {
-    if (!previewedCandidateMomentName) return;
-    const chosenIds = new Set(
-      previewedCandidateSelectedIds.size > 0
-        ? Array.from(previewedCandidateSelectedIds)
-        : previewedCandidateAssets.map(a => a.asset_id)
-    );
-    const clonedTags = candidateTagState.tags.map(t => ({ ...t }));
-    candidateTagsCache.set(previewedCandidateMomentName, {
-      tags: clonedTags,
-      lastSession: candidateTagState.lastSession
-    });
-    combinedExtraMoments.set(previewedCandidateMomentName, {
-      momentName: previewedCandidateMomentName,
-      assetIds: chosenIds,
-      totalAssets: chosenIds.size || previewedCandidateAssets.length,
-      tags: clonedTags
-    });
-    renderResolveDisjointCombineTray();
-    renderCandidateMomentChips(displayedCandidateMomentsList);
-    renderPropagateTagsPreview();
+    addPreviewedCandidateToCombined();
   });
   document.getElementById('btn-candidate-use-legacy-target')?.addEventListener('click', () => {
     if (!previewedCandidateMomentName) return;
@@ -4727,6 +4709,7 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   nearbyMomentCandidatesList = [];
   displayedCandidateMomentsList = [];
   existingTargetAlbumsMap.clear();
+  existingAlbumsList = [];
   lastAutoSyncedTargetName = '';
   targetNameManuallyEdited = false;
   setResolveDisjointCompletedState(false);
@@ -4861,7 +4844,8 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
     }
 
     existingTargetAlbumsMap.clear();
-    (data.existing_albums || []).forEach(al => {
+    existingAlbumsList = data.existing_albums || [];
+    existingAlbumsList.forEach(al => {
       const k = `${(al.parent_folder_name || 'Moments').trim().toLowerCase()}::${(al.album_name || '').trim().toLowerCase()}`;
       existingTargetAlbumsMap.set(k, al.asset_count ?? 0);
     });
@@ -4888,12 +4872,38 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
 type ResolveDisjointAction = 'merge_new' | 'merge_legacy' | 'skip_publishing' | 'ignore';
 let pendingResolveConfirmAction: ResolveDisjointAction | null = null;
 
+function addPreviewedCandidateToCombined(): boolean {
+  if (!previewedCandidateMomentName) return false;
+  const chosenIds = new Set(
+    previewedCandidateSelectedIds.size > 0
+      ? Array.from(previewedCandidateSelectedIds)
+      : previewedCandidateAssets.map(a => a.asset_id)
+  );
+  const clonedTags = candidateTagState.tags.map(t => ({ ...t }));
+  candidateTagsCache.set(previewedCandidateMomentName, {
+    tags: clonedTags,
+    lastSession: candidateTagState.lastSession
+  });
+  combinedExtraMoments.set(previewedCandidateMomentName, {
+    momentName: previewedCandidateMomentName,
+    assetIds: chosenIds,
+    totalAssets: chosenIds.size || previewedCandidateAssets.length,
+    tags: clonedTags
+  });
+  renderResolveDisjointCombineTray();
+  renderCandidateMomentChips(displayedCandidateMomentsList);
+  renderPropagateTagsPreview();
+  updateSingleAssetWarningVisibility();
+  updateResolveDisjointTargetPreview();
+  return true;
+}
+
 function closeResolveActionConfirmDialog(): void {
   pendingResolveConfirmAction = null;
   document.getElementById('modal-resolve-action-confirm')?.classList.remove('open');
 }
 
-function openResolveActionConfirmDialog(action: ResolveDisjointAction): void {
+function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoInclude = false): void {
   if (!resolveDisjointMomentName || isSubmittingResolveDisjoint) return;
 
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
@@ -4908,6 +4918,22 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction): void {
   const resolvedParent = parentSel?.value || 'Moments';
   const assetIds = Array.from(resolveDisjointSelectedIds);
   const delSrc = Boolean(delSrcCb?.checked ?? true);
+
+  let autoIncludedName = '';
+  const previewPanelEl = document.getElementById('resolve-disjoint-candidate-preview-panel');
+  if (
+    !skipAutoInclude &&
+    isMerge &&
+    previewPanelEl &&
+    previewPanelEl.style.display !== 'none' &&
+    previewedCandidateMomentName &&
+    previewedCandidateMomentName.toLowerCase() !== resolveDisjointMomentName.toLowerCase() &&
+    !combinedExtraMoments.has(previewedCandidateMomentName)
+  ) {
+    if (addPreviewedCandidateToCombined()) {
+      autoIncludedName = previewedCandidateMomentName;
+    }
+  }
 
   if (isMerge && !targetMoment) {
     if (statusEl) {
@@ -4939,7 +4965,7 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction): void {
   if (isMerge) {
     const existingInfo = getExistingTargetAlbumInfo(resolvedParent, targetMoment);
     const fullTargetPath = `Media Organizer on LaCie / ${resolvedParent} / ${targetMoment}`;
-    const extraEntries = action === 'merge_new' ? Array.from(combinedExtraMoments.values()) : [];
+    const extraEntries = Array.from(combinedExtraMoments.values());
     const totalAssetSel = assetIds.length + extraEntries.reduce((acc, e) => acc + e.assetIds.size, 0);
 
     titleEl.textContent = existingInfo.exists
@@ -4957,56 +4983,82 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction): void {
       `<code>${escapeHtml(resolveDisjointMomentName)}</code> (${assetIds.length} asset(s))`,
       ...extraEntries.map(e => `<code>${escapeHtml(e.momentName)}</code> (${e.assetIds.size} asset(s))`)
     ];
+    const skippedDups: string[] = [];
+    resolveDisjointAssets.forEach(a => {
+      if (!resolveDisjointSelectedIds.has(a.asset_id) && a.is_duplicate_copy) {
+        skippedDups.push(a.original_filename || a.asset_id);
+      }
+    });
+    if (previewedCandidateMomentName && extraEntries.some(e => e.momentName === previewedCandidateMomentName)) {
+      previewedCandidateAssets.forEach(a => {
+        if (!previewedCandidateSelectedIds.has(a.asset_id) && a.is_duplicate_copy) {
+          skippedDups.push(a.original_filename || a.asset_id);
+        }
+      });
+    }
+    const skipNote = skippedDups.length
+      ? ` <span style="color: #fde68a;">(Skipping ${skippedDups.length} duplicate copy/copies: ${skippedDups.map(fn => `<code>${escapeHtml(fn)}</code>`).join(', ')})</span>`
+      : '';
     stepsHtml.push(
-      `<strong>Copy only missing assets (${totalAssetSel} selected total):</strong> Inspect items from ${sourceListParts.join(' + ')} and add only assets not already inside the destination album.`
+      `<strong>Copy only missing non-duplicate assets (${totalAssetSel} selected):</strong> Inspect items from ${sourceListParts.join(' + ')} and add only unique assets not already in destination.${skipNote}`
     );
 
+    const allSourceNamesLc = new Set(
+      [resolveDisjointMomentName, ...extraEntries.map(e => e.momentName)].map(s => s.trim().toLowerCase())
+    );
+    const priorAlbumsToRemove = existingAlbumsList.filter(al => {
+      const nmLc = (al.album_name || '').trim().toLowerCase();
+      const parLc = (al.parent_folder_name || 'Moments').trim().toLowerCase();
+      if (!allSourceNamesLc.has(nmLc)) return false;
+      return !(nmLc === targetMoment.toLowerCase() && parLc === resolvedParent.toLowerCase());
+    });
     const deletableSources = [
       resolveDisjointMomentName,
       ...extraEntries.map(e => e.momentName)
     ].filter(s => s.toLowerCase() !== targetMoment.toLowerCase());
+
     if (delSrc) {
-      if (deletableSources.length) {
+      if (priorAlbumsToRemove.length) {
+        const albumBadges = priorAlbumsToRemove
+          .map(al => `<code>${escapeHtml(`Media Organizer on LaCie / ${al.parent_folder_name} / ${al.album_name}`)}</code>`)
+          .join(', ');
         stepsHtml.push(
-          `<strong>Delete disjoint / source album(s):</strong> Delete obsolete source album(s) ${deletableSources.map(s => `<code>${escapeHtml(s)}</code>`).join(', ')} in Apple Photos (if they exist) and clean up their old DB album/Moment rows.`
+          `<strong>Remove prior Moment albums (once all non-duplicate assets are copied):</strong> Delete pre-merge album(s) ${albumBadges} in Apple Photos &amp; local DB even if skipped duplicate copies remain inside them.`
+        );
+      } else if (deletableSources.length) {
+        stepsHtml.push(
+          `<strong>Remove prior Moment albums (once all non-duplicate assets are copied):</strong> Delete obsolete source album(s) ${deletableSources.map(s => `<code>${escapeHtml(s)}</code>`).join(', ')} in Apple Photos (across Moments/ToBeCurated/Curated) &amp; clean DB rows, even if skipped duplicate copies remain.`
         );
       } else {
         stepsHtml.push(
-          `<strong>Preserve destination &amp; clean duplicate source copies:</strong> Keep target album <code>${escapeHtml(targetMoment)}</code> and remove any duplicate disjoint source album copies with a different album ID (if any exist).`
+          `<strong>Preserve destination &amp; clean duplicate album copies:</strong> Keep target album <code>${escapeHtml(targetMoment)}</code> and remove any prior album copies in other folders with a different album ID (if any exist).`
         );
       }
     } else {
-      stepsHtml.push('<strong>Keep source albums:</strong> Leave all source albums intact in Apple Photos.');
+      stepsHtml.push('<strong>Keep prior albums:</strong> Leave all pre-merge source albums intact in Apple Photos.');
     }
 
     if (action === 'merge_new' && (savePerSource || shareDisjoint)) {
       const tagSummary = formatUnifiedMetadataSummary(sourceTagState.tags);
       stepsHtml.push(
-        `<strong>Update DB &amp; active JSON tag metadata:</strong> Reassign <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code>, sync <code>media_organizer_album_assets</code>, and record active tags/flags ${shareDisjoint ? '(copied across combined assets)' : '(saved per source Moment)'} <code>${escapeHtml(tagSummary)}</code>.`
+        `<strong>Update DB &amp; active JSON tag metadata:</strong> Reassign kept assets' <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code>, sync <code>media_organizer_album_assets</code>, and record active tags/flags ${shareDisjoint ? '(copied across combined assets)' : '(saved per source Moment)'} <code>${escapeHtml(tagSummary)}</code>.`
       );
     } else {
       stepsHtml.push(
-        `<strong>Update local DB:</strong> Reassign <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code> and sync <code>media_organizer_album_assets</code>.`
+        `<strong>Update local DB:</strong> Reassign kept assets' <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code> and sync <code>media_organizer_album_assets</code>.`
       );
     }
 
-    noteEl.innerHTML = '✅ Already-present assets in the destination folder will be skipped automatically — no duplicate photos will be added.';
-    const previewPanelOpen =
-      previewedCandidateMomentName &&
-      previewedCandidateMomentName.toLowerCase() !== resolveDisjointMomentName.toLowerCase() &&
-      !combinedExtraMoments.has(previewedCandidateMomentName) &&
-      document.getElementById('resolve-disjoint-candidate-preview-panel')?.style.display !== 'none';
-    if (action === 'merge_new' && previewPanelOpen) {
-      const previewSelCnt =
-        previewedCandidateSelectedIds.size > 0
-          ? previewedCandidateSelectedIds.size
-          : previewedCandidateAssets.length;
+    if (autoIncludedName) {
+      const incCnt = combinedExtraMoments.get(autoIncludedName)?.assetIds.size ?? 0;
       noteEl.innerHTML = `
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; width: 100%;">
-          <span style="color: #fde68a;">⚠️ You are previewing <code>${escapeHtml(previewedCandidateMomentName)}</code> (${previewSelCnt} asset(s)), which hasn't been added to Sources yet.</span>
-          <button type="button" class="btn btn-xs btn-purple" id="btn-confirm-include-previewed">➕ Include "${escapeHtml(previewedCandidateMomentName)}" Now</button>
+          <span>✅ Auto-included previewed Moment <code>${escapeHtml(autoIncludedName)}</code> (${incCnt} non-duplicate asset(s)) into this merge.</span>
+          <button type="button" class="btn btn-xs btn-outline" id="btn-confirm-exclude-previewed">✕ Exclude "${escapeHtml(autoIncludedName)}"</button>
         </div>
       `;
+    } else {
+      noteEl.innerHTML = '✅ Already-present assets in destination and skipped duplicate copies will not be re-added.';
     }
     proceedBtn.className = 'btn btn-purple';
     proceedBtn.textContent = existingInfo.exists ? '➕ Confirm & Add Missing Assets' : '✨ Confirm & Merge Moment';
@@ -5035,9 +5087,16 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction): void {
   }
 
   stepsEl.innerHTML = stepsHtml.map(s => `<li>${s}</li>`).join('');
-  document.getElementById('btn-confirm-include-previewed')?.addEventListener('click', () => {
-    document.getElementById('btn-candidate-add-combine')?.click();
-    openResolveActionConfirmDialog(action);
+  document.getElementById('btn-confirm-exclude-previewed')?.addEventListener('click', () => {
+    if (autoIncludedName) {
+      combinedExtraMoments.delete(autoIncludedName);
+      renderResolveDisjointCombineTray();
+      renderCandidateMomentChips(displayedCandidateMomentsList);
+      renderPropagateTagsPreview();
+      updateSingleAssetWarningVisibility();
+      updateResolveDisjointTargetPreview();
+      openResolveActionConfirmDialog(action, true);
+    }
   });
   pendingResolveConfirmAction = action;
   modal.classList.add('open');
@@ -5077,9 +5136,9 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
     return;
   }
 
-  const additionalMoments = action === 'merge_new' ? Array.from(combinedExtraMoments.keys()) : [];
+  const additionalMoments = isMerge ? Array.from(combinedExtraMoments.keys()) : [];
   const additionalAssetIds: string[] = [];
-  if (action === 'merge_new') {
+  if (isMerge) {
     combinedExtraMoments.forEach(entry => {
       entry.assetIds.forEach(aid => additionalAssetIds.push(aid));
     });
