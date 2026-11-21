@@ -558,16 +558,44 @@ export interface TagLookupResponse {
   assets?: TagLookupAssetItem[];
 }
 
+export interface SearchMomentItem {
+  moment_name: string;
+  total_count: number;
+  qualified_count: number;
+  rel_label: string;
+  min_date: string;
+  saved_tags_count: number;
+}
+
+export interface SearchMomentsResponse {
+  ok: boolean;
+  error?: string;
+  moments?: SearchMomentItem[];
+  total_matched?: number;
+}
+
+export interface MomentAssetsPreviewResponse {
+  ok: boolean;
+  error?: string;
+  moment_name?: string;
+  historical_min?: number;
+  assets?: DisjointDetailAsset[];
+  saved_tags?: MomentTagItem[];
+}
+
 export interface ResolveDisjointResponse {
   ok: boolean;
   error?: string;
   action?: string;
   source_moment?: string;
+  combined_moments?: string[];
   target_moment?: string;
   target_parent?: string;
   photos_added?: number;
   albums_deleted?: number;
   db_updated?: number;
+  tag_session_id?: number | null;
+  tags_applied?: number;
 }
 
 export type TriggerTaskFn = (

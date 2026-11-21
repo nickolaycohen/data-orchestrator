@@ -12,6 +12,7 @@ import type {
   ModeMDedupApplyResponse,
   ModeMDedupDuplicate,
   ModeMDedupPreviewResponse,
+  MomentAssetsPreviewResponse,
   MomentTagItem,
   PlannerModeB,
   PlannerModeM,
@@ -21,6 +22,8 @@ import type {
   PublishMomentResponse,
   ResolveDisjointResponse,
   SaveMomentTagsResponse,
+  SearchMomentItem,
+  SearchMomentsResponse,
   TagLookupResponse
 } from '../types/api.ts';
 import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../utils/formatters.ts';
@@ -82,6 +85,13 @@ let familyMemberPool: string[] = ['Niki', 'Milena', 'Roberto', 'Eva', 'Benny'];
 let tagDbCountsMap: Record<string, { assets: number; moments: number }> = {};
 let activeQueriedTagKey = '';
 let isSavingMomentTags = false;
+let combinedExtraMoments = new Map<string, { momentName: string; assetIds: Set<string>; totalAssets: number }>();
+let previewedCandidateMomentName = '';
+let previewedCandidateAssets: DisjointDetailAsset[] = [];
+const previewedCandidateSelectedIds = new Set<string>();
+let nearbyMomentCandidatesList: Array<{ moment_name: string; qualified_count: number; total_count?: number; rel_label: string; is_suggested?: boolean }> = [];
+let displayedCandidateMomentsList: Array<{ moment_name: string; qualified_count: number; total_count?: number; rel_label: string; is_suggested?: boolean }> = [];
+let momentSearchTimer: number | null = null;
 
 type ClustersSyncLockMode = 'idle' | 'running' | 'awaiting';
 let clustersSyncLockMode: ClustersSyncLockMode = 'idle';
@@ -532,12 +542,9 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       closeResolveDisjointModal();
     }
   });
-  document.getElementById('resolve-disjoint-target-input')?.addEventListener('input', (e) => {
-    const val = ((e.target as HTMLInputElement)?.value || '').trim();
-    document.querySelectorAll<HTMLButtonElement>('#resolve-disjoint-nearby-chips .disjoint-target-chip').forEach(chip => {
-      chip.classList.toggle('active', (chip.dataset.targetMoment || '') === val && val !== '');
-    });
+  document.getElementById('resolve-disjoint-target-input')?.addEventListener('input', () => {
     updateResolveDisjointTargetPreview();
+    updateSingleAssetWarningVisibility();
   });
   document.getElementById('resolve-disjoint-parent-select')?.addEventListener('change', () => {
     updateResolveDisjointTargetPreview();
@@ -581,13 +588,53 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       closeResolveDisjointModal();
       return;
     }
-    void submitResolveDisjoint('merge');
+    void submitResolveDisjoint('merge_new');
+  });
+  document.getElementById('btn-resolve-disjoint-legacy-merge')?.addEventListener('click', () => {
+    void submitResolveDisjoint('merge_legacy');
   });
   document.getElementById('btn-resolve-disjoint-skip')?.addEventListener('click', () => {
     void submitResolveDisjoint('skip_publishing');
   });
   document.getElementById('btn-resolve-disjoint-ignore')?.addEventListener('click', () => {
     void submitResolveDisjoint('ignore');
+  });
+  document.getElementById('resolve-disjoint-moment-search')?.addEventListener('input', (e) => {
+    const q = ((e.target as HTMLInputElement)?.value || '').trim();
+    if (momentSearchTimer !== null) window.clearTimeout(momentSearchTimer);
+    momentSearchTimer = window.setTimeout(() => {
+      void searchMomentsForConsolidationUI(q);
+    }, 200);
+  });
+  document.getElementById('btn-close-candidate-preview-panel')?.addEventListener('click', () => {
+    previewedCandidateMomentName = '';
+    const panel = document.getElementById('resolve-disjoint-candidate-preview-panel');
+    if (panel) panel.style.display = 'none';
+    renderCandidateMomentChips(displayedCandidateMomentsList);
+  });
+  document.getElementById('btn-candidate-add-combine')?.addEventListener('click', () => {
+    if (!previewedCandidateMomentName) return;
+    const chosenIds = new Set(
+      previewedCandidateSelectedIds.size > 0
+        ? Array.from(previewedCandidateSelectedIds)
+        : previewedCandidateAssets.map(a => a.asset_id)
+    );
+    combinedExtraMoments.set(previewedCandidateMomentName, {
+      momentName: previewedCandidateMomentName,
+      assetIds: chosenIds,
+      totalAssets: chosenIds.size || previewedCandidateAssets.length
+    });
+    renderResolveDisjointCombineTray();
+    renderCandidateMomentChips(displayedCandidateMomentsList);
+  });
+  document.getElementById('btn-candidate-use-legacy-target')?.addEventListener('click', () => {
+    if (!previewedCandidateMomentName) return;
+    const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+    if (targetInp) {
+      targetInp.value = previewedCandidateMomentName;
+      updateResolveDisjointTargetPreview();
+      updateSingleAssetWarningVisibility();
+    }
   });
 
   // Grouping Rules Panel toggle & reset
@@ -3533,11 +3580,16 @@ function setResolveDisjointCompletedState(completed: boolean): void {
   resolveDisjointCompleted = completed;
   const btnCancel = document.getElementById('btn-cancel-resolve-disjoint') as HTMLButtonElement | null;
   const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
+  const btnLegacy = document.getElementById('btn-resolve-disjoint-legacy-merge') as HTMLButtonElement | null;
   const btnSkip = document.getElementById('btn-resolve-disjoint-skip') as HTMLButtonElement | null;
   const btnIgnore = document.getElementById('btn-resolve-disjoint-ignore') as HTMLButtonElement | null;
   if (btnCancel) {
     btnCancel.style.display = completed ? 'none' : '';
     btnCancel.disabled = false;
+  }
+  if (btnLegacy) {
+    btnLegacy.style.display = completed ? 'none' : '';
+    btnLegacy.disabled = false;
   }
   if (btnSkip) {
     btnSkip.style.display = completed ? 'none' : '';
@@ -3553,8 +3605,8 @@ function setResolveDisjointCompletedState(completed: boolean): void {
       btnSubmit.className = 'btn btn-green';
       btnSubmit.textContent = '✅ OK';
     } else {
-      btnSubmit.className = 'btn btn-amber';
-      btnSubmit.textContent = '🔀 Merge into Target';
+      btnSubmit.className = 'btn btn-purple';
+      btnSubmit.textContent = '✨ Merge & Tag into New Moment';
     }
   }
 }
@@ -3565,6 +3617,7 @@ function updateResolveDisjointSelectionSummary(): void {
     const selectedCount = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
     pill.textContent = `${selectedCount} / ${resolveDisjointAssets.length} selected`;
   }
+  renderResolveDisjointCombineTray();
 }
 
 function renderResolveDisjointAssets(): void {
@@ -3664,6 +3717,267 @@ function updateResolveDisjointComposedHeadline(): void {
   const headlineEl = document.getElementById('resolve-disjoint-suggested-preview');
   if (headlineEl) {
     headlineEl.textContent = composeResolveDisjointSuggestedName() || '—';
+  }
+  renderPropagateTagsPreview();
+}
+
+function renderPropagateTagsPreview(): void {
+  const boxEl = document.getElementById('resolve-disjoint-propagate-tags-list');
+  if (!boxEl) return;
+  if (!currentMomentTags.length) {
+    boxEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.65rem;">No DB tags selected yet.</span>';
+    return;
+  }
+  boxEl.innerHTML = currentMomentTags
+    .map(
+      t =>
+        `<span class="disjoint-mini-chip" style="${t.include_in_name ? 'border-color: rgba(245, 158, 11, 0.55); color: #fef3c7;' : ''}">${escapeHtml(t.category)}: ${escapeHtml(t.tag_value)}</span>`
+    )
+    .join('');
+}
+
+function getConsolidatedTotalCount(): number {
+  let total = resolveDisjointSelectedIds.size;
+  combinedExtraMoments.forEach(entry => {
+    total += entry.assetIds.size;
+  });
+  return total;
+}
+
+function updateSingleAssetWarningVisibility(): void {
+  const warnEl = document.getElementById('resolve-disjoint-single-warning');
+  const countBadge = document.getElementById('resolve-disjoint-combine-count-badge');
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  const totalCount = getConsolidatedTotalCount();
+  const targetVal = (targetInp?.value || '').trim();
+  const isKnownExistingMulti =
+    combinedExtraMoments.size > 0 ||
+    nearbyMomentCandidatesList.some(c => c.moment_name.toLowerCase() === targetVal.toLowerCase() && c.qualified_count >= 2);
+
+  if (countBadge) {
+    if (combinedExtraMoments.size > 0 || totalCount >= 2) {
+      countBadge.className = 'badge badge-xs badge-green font-mono';
+      countBadge.textContent = `${totalCount} assets combined (${1 + combinedExtraMoments.size} moments ✓)`;
+    } else {
+      countBadge.className = 'badge badge-xs badge-amber font-mono';
+      countBadge.textContent = `${totalCount} asset (single-asset)`;
+    }
+  }
+  if (warnEl) {
+    warnEl.style.display = totalCount < 2 && !isKnownExistingMulti ? 'flex' : 'none';
+  }
+}
+
+function renderResolveDisjointCombineTray(): void {
+  const trayEl = document.getElementById('resolve-disjoint-combine-tray');
+  if (!trayEl) return;
+  const chips: string[] = [
+    `<span class="disjoint-target-chip active" title="Primary disjoint source Moment">📌 ${escapeHtml(resolveDisjointMomentName)} (${resolveDisjointSelectedIds.size})</span>`
+  ];
+  combinedExtraMoments.forEach((entry, name) => {
+    chips.push(
+      `<span class="disjoint-target-chip suggested" style="gap: 0.35rem;">
+        <span>+ ${escapeHtml(name)} (${entry.assetIds.size})</span>
+        <button type="button" class="tag-pill-remove-btn btn-remove-combine-moment" data-moment-name="${escapeHtml(name)}" title="Remove from consolidation list" aria-label="Remove combined Moment">×</button>
+      </span>`
+    );
+  });
+  trayEl.innerHTML = chips.join('');
+  trayEl.querySelectorAll<HTMLButtonElement>('.btn-remove-combine-moment').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const m = btn.dataset.momentName || '';
+      combinedExtraMoments.delete(m);
+      renderResolveDisjointCombineTray();
+      renderCandidateMomentChips(displayedCandidateMomentsList);
+    });
+  });
+  updateSingleAssetWarningVisibility();
+}
+
+function renderCandidateMomentChips(
+  candidates: Array<{ moment_name: string; qualified_count: number; total_count?: number; rel_label: string; is_suggested?: boolean }>
+): void {
+  displayedCandidateMomentsList = candidates;
+  const chipsEl = document.getElementById('resolve-disjoint-nearby-chips');
+  if (!chipsEl) return;
+  if (!candidates.length) {
+    chipsEl.innerHTML =
+      '<span class="text-muted font-mono" style="font-size: 0.69rem;">No matching Moments found — try another search term above.</span>';
+    return;
+  }
+  chipsEl.innerHTML = candidates
+    .map(c => {
+      const isAdded = combinedExtraMoments.has(c.moment_name);
+      const isPreviewed = previewedCandidateMomentName === c.moment_name;
+      const cntLabel = c.total_count !== undefined && c.total_count !== c.qualified_count
+        ? `${c.qualified_count}/${c.total_count}`
+        : `${c.qualified_count}`;
+      const relStr = c.rel_label ? ` · ${escapeHtml(c.rel_label)}` : '';
+      return `<button type="button" class="disjoint-target-chip${isAdded ? ' suggested' : ''}${isPreviewed ? ' active' : ''}" data-candidate-moment="${escapeHtml(c.moment_name)}" title="Click to preview assets inside '${escapeHtml(c.moment_name)}'">
+        ${isAdded ? '✓ ' : c.is_suggested ? '★ ' : ''}${escapeHtml(c.moment_name)} <span style="opacity: 0.75;">(${cntLabel}${relStr})</span>
+      </button>`;
+    })
+    .join('');
+
+  chipsEl.querySelectorAll<HTMLButtonElement>('[data-candidate-moment]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mName = btn.dataset.candidateMoment || '';
+      if (mName) void openCandidateMomentPreview(mName);
+    });
+  });
+}
+
+async function searchMomentsForConsolidationUI(query: string): Promise<void> {
+  if (!query) {
+    renderCandidateMomentChips(nearbyMomentCandidatesList);
+    return;
+  }
+  try {
+    const qs = new URLSearchParams({
+      q: query,
+      exclude_moment: resolveDisjointMomentName,
+      anchor_moment: resolveDisjointMomentName,
+      limit: '24'
+    });
+    const res = await fetch(`/api/media/memories/search-moments?${qs.toString()}`);
+    const data: SearchMomentsResponse = await res.json();
+    if (!res.ok || !data.ok) return;
+    const mapped = (data.moments || []).map((m: SearchMomentItem) => ({
+      moment_name: m.moment_name,
+      qualified_count: m.qualified_count,
+      total_count: m.total_count,
+      rel_label: m.rel_label,
+      is_suggested: false
+    }));
+    renderCandidateMomentChips(mapped);
+  } catch (err) {
+    console.warn('Error searching moments:', err);
+  }
+}
+
+async function openCandidateMomentPreview(momentName: string): Promise<void> {
+  const panel = document.getElementById('resolve-disjoint-candidate-preview-panel');
+  const titleEl = document.getElementById('resolve-disjoint-candidate-preview-title');
+  const tagsEl = document.getElementById('resolve-disjoint-candidate-preview-tags');
+  const gridEl = document.getElementById('resolve-disjoint-candidate-assets-grid');
+  if (!panel || !titleEl || !tagsEl || !gridEl) return;
+
+  previewedCandidateMomentName = momentName;
+  previewedCandidateAssets = [];
+  previewedCandidateSelectedIds.clear();
+  renderCandidateMomentChips(displayedCandidateMomentsList);
+
+  panel.style.display = 'flex';
+  titleEl.textContent = `📂 Loading "${momentName}" assets...`;
+  tagsEl.innerHTML = '';
+  gridEl.innerHTML = '<div class="text-muted font-mono" style="font-size: 0.7rem;">Loading asset previews...</div>';
+
+  try {
+    const qs = new URLSearchParams({ moment_name: momentName });
+    const res = await fetch(`/api/media/memories/moment-assets?${qs.toString()}`);
+    const data: MomentAssetsPreviewResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      titleEl.textContent = `❌ Failed loading "${momentName}": ${data.error || `HTTP ${res.status}`}`;
+      gridEl.innerHTML = '';
+      return;
+    }
+
+    const assets = data.assets || [];
+    previewedCandidateAssets = assets;
+    const existingCombined = combinedExtraMoments.get(momentName);
+    if (existingCombined) {
+      existingCombined.assetIds.forEach(id => previewedCandidateSelectedIds.add(id));
+    } else {
+      assets.forEach(a => previewedCandidateSelectedIds.add(a.asset_id));
+    }
+
+    const qualCnt = assets.filter(a => a.qualified).length;
+    titleEl.textContent = `📂 "${momentName}" · ${assets.length} asset(s) (${qualCnt} qualified)`;
+
+    const savedTags = data.saved_tags || [];
+    if (savedTags.length) {
+      tagsEl.innerHTML = savedTags
+        .map(t => `<span class="disjoint-mini-chip">DB: ${escapeHtml(t.tag_value)}</span>`)
+        .join('');
+    } else {
+      tagsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.64rem;">Not tagged yet (old format — active tags will be applied when combined)</span>';
+    }
+
+    if (!assets.length) {
+      gridEl.innerHTML = '<div class="text-muted font-mono" style="font-size: 0.7rem;">No active assets found in DB for this Moment.</div>';
+      return;
+    }
+
+    const allIds = assets.map(a => a.asset_id);
+    const histMinVal = data.historical_min ?? 0.5315;
+    assets.forEach(a => {
+      candidateAssetMeta.set(a.asset_id, {
+        asset_id: a.asset_id,
+        filename: a.original_filename,
+        original_filename: a.original_filename,
+        camera_model: a.camera_model || 'Library',
+        primary_owner: a.primary_owner || '',
+        month: a.month || (a.date_created_utc || '').slice(0, 7),
+        date_created_utc: a.date_created_utc || '',
+        capture_timestamp: a.date_created_utc || '',
+        file_size_bytes: a.file_size_bytes || 0,
+        bytes: a.file_size_bytes || 0,
+        file_size_mb: (a.file_size_bytes || 0) / (1024 * 1024),
+        score_normalized: a.score_normalized,
+        score_quartile: a.qualified ? `Top (>${histMinVal.toFixed(4)})` : 'Below Threshold',
+        assigned_moment: momentName,
+        media_type: a.media_type,
+        duration_sec: a.duration || 0,
+        width: a.width || 0,
+        height: a.height || 0,
+        fps: 0
+      });
+    });
+
+    gridEl.innerHTML = assets
+      .map(a => {
+        const checked = previewedCandidateSelectedIds.has(a.asset_id);
+        return `
+          <div class="tag-db-asset-card" title="${escapeHtml(a.original_filename)} · Score ${a.score_normalized.toFixed(4)}">
+            <input type="checkbox" class="candidate-preview-cb" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer; flex-shrink: 0;" />
+            <img class="tag-db-asset-thumb btn-preview-cand-asset" data-asset-id="${escapeHtml(a.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
+            <div class="btn-preview-cand-asset" data-asset-id="${escapeHtml(a.asset_id)}" style="min-width: 0; flex: 1;">
+              <div class="font-mono" style="font-size: 0.68rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                ${escapeHtml(a.original_filename)}
+              </div>
+              <div class="font-mono text-muted" style="font-size: 0.62rem;">
+                ${a.qualified ? '★ ' : ''}${a.score_normalized.toFixed(4)} · ${escapeHtml((a.date_created_utc || '').slice(0, 10))}
+              </div>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    gridEl.querySelectorAll<HTMLInputElement>('.candidate-preview-cb').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const aid = cb.dataset.assetId || '';
+        if (!aid) return;
+        if (cb.checked) previewedCandidateSelectedIds.add(aid);
+        else previewedCandidateSelectedIds.delete(aid);
+      });
+    });
+
+    gridEl.querySelectorAll<HTMLElement>('.btn-preview-cand-asset').forEach(el => {
+      el.addEventListener('click', () => {
+        const aid = el.dataset.assetId || '';
+        if (aid) {
+          openCleanupPreviewModal(aid, {
+            assetIds: allIds,
+            groupLabel: momentName,
+            hideMarkRemoved: true
+          });
+        }
+      });
+    });
+  } catch (err: any) {
+    titleEl.textContent = `❌ Error previewing "${momentName}"`;
+    gridEl.innerHTML = `<div class="text-red font-mono" style="font-size: 0.7rem;">${escapeHtml(err?.message || 'Unknown error')}</div>`;
   }
 }
 
@@ -4005,6 +4319,11 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   resolveDisjointAssets = [];
   resolveDisjointSelectedIds.clear();
   currentMomentTags = [];
+  combinedExtraMoments.clear();
+  previewedCandidateMomentName = '';
+  previewedCandidateAssets = [];
+  previewedCandidateSelectedIds.clear();
+  nearbyMomentCandidatesList = [];
   tagDbCountsMap = {};
   activeQueriedTagKey = '';
   setResolveDisjointCompletedState(false);
@@ -4019,6 +4338,9 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
   const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
+  const propagateCb = document.getElementById('resolve-disjoint-propagate-tags') as HTMLInputElement | null;
+  const searchInp = document.getElementById('resolve-disjoint-moment-search') as HTMLInputElement | null;
+  const candPreviewEl = document.getElementById('resolve-disjoint-candidate-preview-panel');
   const statusEl = document.getElementById('resolve-disjoint-status');
 
   const sugPreviewEl = document.getElementById('resolve-disjoint-suggested-preview');
@@ -4026,17 +4348,20 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   const tagSaveStatusEl = document.getElementById('resolve-disjoint-tag-save-status');
   const tagQueryPanelEl = document.getElementById('resolve-disjoint-tag-query-panel');
 
-  if (titleEl) titleEl.textContent = `🏷️ Tag & Resolve Moment · ${momentName}`;
+  if (titleEl) titleEl.textContent = `🏷️ Tag & Consolidate Moment · ${momentName}`;
   if (badgeEl) badgeEl.textContent = 'loading...';
   if (summaryEl) {
-    summaryEl.innerHTML = '<div class="spinner-sm"></div><span>Inspecting Moment assets, DB tags, and merge targets...</span>';
+    summaryEl.innerHTML = '<div class="spinner-sm"></div><span>Inspecting Moment assets, DB tags, and consolidation candidates...</span>';
   }
   if (albumsBarEl) albumsBarEl.style.display = 'none';
   if (listEl) listEl.innerHTML = '';
   if (chipsEl) chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">Searching nearby Moments...</span>';
-  if (targetInp) targetInp.value = suggestedTarget || '';
+  if (targetInp) targetInp.value = '';
   if (parentSel) parentSel.value = 'Moments';
   if (delSrcCb) delSrcCb.checked = true;
+  if (propagateCb) propagateCb.checked = true;
+  if (searchInp) searchInp.value = '';
+  if (candPreviewEl) candPreviewEl.style.display = 'none';
   if (sugPreviewEl) sugPreviewEl.textContent = 'Analyzing tags & asset cues...';
   if (sessionBadgeEl) {
     sessionBadgeEl.className = 'badge badge-xs badge-outline font-mono';
@@ -4045,6 +4370,8 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   if (tagSaveStatusEl) tagSaveStatusEl.style.display = 'none';
   if (tagQueryPanelEl) tagQueryPanelEl.style.display = 'none';
   renderMomentTagPills();
+  renderPropagateTagsPreview();
+  renderResolveDisjointCombineTray();
   updateResolveDisjointTargetPreview();
   if (statusEl) {
     statusEl.style.display = 'none';
@@ -4183,39 +4510,16 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
       }
     }
 
-    const effectiveSuggested = data.suggested_target || suggestedTarget || sug?.suggested_name || '';
-    if (targetInp && !targetInp.value.trim() && effectiveSuggested) {
-      targetInp.value = effectiveSuggested;
+    // Default target to New Paradigm formatted Moment name (composed from picked tags), falling back to legacy suggestion only if blank
+    const defaultNewName = composeResolveDisjointSuggestedName();
+    const effectiveDefault = defaultNewName || data.suggested_target || suggestedTarget || '';
+    if (targetInp && effectiveDefault) {
+      targetInp.value = effectiveDefault;
     }
 
-    const candidates = data.nearby_candidates || [];
-    if (chipsEl) {
-      if (!candidates.length) {
-        chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">No nearby multi-asset Moments found — click "Use as Target Name" or enter a Moment name below.</span>';
-      } else {
-        const currentTarget = (targetInp?.value || '').trim();
-        chipsEl.innerHTML = candidates
-          .map(c => {
-            const isSug = c.is_suggested;
-            const isAct = currentTarget === c.moment_name;
-            return `<button type="button" class="disjoint-target-chip${isSug ? ' suggested' : ''}${isAct ? ' active' : ''}" data-target-moment="${escapeHtml(c.moment_name)}" title="${c.qualified_count} qualified asset(s) · ${escapeHtml(c.rel_label)}">
-              ${isSug ? '★ ' : ''}${escapeHtml(c.moment_name)} <span style="opacity: 0.75;">(${c.qualified_count} · ${escapeHtml(c.rel_label)})</span>
-            </button>`;
-          })
-          .join('');
-
-        chipsEl.querySelectorAll<HTMLButtonElement>('.disjoint-target-chip').forEach(chip => {
-          chip.addEventListener('click', () => {
-            const val = chip.dataset.targetMoment || '';
-            if (targetInp) targetInp.value = val;
-            chipsEl.querySelectorAll('.disjoint-target-chip').forEach(c => c.classList.remove('active'));
-            chip.classList.add('active');
-            updateResolveDisjointTargetPreview();
-          });
-        });
-      }
-    }
-
+    nearbyMomentCandidatesList = data.nearby_candidates || [];
+    renderCandidateMomentChips(nearbyMomentCandidatesList);
+    renderResolveDisjointCombineTray();
     updateResolveDisjointTargetPreview();
     renderResolveDisjointAssets();
   } catch (err: any) {
@@ -4225,22 +4529,25 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   }
 }
 
-async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'ignore'): Promise<void> {
+async function submitResolveDisjoint(action: 'merge_new' | 'merge_legacy' | 'skip_publishing' | 'ignore'): Promise<void> {
   if (!resolveDisjointMomentName || isSubmittingResolveDisjoint) return;
 
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
   const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
+  const propagateCb = document.getElementById('resolve-disjoint-propagate-tags') as HTMLInputElement | null;
   const statusEl = document.getElementById('resolve-disjoint-status');
   const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
+  const btnLegacy = document.getElementById('btn-resolve-disjoint-legacy-merge') as HTMLButtonElement | null;
   const btnSkip = document.getElementById('btn-resolve-disjoint-skip') as HTMLButtonElement | null;
   const btnIgnore = document.getElementById('btn-resolve-disjoint-ignore') as HTMLButtonElement | null;
 
+  const isMerge = action === 'merge_new' || action === 'merge_legacy';
   const targetMoment = (targetInp?.value || '').trim();
-  if (action === 'merge' && !targetMoment) {
+  if (isMerge && !targetMoment) {
     if (statusEl) {
       statusEl.style.display = 'flex';
-      statusEl.innerHTML = '<span class="text-red">❌ Enter or pick a Target Moment Album Name before merging.</span>';
+      statusEl.innerHTML = '<span class="text-red">❌ Enter or compose a Target Moment Album Name before merging.</span>';
     }
     return;
   }
@@ -4255,17 +4562,36 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
     return;
   }
 
+  const additionalMoments = action === 'merge_new' ? Array.from(combinedExtraMoments.keys()) : [];
+  const additionalAssetIds: string[] = [];
+  if (action === 'merge_new') {
+    combinedExtraMoments.forEach(entry => {
+      entry.assetIds.forEach(aid => additionalAssetIds.push(aid));
+    });
+  }
+  const applyTags =
+    action === 'merge_new' && (propagateCb?.checked ?? true)
+      ? currentMomentTags.map(t => ({
+          category: t.category,
+          tag_value: t.tag_value,
+          include_in_name: t.include_in_name
+        }))
+      : [];
+
   isSubmittingResolveDisjoint = true;
   if (btnSubmit) btnSubmit.disabled = true;
+  if (btnLegacy) btnLegacy.disabled = true;
   if (btnSkip) btnSkip.disabled = true;
   if (btnIgnore) btnIgnore.disabled = true;
 
   const actionLabel =
-    action === 'merge'
-      ? `Merging into "${resolvedParent}/${targetMoment}" via AppleScript...`
-      : action === 'skip_publishing'
-        ? 'Moving selected asset(s) to Moments/SkipPublishing...'
-        : 'Excluding selected asset(s) via ignore pipeline...';
+    action === 'merge_new'
+      ? `Consolidating ${1 + additionalMoments.length} Moment(s) & tagging into "${resolvedParent}/${targetMoment}"...`
+      : action === 'merge_legacy'
+        ? `Merging into existing target "${resolvedParent}/${targetMoment}" via AppleScript...`
+        : action === 'skip_publishing'
+          ? 'Moving selected asset(s) to Moments/SkipPublishing...'
+          : 'Excluding selected asset(s) via ignore pipeline...';
 
   if (statusEl) {
     statusEl.style.display = 'flex';
@@ -4279,10 +4605,13 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         source_moment: resolveDisjointMomentName,
-        action,
-        target_moment: action === 'merge' ? targetMoment : null,
+        action: isMerge ? 'merge' : action,
+        target_moment: isMerge ? targetMoment : null,
         target_parent_folder: resolvedParent,
         asset_ids: assetIds,
+        additional_moments: additionalMoments,
+        additional_asset_ids: additionalAssetIds,
+        apply_tags: applyTags,
         delete_source_albums: Boolean(delSrcCb?.checked ?? true)
       })
     });
@@ -4300,8 +4629,11 @@ async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'igno
 
     if (statusEl) {
       statusEl.style.display = 'flex';
-      if (action === 'merge') {
-        statusEl.innerHTML = `<span class="text-green">✅ Merged <code>${escapeHtml(data.source_moment || resolveDisjointMomentName)}</code> into <code>${escapeHtml(data.target_moment || targetMoment)}</code> (${data.photos_added ?? 0} asset(s) added, ${data.albums_deleted ?? 0} source album(s) deleted, ${data.db_updated ?? 0} DB row(s) updated).</span>`;
+      if (isMerge) {
+        const tagNote = data.tags_applied
+          ? ` · ${data.tags_applied} DB tag(s) applied (session #${data.tag_session_id ?? '—'})`
+          : '';
+        statusEl.innerHTML = `<span class="text-green">✅ Consolidated ${(data.combined_moments || [resolveDisjointMomentName]).length} Moment(s) into <code>${escapeHtml(data.target_moment || targetMoment)}</code> (${data.photos_added ?? 0} asset(s) added, ${data.albums_deleted ?? 0} source album(s) deleted, ${data.db_updated ?? 0} DB row(s) updated${escapeHtml(tagNote)}).</span>`;
       } else if (action === 'skip_publishing') {
         statusEl.innerHTML = `<span class="text-green">✅ Moved ${data.photos_added ?? assetIds.length} asset(s) to <code>Moments/SkipPublishing</code> (updated ${data.db_updated ?? 0} DB row(s)).</span>`;
       } else {

@@ -2282,14 +2282,46 @@
             </div>
 
             <div style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 0.6rem;">
-              <strong style="font-size: 0.8rem;">Target Flat Moment &amp; Organizer Folder</strong>
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                <strong style="font-size: 0.82rem;">Consolidate Moments &amp; Target Moment Name</strong>
+                <span class="badge badge-xs badge-amber font-mono" id="resolve-disjoint-combine-count-badge">1 asset</span>
+              </div>
+
               <div>
-                <span class="font-mono text-muted" style="font-size: 0.68rem; display: block; margin-bottom: 0.3rem;">Nearby Multi-Asset Candidates (click to fill target):</span>
+                <span class="font-mono text-muted" style="font-size: 0.67rem; display: block; margin-bottom: 0.25rem;">Sources Included in This Consolidation:</span>
+                <div class="disjoint-target-chips" id="resolve-disjoint-combine-tray"></div>
+              </div>
+
+              <div>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.3rem; flex-wrap: wrap;">
+                  <label class="font-mono text-muted" style="font-size: 0.68rem;">Search or Pick Existing Moments (click pill to preview assets &amp; combine):</label>
+                  <input type="search" id="resolve-disjoint-moment-search" class="form-control" placeholder="🔍 Search any Moment (e.g. Ski, Blue, Soccer)..." style="width: 240px; max-width: 100%; font-size: 0.72rem; padding: 0.24rem 0.55rem;" />
+                </div>
                 <div class="disjoint-target-chips" id="resolve-disjoint-nearby-chips"></div>
               </div>
+
+              <div id="resolve-disjoint-candidate-preview-panel" class="tag-db-query-panel" style="display: none;">
+                <div class="tag-db-query-header" style="flex-wrap: wrap;">
+                  <div style="min-width: 0; flex: 1;">
+                    <div id="resolve-disjoint-candidate-preview-title" class="font-mono" style="font-size: 0.73rem; font-weight: 600;">📂 Moment Preview</div>
+                    <div id="resolve-disjoint-candidate-preview-tags" class="disjoint-mini-chips" style="margin-top: 0.2rem;"></div>
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+                    <button type="button" class="btn btn-xs btn-purple" id="btn-candidate-add-combine" title="Add this Moment and its selected assets to the New Moment consolidation & apply active DB tags">
+                      ➕ Add &amp; Tag with Above
+                    </button>
+                    <button type="button" class="btn btn-xs btn-outline" id="btn-candidate-use-legacy-target" title="Set Target Moment Name to this existing album for legacy Merge into Target">
+                      🔀 Use as Legacy Target
+                    </button>
+                    <button type="button" class="btn btn-xs btn-icon" id="btn-close-candidate-preview-panel" aria-label="Close Moment Preview">✕</button>
+                  </div>
+                </div>
+                <div id="resolve-disjoint-candidate-assets-grid" class="tag-db-assets-grid"></div>
+              </div>
+
               <div class="publish-urls-grid">
                 <div>
-                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Moment Album Name (Flat)</label>
+                  <label class="font-mono text-muted" style="font-size: 0.69rem; display: block; margin-bottom: 0.25rem;">Target Moment Album Name (Default: New Paradigm Format)</label>
                   <input type="text" id="resolve-disjoint-target-input" class="form-control" placeholder="e.g. Skiing at CamelBack - Winter 2020" style="width: 100%; font-size: 0.78rem; padding: 0.4rem 0.6rem;" />
                 </div>
                 <div>
@@ -2302,6 +2334,19 @@
                   </select>
                 </div>
               </div>
+
+              <div id="resolve-disjoint-propagate-tags-box" style="padding: 0.45rem 0.6rem; border-radius: 6px; background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); display: flex; flex-direction: column; gap: 0.3rem;">
+                <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: #ede9fe; font-weight: 500;">
+                  <input type="checkbox" id="resolve-disjoint-propagate-tags" checked />
+                  <span>Tag all combined assets (disjoint + added Moments) &amp; record tagging session in DB</span>
+                </label>
+                <div id="resolve-disjoint-propagate-tags-list" class="disjoint-mini-chips"></div>
+              </div>
+
+              <div id="resolve-disjoint-single-warning" class="dedup-status-banner" style="display: none; padding: 0.42rem 0.65rem; font-size: 0.72rem; border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); color: #fde68a;">
+                ⚠️ <strong>Single-asset Moment (&lt; 2 files):</strong> Creating or renaming a Moment with only 1 asset is allowed but discouraged. Search or click an existing Moment pill above to combine two or more Moments into a multi-asset New Moment.
+              </div>
+
               <div class="font-mono text-muted" style="font-size: 0.69rem;">
                 Target Path: <code id="resolve-disjoint-target-path-preview">Media Organizer on LaCie / Moments / —</code>
               </div>
@@ -2317,10 +2362,11 @@
             <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
               <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-skip" title="Move selected assets to Moments/SkipPublishing album in Apple Photos">⏭️ Skip Publishing</button>
               <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-ignore" style="border-color: rgba(239, 68, 68, 0.45); color: #fca5a5;" title="Exclude selected assets from Organizer & update DB">🗑️ Ignore Selected</button>
+              <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-legacy-merge" style="border-color: rgba(245, 158, 11, 0.45); color: #fde68a;" title="Legacy: Merge only disjoint source asset(s) into the specified existing Target Moment">🔀 Merge into Target</button>
             </div>
             <div style="display: flex; align-items: center; gap: 0.5rem;">
               <button type="button" class="btn btn-outline btn-close-resolve-disjoint-modal" id="btn-cancel-resolve-disjoint">Cancel</button>
-              <button type="button" class="btn btn-amber" id="btn-submit-resolve-disjoint">🔀 Merge into Target</button>
+              <button type="button" class="btn btn-purple" id="btn-submit-resolve-disjoint" title="Recommended: Consolidate source(s) + apply DB tags into a New Paradigm formatted Moment">✨ Merge &amp; Tag into New Moment</button>
             </div>
           </div>
         </div>
