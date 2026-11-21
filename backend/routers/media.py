@@ -5398,8 +5398,44 @@ def _build_moment_name_suggestion(
     }
 
 
-def _ensure_moment_tag_tables(cur: sqlite3.Cursor) -> None:
-    """Create Moment/Asset tagging and session history tables if not yet present."""
+def _dedup_moment_tags_table(cur: sqlite3.Cursor) -> int:
+    """Remove duplicate (moment_name, asset_id, tag_value) rows across categories, preferring family_member over people."""
+    rows = cur.execute(
+        """
+        SELECT id, TRIM(moment_name), COALESCE(asset_id, ''), LOWER(TRIM(category)), TRIM(tag_value), COALESCE(include_in_name, 0)
+        FROM moment_tags
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    groups: dict[tuple[str, str, str], list[tuple[int, str, int]]] = {}
+    for row_id, m_name, aid, cat, _val, inc in rows:
+        val_clean = re.sub(r"\s+", " ", _val or "").strip()
+        key = ((m_name or "").lower(), aid or "", val_clean.lower())
+        groups.setdefault(key, []).append((int(row_id), cat or "", int(inc or 0)))
+
+    delete_ids: list[int] = []
+    for _key, items in groups.items():
+        if len(items) <= 1:
+            continue
+        # Prefer family_member > other specific categories > people, then higher id
+        def _rank(item: tuple[int, str, int]) -> tuple[int, int]:
+            rid, cat, _inc = item
+            cat_score = 2 if cat == "family_member" else (0 if cat == "people" else 1)
+            return (cat_score, rid)
+
+        winner = max(items, key=_rank)
+        for rid, _cat, _inc in items:
+            if rid != winner[0]:
+                delete_ids.append(rid)
+
+    if delete_ids:
+        ph = ",".join("?" for _ in delete_ids)
+        cur.execute(f"DELETE FROM moment_tags WHERE id IN ({ph})", delete_ids)
+    return len(delete_ids)
+
+
+def _ensure_moment_tag_tables(cur: sqlite3.Cursor) -> int:
+    """Create Moment/Asset tagging and session history tables if not yet present; return duplicates removed if upgraded."""
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS moment_tag_sessions (
@@ -5428,10 +5464,17 @@ def _ensure_moment_tag_tables(cur: sqlite3.Cursor) -> None:
         )
         """
     )
+    removed_on_upgrade = 0
+    has_val_idx = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_moment_tags_unique_val'"
+    ).fetchone()
+    if not has_val_idx:
+        removed_on_upgrade = _dedup_moment_tags_table(cur)
+        cur.execute("DROP INDEX IF EXISTS idx_moment_tags_unique")
     cur.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_moment_tags_unique
-        ON moment_tags(LOWER(moment_name), asset_id, LOWER(category), LOWER(tag_value))
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_moment_tags_unique_val
+        ON moment_tags(LOWER(moment_name), asset_id, LOWER(tag_value))
         """
     )
     cur.execute(
@@ -5440,6 +5483,7 @@ def _ensure_moment_tag_tables(cur: sqlite3.Cursor) -> None:
         ON moment_tags(LOWER(tag_value), LOWER(category))
         """
     )
+    return removed_on_upgrade
 
 
 class SaveMomentTagsRequest(BaseModel):
@@ -5449,6 +5493,8 @@ class SaveMomentTagsRequest(BaseModel):
     apply_to_folder_name: bool = False
     composed_name: Optional[str] = None
     notes: Optional[str] = None
+    merge_existing: bool = True
+    removed_tags: list[str] = []
 
 
 def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Optional[int] = None) -> dict:
@@ -5564,7 +5610,7 @@ def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Opt
             COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS asset_cnt
         FROM moment_tags
         WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-        GROUP BY LOWER(category), LOWER(tag_value)
+        GROUP BY LOWER(tag_value)
         ORDER BY MIN(id) ASC
         """,
         (m_name,),
@@ -5764,9 +5810,64 @@ def _compute_tag_db_counts(cur: sqlite3.Cursor) -> dict:
     }
 
 
+def _merge_tag_lists(existing_tags: list[dict], incoming_tags: list[dict], removed_lc: set[str]) -> tuple[list[dict], int]:
+    """Merge existing DB tags with incoming UI tags, letting incoming win on category/include_in_name."""
+    merged_by_val: dict[str, dict] = {}
+    ordered_keys: list[str] = []
+    preserved_existing = 0
+    incoming_keys = {t["tag_value"].lower() for t in incoming_tags}
+
+    for et in existing_tags:
+        k = (et.get("tag_value") or "").strip().lower()
+        if not k or k in removed_lc:
+            continue
+        if k not in merged_by_val:
+            merged_by_val[k] = {
+                "category": et["category"],
+                "tag_value": et["tag_value"],
+                "include_in_name": bool(et.get("include_in_name", True)),
+            }
+            ordered_keys.append(k)
+            if k not in incoming_keys:
+                preserved_existing += 1
+
+    for nt in incoming_tags:
+        k = nt["tag_value"].lower()
+        merged_by_val[k] = {
+            "category": nt["category"],
+            "tag_value": nt["tag_value"],
+            "include_in_name": bool(nt.get("include_in_name", True)),
+        }
+        if k not in ordered_keys:
+            ordered_keys.append(k)
+
+    return [merged_by_val[k] for k in ordered_keys], preserved_existing
+
+
+@router.post("/memories/tags/dedup")
+def dedup_moment_tags_endpoint():
+    """Deduplicate moment_tags rows across categories and enforce unique tag values per Moment/asset."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            removed_schema = _ensure_moment_tag_tables(cur)
+            removed = removed_schema + _dedup_moment_tags_table(cur)
+            remaining = cur.execute("SELECT COUNT(*) FROM moment_tags").fetchone()[0]
+            conn.commit()
+            return {"ok": True, "removed_duplicates": int(removed), "remaining_rows": int(remaining or 0)}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @router.post("/memories/tags/save")
 def save_moment_tags(req: SaveMomentTagsRequest):
-    """Record Moment/asset tags & tagging session in media_organizer.db (does not rename folders unless user applies name)."""
+    """Record Moment/asset tags & tagging session in media_organizer.db, merging existing + new DB tags."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"ok": False, "error": "Media database unavailable"}
 
@@ -5775,6 +5876,12 @@ def save_moment_tags(req: SaveMomentTagsRequest):
         return {"ok": False, "error": "moment_name is required"}
 
     clean_tags = _normalize_unique_moment_tags(req.tags or [])
+    incoming_lc = {t["tag_value"].lower() for t in clean_tags}
+    removed_lc = {
+        re.sub(r"\s+", " ", (rt or "").strip()).lower()
+        for rt in (req.removed_tags or [])
+        if (rt or "").strip()
+    } - incoming_lc
 
     clean_aids: list[str] = []
     seen_aids: set[str] = set()
@@ -5811,6 +5918,52 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                         seen_aids.add(aid)
                         clean_aids.append(aid)
 
+            target_ids_for_rows = ["", *clean_aids]
+            removed_count = 0
+            if removed_lc:
+                ph_ids = ",".join("?" for _ in target_ids_for_rows)
+                ph_rem = ",".join("?" for _ in removed_lc)
+                cur.execute(
+                    f"""
+                    DELETE FROM moment_tags
+                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                      AND asset_id IN ({ph_ids})
+                      AND LOWER(tag_value) IN ({ph_rem})
+                    """,
+                    [m_name, *target_ids_for_rows, *sorted(removed_lc)],
+                )
+                removed_count = cur.rowcount or 0
+
+            existing_by_aid: dict[str, list[dict]] = {}
+            all_target_existing: list[dict] = []
+            if req.merge_existing:
+                ph_ids = ",".join("?" for _ in target_ids_for_rows)
+                cur.execute(
+                    f"""
+                    SELECT asset_id, category, tag_value, include_in_name
+                    FROM moment_tags
+                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                      AND asset_id IN ({ph_ids})
+                    ORDER BY id ASC
+                    """,
+                    [m_name, *target_ids_for_rows],
+                )
+                for row_aid, cat, val, inc in cur.fetchall():
+                    item = {
+                        "category": (cat or "").strip().lower(),
+                        "tag_value": re.sub(r"\s+", " ", (val or "").strip()),
+                        "include_in_name": bool(inc),
+                    }
+                    if not item["tag_value"] or item["tag_value"].lower() in removed_lc:
+                        continue
+                    existing_by_aid.setdefault(row_aid or "", []).append(item)
+                    all_target_existing.append(item)
+
+                session_tags, merged_existing_count = _merge_tag_lists(all_target_existing, clean_tags, removed_lc)
+            else:
+                session_tags = clean_tags
+                merged_existing_count = 0
+
             composed = (req.composed_name or "").strip()
             cur.execute(
                 """
@@ -5822,21 +5975,25 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                     m_name,
                     1 if req.apply_to_folder_name else 0,
                     composed if req.apply_to_folder_name else None,
-                    json.dumps(clean_tags),
+                    json.dumps(session_tags),
                     len(clean_aids),
                     (req.notes or "").strip() or None,
                 ),
             )
             session_id = int(cur.lastrowid)
 
-            target_ids_for_rows = ["", *clean_aids]
-            ph = ",".join("?" for _ in target_ids_for_rows)
-            cur.execute(
-                f"DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id IN ({ph})",
-                [m_name, *target_ids_for_rows],
-            )
-            for aid in target_ids_for_rows:
-                for t in clean_tags:
+            # Update selected asset rows (merging per-asset existing DB tags when merge_existing=True)
+            for aid in clean_aids:
+                aid_tags = (
+                    _merge_tag_lists(existing_by_aid.get(aid, []), clean_tags, removed_lc)[0]
+                    if req.merge_existing
+                    else clean_tags
+                )
+                cur.execute(
+                    "DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ?",
+                    (m_name, aid),
+                )
+                for t in aid_tags:
                     cur.execute(
                         """
                         INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
@@ -5852,6 +6009,78 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                         ),
                     )
 
+            # Recompute Moment-level summary rows (asset_id = '') as union across active asset rows + session_tags
+            cur.execute(
+                """
+                SELECT category, tag_value, include_in_name
+                FROM moment_tags
+                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                  AND asset_id != ''
+                ORDER BY id ASC
+                """,
+                (m_name,),
+            )
+            remaining_asset_tags = [
+                {
+                    "category": (r[0] or "").strip().lower(),
+                    "tag_value": re.sub(r"\s+", " ", (r[1] or "").strip()),
+                    "include_in_name": bool(r[2]),
+                }
+                for r in cur.fetchall()
+                if (r[1] or "").strip()
+            ]
+            if req.merge_existing:
+                moment_summary_tags, _ = _merge_tag_lists(
+                    existing_by_aid.get("", []) + remaining_asset_tags,
+                    clean_tags,
+                    removed_lc,
+                )
+            else:
+                moment_summary_tags, _ = _merge_tag_lists(remaining_asset_tags, clean_tags, removed_lc)
+
+            cur.execute(
+                "DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ''",
+                (m_name,),
+            )
+            for t in moment_summary_tags:
+                cur.execute(
+                    """
+                    INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
+                    VALUES (?, '', ?, ?, ?, ?, datetime('now'))
+                    """,
+                    (
+                        m_name,
+                        t["category"],
+                        t["tag_value"],
+                        1 if t["include_in_name"] else 0,
+                        session_id,
+                    ),
+                )
+
+            cur.execute(
+                """
+                SELECT
+                    category,
+                    tag_value,
+                    MAX(include_in_name) AS inc,
+                    COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS asset_cnt
+                FROM moment_tags
+                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                GROUP BY LOWER(tag_value)
+                ORDER BY MIN(id) ASC
+                """,
+                (m_name,),
+            )
+            saved_tags_out = [
+                {
+                    "category": r[0],
+                    "tag_value": r[1],
+                    "include_in_name": bool(r[2]),
+                    "tagged_asset_count": int(r[3] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+
             row_ts = cur.execute(
                 "SELECT created_at_utc FROM moment_tag_sessions WHERE session_id = ?",
                 (session_id,),
@@ -5864,8 +6093,11 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 "moment_name": m_name,
                 "apply_to_folder_name": bool(req.apply_to_folder_name),
                 "composed_name": composed if req.apply_to_folder_name else "",
-                "tags_saved": len(clean_tags),
+                "tags_saved": len(saved_tags_out),
                 "assets_tagged": len(clean_aids),
+                "merged_existing_count": merged_existing_count,
+                "removed_count": removed_count,
+                "saved_tags": saved_tags_out,
                 "created_at_utc": row_ts[0] if row_ts else "",
                 "tag_db_counts": tag_db_counts,
             }
@@ -6470,8 +6702,8 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                             """
                             INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
                             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                            ON CONFLICT(LOWER(moment_name), asset_id, LOWER(category), LOWER(tag_value))
-                            DO UPDATE SET include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
+                            ON CONFLICT(LOWER(moment_name), asset_id, LOWER(tag_value))
+                            DO UPDATE SET category = excluded.category, include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
                             """,
                             (
                                 target_moment,

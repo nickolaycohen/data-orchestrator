@@ -527,6 +527,9 @@ export interface SaveMomentTagsResponse {
   composed_name?: string;
   tags_saved?: number;
   assets_tagged?: number;
+  merged_existing_count?: number;
+  removed_count?: number;
+  saved_tags?: MomentTagItem[];
   created_at_utc?: string;
   tag_db_counts?: Record<string, { assets: number; moments: number }>;
 }

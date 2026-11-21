@@ -85,6 +85,7 @@ interface TaggingEngineState {
   lastSession: MomentTagSessionSummary | null;
   tagDbCounts: Record<string, { assets: number; moments: number }>;
   familyPool: string[];
+  removedTagValues: Set<string>;
   activeQueriedTagKey: string;
   isSaving: boolean;
   saveStatusMsg: string;
@@ -142,6 +143,7 @@ function createEmptyTaggingState(
     lastSession: null,
     tagDbCounts: {},
     familyPool: ['Niki', 'Milena', 'Roberto', 'Eva', 'Benny'],
+    removedTagValues: new Set<string>(),
     activeQueriedTagKey: '',
     isSaving: false,
     saveStatusMsg: '',
@@ -191,6 +193,7 @@ candidateTagState.onCopyFromDisjoint = () => {
       ct => ct.tag_value.toLowerCase() === srcT.tag_value.toLowerCase()
     );
     if (!exists) {
+      candidateTagState.removedTagValues.delete(srcT.tag_value.toLowerCase());
       candidateTagState.tags.push({ ...srcT });
     } else {
       skippedDups += 1;
@@ -4015,6 +4018,7 @@ async function openCandidateMomentPreview(momentName: string): Promise<void> {
   previewedCandidateSelectedIds.clear();
   candidateTagState.momentName = momentName;
   candidateTagState.tags = [];
+  candidateTagState.removedTagValues.clear();
   candidateTagState.lastSession = null;
   candidateTagState.saveStatusMsg = '';
   candidateTagState.isQueryOpen = false;
@@ -4149,24 +4153,30 @@ function addTagToEngineState(
   const effInclude = includeInName !== undefined ? includeInName : category !== 'family_member';
   const existing = state.tags.find(t => t.tag_value.toLowerCase() === clean.toLowerCase());
   if (existing) {
-    if (existing.category === category) {
-      state.saveStatusOk = true;
-      state.saveStatusMsg = `ℹ️ Tag "${existing.tag_value}" already exists — no duplicate added.`;
-    } else {
-      const prevCat = existing.category;
-      existing.category = category;
-      existing.include_in_name = effInclude;
-      state.saveStatusOk = true;
-      state.saveStatusMsg = `ℹ️ Moved "${existing.tag_value}" from ${prevCat} to ${category} (duplicate avoided).`;
-    }
-  } else {
-    state.tags.push({
-      category,
-      tag_value: clean,
-      include_in_name: effInclude
-    });
-    state.saveStatusMsg = '';
+    const catNames: Record<MomentTagItem['category'], string> = {
+      activity: 'Activity',
+      location: 'Location',
+      people: 'People',
+      when: 'When',
+      family_member: 'Family Member'
+    };
+    const existingCatLabel = catNames[existing.category] || existing.category;
+    state.saveStatusOk = false;
+    state.saveStatusMsg =
+      existing.category === category
+        ? `⚠️ "${existing.tag_value}" is already in ${existingCatLabel} — duplicate blocked.`
+        : `⚠️ "${existing.tag_value}" is already tagged under ${existingCatLabel} — remove it there first to move it (duplicate blocked).`;
+    renderTaggingEngineCard(state);
+    return;
   }
+  state.removedTagValues.delete(clean.toLowerCase());
+  state.tags.push({
+    category,
+    tag_value: clean,
+    include_in_name: effInclude
+  });
+  state.saveStatusOk = true;
+  state.saveStatusMsg = '';
   state.onTagsChanged();
   renderTaggingEngineCard(state);
 }
@@ -4218,8 +4228,8 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
 
       let extraHtml = '';
       if (c.key === 'family_member') {
-        const presentFam = new Set(catTags.map(t => t.tag_value.toLowerCase()));
-        const remaining = state.familyPool.filter(f => !presentFam.has(f.toLowerCase()));
+        const presentAllTags = new Set(state.tags.map(t => t.tag_value.toLowerCase()));
+        const remaining = state.familyPool.filter(f => !presentAllTags.has(f.toLowerCase()));
         extraHtml = `<div class="disjoint-mini-chips">${remaining
           .map(
             f =>
@@ -4352,6 +4362,9 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
       const c = btn.dataset.cat as MomentTagItem['category'];
       const v = btn.dataset.val || '';
       state.tags = state.tags.filter(t => !(t.category === c && t.tag_value === v));
+      if (v) {
+        state.removedTagValues.add(v.toLowerCase());
+      }
       if (state.activeQueriedTagKey === `${c}:${v.toLowerCase()}`) {
         state.activeQueriedTagKey = '';
         state.isQueryOpen = false;
@@ -4517,7 +4530,9 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
         })),
         asset_ids: assetIds,
         apply_to_folder_name: applyToFolderName,
-        composed_name: applyToFolderName ? composed : null
+        composed_name: applyToFolderName ? composed : null,
+        merge_existing: true,
+        removed_tags: Array.from(state.removedTagValues)
       })
     });
     const data: SaveMomentTagsResponse = await res.json();
@@ -4527,6 +4542,10 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
       return;
     }
 
+    state.removedTagValues.clear();
+    if (Array.isArray(data.saved_tags)) {
+      state.tags = data.saved_tags.map(t => ({ ...t }));
+    }
     state.lastSession = {
       session_id: data.session_id || 0,
       moment_name: state.momentName,
@@ -4535,6 +4554,12 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
       asset_count: data.assets_tagged ?? assetIds.length,
       created_at_utc: data.created_at_utc || ''
     };
+    if (state === candidateTagState && state.momentName) {
+      candidateTagsCache.set(state.momentName, {
+        tags: state.tags.map(t => ({ ...t })),
+        lastSession: state.lastSession
+      });
+    }
     if (data.tag_db_counts) {
       sourceTagState.tagDbCounts = data.tag_db_counts;
       candidateTagState.tagDbCounts = data.tag_db_counts;
@@ -4545,14 +4570,16 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
       }
     }
 
-    if (applyToFolderName && composed) {
-      state.onUseForName(composed);
+    const updatedComposed = composeMomentNameFromTags(state.tags, state.momentName);
+    if (applyToFolderName && (updatedComposed || composed)) {
+      state.onUseForName(updatedComposed || composed);
     }
     state.onTagsChanged();
+    const mergedNote = (data.merged_existing_count ?? 0) > 0 ? ` · merged ${data.merged_existing_count} existing DB tag(s)` : '';
     state.saveStatusOk = true;
     state.saveStatusMsg = applyToFolderName
-      ? `✅ Session #${data.session_id}: ${data.tags_saved} tag(s) saved for ${data.assets_tagged} "${state.momentName}" asset(s) & applied "${composed}" to Target.`
-      : `✅ Session #${data.session_id}: ${data.tags_saved} tag(s) saved in DB for "${state.momentName}" (${data.assets_tagged} asset(s), folder name unchanged).`;
+      ? `✅ Session #${data.session_id}: ${data.tags_saved} tag(s) saved for ${data.assets_tagged} "${state.momentName}" asset(s)${mergedNote} & applied "${updatedComposed || composed}" to Target.`
+      : `✅ Session #${data.session_id}: ${data.tags_saved} tag(s) saved in DB for "${state.momentName}" (${data.assets_tagged} asset(s)${mergedNote}, folder name unchanged).`;
   } catch (err: any) {
     state.saveStatusOk = false;
     state.saveStatusMsg = `❌ Network error saving tags: ${err?.message || 'Unknown error'}`;
@@ -4578,6 +4605,7 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   resolveDisjointSelectedIds.clear();
   sourceTagState.momentName = momentName;
   sourceTagState.tags = [];
+  sourceTagState.removedTagValues.clear();
   sourceTagState.lastSession = null;
   sourceTagState.tagDbCounts = {};
   sourceTagState.activeQueriedTagKey = '';
@@ -4587,6 +4615,7 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
 
   candidateTagState.momentName = '';
   candidateTagState.tags = [];
+  candidateTagState.removedTagValues.clear();
   candidateTagState.lastSession = null;
   candidateTagState.isQueryOpen = false;
   candidateTagState.saveStatusMsg = '';
