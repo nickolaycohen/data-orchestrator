@@ -1047,7 +1047,7 @@ def get_cleanup_devices(refresh: bool = False):
                 WITH scored_assets AS (
                     SELECT 
                         a.asset_id,
-                        COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
+                        COALESCE(a.carrier_device, NULLIF(TRIM(a.resolved_camera_model), ''), zea.ZCAMERAMODEL, 'Unknown') AS camera_model,
                         COALESCE(do.owner_name, 'Shared/Other') AS primary_owner,
                         COALESCE(do.is_active, 0) AS is_active,
                         COALESCE(o.is_family, 0) AS is_family,
@@ -1056,14 +1056,14 @@ def get_cleanup_devices(refresh: bool = False):
                         COALESCE(v.score_normalized, 0.0) AS score_normalized,
                         COALESCE(aaa.ZORIGINALFILESIZE, 0) AS file_size_bytes,
                         NTILE(4) OVER (
-                            PARTITION BY COALESCE(a.carrier_device, zea.ZCAMERAMODEL, 'Unknown')
+                            PARTITION BY COALESCE(a.carrier_device, NULLIF(TRIM(a.resolved_camera_model), ''), zea.ZCAMERAMODEL, 'Unknown')
                             ORDER BY COALESCE(v.score_normalized, 0.0) ASC
                         ) AS score_quartile
                     FROM assets a
                     LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
                     LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON za.ZADDITIONALATTRIBUTES = aaa.Z_PK
                     LEFT JOIN ZEXTENDEDATTRIBUTES zea ON za.ZEXTENDEDATTRIBUTES = zea.Z_PK
-                    LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, zea.ZCAMERAMODEL)
+                    LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, NULLIF(TRIM(a.resolved_camera_model), ''), zea.ZCAMERAMODEL)
                         AND (
                             do.is_active = 1
                             OR (
@@ -2419,7 +2419,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             ROUND(COALESCE(ze.ZFPS, 0.0), 1),
             ROUND(COALESCE(aaa.ZORIGINALFILESIZE, 0) / 1048576.0, 2),
             COALESCE(aaa.ZORIGINALFILESIZE, 0),
-            COALESCE(ze.ZCAMERAMODEL, ast.carrier_device, 'Unknown'),
+            COALESCE(NULLIF(TRIM(ast.resolved_camera_model), ''), ze.ZCAMERAMODEL, ast.carrier_device, 'Unknown'),
             COALESCE(do.owner_name, 'Shared/Other'),
             COALESCE(za.ZDUPLICATEASSETVISIBILITYSTATE, 0)
         FROM ranked_assets_view v
@@ -2428,7 +2428,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         LEFT JOIN ZASSET za ON za.ZUUID = v.asset_id
         LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
         LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
-        LEFT JOIN device_owners do ON do.camera_model = COALESCE(ast.carrier_device, ze.ZCAMERAMODEL)
+        LEFT JOIN device_owners do ON do.camera_model = COALESCE(NULLIF(TRIM(ast.resolved_camera_model), ''), ast.carrier_device, ze.ZCAMERAMODEL)
             AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
             AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
         WHERE mb.status_code >= '600'
@@ -3282,6 +3282,198 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     }
 
 
+_IPHONE7_NIKI_BOUNDS: dict[str, tuple[int, int]] = {
+    "2017-07": (90, 300),
+    "2017-08": (290, 1520),
+    "2017-09": (1517, 3000),
+    "2017-10": (1969, 3020),
+    "2017-11": (2182, 3350),
+    "2017-12": (3340, 3625),
+    "2018-01": (3622, 3670),
+    "2018-02": (3666, 3700),
+    "2018-03": (3697, 3750),
+    "2018-04": (3747, 3960),
+    "2018-05": (3957, 4020),
+    "2018-06": (4015, 4170),
+    "2018-07": (4163, 4380),
+    "2018-08": (4382, 4965),
+    "2018-09": (4961, 5055),
+    "2018-10": (5049, 5210),
+    "2018-11": (5207, 5270),
+    "2018-12": (5270, 5460),
+    "2019-01": (5456, 5570),
+    "2019-02": (5568, 5645),
+    "2019-03": (5644, 5680),
+    "2019-05": (5728, 5850),
+    "2019-06": (5846, 5920),
+    "2019-07": (5915, 5965),
+    "2019-08": (5965, 6195),
+    "2019-09": (6194, 6412),
+    "2019-10": (6410, 6420),
+    "2019-11": (6419, 6535),
+    "2019-12": (6530, 6535),
+    "2020-01": (6530, 6540),
+}
+_IPHONE7_IMG_NUM_RE = re.compile(r"^IMG_[Ee]?(\d{4})")
+
+
+def _ensure_iphone7_device_split(conn: sqlite3.Connection, cur: sqlite3.Cursor, force: bool = False) -> dict:
+    """Split shared 'iPhone 7' EXIF assets into 'iPhone 7 (Niki)' and 'iPhone 7 (Benny)' by IMG_XXXX stream."""
+    asset_cols = {r[1] for r in cur.execute("PRAGMA table_info(assets)").fetchall()}
+    if "resolved_camera_model" not in asset_cols:
+        cur.execute("ALTER TABLE assets ADD COLUMN resolved_camera_model TEXT")
+
+    has_split_owner = cur.execute(
+        "SELECT 1 FROM device_owners WHERE camera_model = 'iPhone 7 (Niki)' LIMIT 1"
+    ).fetchone()
+    if not force and has_split_owner:
+        unsplit = cur.execute(
+            """
+            SELECT 1 FROM assets a
+            JOIN ZASSET za ON za.ZUUID = a.asset_id
+            LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+            WHERE ze.ZCAMERAMODEL = 'iPhone 7' AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+              AND (a.resolved_camera_model IS NULL OR TRIM(a.resolved_camera_model) = '')
+            LIMIT 1
+            """
+        ).fetchone()
+        if not unsplit:
+            return {"ok": True, "already_applied": True, "niki_count": 0, "benny_count": 0}
+
+    rows = cur.execute(
+        """
+        SELECT a.asset_id, a.original_filename, a.month,
+               (za.ZDATECREATED + 978307200) AS unix_ts,
+               date(za.ZDATECREATED + 978307200, 'unixepoch') AS ymd
+        FROM assets a
+        JOIN ZASSET za ON za.ZUUID = a.asset_id
+        LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+        WHERE ze.ZCAMERAMODEL = 'iPhone 7'
+          AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+        """
+    ).fetchall()
+
+    niki_ids: list[str] = []
+    benny_ids: list[str] = []
+    other_rows: list[tuple[str, Optional[float]]] = []
+    niki_ts_sec: set[int] = set()
+
+    for aid, fn, mo, unix_ts, ymd in rows:
+        m = _IPHONE7_IMG_NUM_RE.match(fn or "")
+        if not m:
+            other_rows.append((aid, float(unix_ts) if unix_ts is not None else None))
+            continue
+        num = int(m.group(1))
+        is_niki = False
+        if mo == "2019-04":
+            is_niki = (5680 <= num <= 5728) and (
+                (ymd or "") <= "2019-04-18" or ((ymd or "") >= "2019-04-20" and num >= 5715)
+            )
+        else:
+            b = _IPHONE7_NIKI_BOUNDS.get(mo or "")
+            if b and b[0] <= num <= b[1]:
+                is_niki = True
+
+        if is_niki:
+            niki_ids.append(aid)
+            if unix_ts is not None:
+                ts_i = int(round(float(unix_ts)))
+                for d_s in (-2, -1, 0, 1, 2):
+                    niki_ts_sec.add(ts_i + d_s)
+        else:
+            benny_ids.append(aid)
+
+    for aid, unix_ts in other_rows:
+        if unix_ts is not None and int(round(unix_ts)) in niki_ts_sec:
+            niki_ids.append(aid)
+        else:
+            benny_ids.append(aid)
+
+    if niki_ids:
+        cur.executemany(
+            "UPDATE assets SET resolved_camera_model = 'iPhone 7 (Niki)' WHERE asset_id = ?",
+            [(aid,) for aid in niki_ids],
+        )
+    if benny_ids:
+        cur.executemany(
+            "UPDATE assets SET resolved_camera_model = 'iPhone 7 (Benny)' WHERE asset_id = ?",
+            [(aid,) for aid in benny_ids],
+        )
+
+    # Mark unsplit 'iPhone 7' row as trimmed for family coverage while keeping carrier fallback intact
+    cur.execute(
+        """
+        UPDATE device_owners
+        SET notes = 'Split into iPhone 7 (Niki) and iPhone 7 (Benny) (trimmed)',
+            updated_at_utc = datetime('now')
+        WHERE camera_model = 'iPhone 7'
+        """
+    )
+
+    for cam_label, owner, s_dt, e_dt, note in (
+        (
+            "iPhone 7 (Niki)",
+            "Niki",
+            "2017-07-04",
+            "2020-01-15",
+            "Split from shared iPhone 7 by IMG_XXXX stream (continues into Niki iPhone 11 Pro at IMG_6531)",
+        ),
+        (
+            "iPhone 7 (Benny)",
+            "Benny",
+            "2017-07-04",
+            "2021-05-02",
+            "Split from shared iPhone 7 by IMG_XXXX stream (rolls 9999 -> 0001)",
+        ),
+    ):
+        existing_do = cur.execute(
+            "SELECT id FROM device_owners WHERE camera_model = ? LIMIT 1",
+            (cam_label,),
+        ).fetchone()
+        if existing_do:
+            cur.execute(
+                """
+                UPDATE device_owners
+                SET owner_name = ?, start_date = ?, end_date = ?, notes = ?, is_active = 0, updated_at_utc = datetime('now')
+                WHERE id = ?
+                """,
+                (owner, s_dt, e_dt, note, int(existing_do[0])),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO device_owners (camera_model, owner_name, start_date, end_date, notes, created_at_utc, updated_at_utc, is_active)
+                VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0)
+                """,
+                (cam_label, owner, s_dt, e_dt, note),
+            )
+
+    conn.commit()
+    return {
+        "ok": True,
+        "already_applied": False,
+        "niki_count": len(niki_ids),
+        "benny_count": len(benny_ids),
+    }
+
+
+@router.post("/devices/split-iphone7")
+def split_iphone7_devices_endpoint(force: bool = True):
+    """Split shared 'iPhone 7' assets into 'iPhone 7 (Niki)' and 'iPhone 7 (Benny)' in media_organizer.db."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            return _ensure_iphone7_device_split(conn, cur, force=force)
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _enrich_batch_candidates_with_devices(cur, candidates):
     """Enrich candidate month batch dicts with device counts and active family device coverage comparison."""
     if not candidates:
@@ -3291,6 +3483,7 @@ def _enrich_batch_candidates_with_devices(cur, candidates):
         return
 
     try:
+        _ensure_iphone7_device_split(cur.connection, cur, force=False)
         # Camera model aliases (e.g. 'Samsung SCH-I800' -> 'SCH-I800')
         cur.execute("SELECT camera_model, notes FROM device_owners WHERE notes LIKE 'Alias for %'")
         aliases = {}
@@ -3312,12 +3505,12 @@ def _enrich_batch_candidates_with_devices(cur, candidates):
         # Query actual camera models and asset counts for candidate months
         ph = ",".join("?" for _ in months)
         cur.execute(f"""
-            SELECT a.month, COALESCE(zea.ZCAMERAMODEL, 'Unknown') as camera_model, COUNT(*) as cnt
+            SELECT a.month, COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), zea.ZCAMERAMODEL, 'Unknown') as camera_model, COUNT(*) as cnt
             FROM assets a
             JOIN ZASSET za ON a.asset_id = za.ZUUID
             LEFT JOIN ZEXTENDEDATTRIBUTES zea ON za.ZEXTENDEDATTRIBUTES = zea.Z_PK
             WHERE a.month IN ({ph})
-            GROUP BY a.month, zea.ZCAMERAMODEL
+            GROUP BY a.month, COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), zea.ZCAMERAMODEL, 'Unknown')
             ORDER BY a.month DESC, cnt DESC
         """, months)
         batch_device_rows = cur.fetchall()
@@ -5988,14 +6181,14 @@ def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Opt
             COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
             COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
             COALESCE(aaa.ZORIGINALFILESIZE, 0),
-            COALESCE(ze.ZCAMERAMODEL, a.carrier_device, 'Unknown'),
+            COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device, 'Unknown'),
             COALESCE(do.owner_name, 'Shared/Other')
         FROM assets a
         LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
         LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
         LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
         LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
-        LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, ze.ZCAMERAMODEL)
+        LEFT JOIN device_owners do ON do.camera_model = COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device)
             AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
             AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
         WHERE (
