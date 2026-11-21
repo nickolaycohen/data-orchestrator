@@ -484,6 +484,7 @@ export interface MomentTagSessionSummary {
   composed_name?: string;
   asset_count: number;
   created_at_utc: string;
+  metadata_summary?: string;
 }
 
 export interface DisjointNameSuggestion {
@@ -510,6 +511,8 @@ export interface DisjointDetailResponse {
   saved_tags?: MomentTagItem[];
   last_tag_session?: MomentTagSessionSummary | null;
   tag_db_counts?: Record<string, { assets: number; moments: number }>;
+  metadata_summary?: string;
+  metadata_struct?: Record<string, any>;
   nearby_candidates?: Array<{
     moment_name: string;
     qualified_count: number;
@@ -532,6 +535,8 @@ export interface SaveMomentTagsResponse {
   saved_tags?: MomentTagItem[];
   created_at_utc?: string;
   tag_db_counts?: Record<string, { assets: number; moments: number }>;
+  metadata_summary?: string;
+  metadata_struct?: Record<string, any>;
 }
 
 export interface TagLookupAssetItem {
@@ -589,6 +594,8 @@ export interface MomentAssetsPreviewResponse {
   saved_tags?: MomentTagItem[];
   last_tag_session?: MomentTagSessionSummary | null;
   tag_db_counts?: Record<string, { assets: number; moments: number }>;
+  metadata_summary?: string;
+  metadata_struct?: Record<string, any>;
 }
 
 export interface ResolveDisjointResponse {

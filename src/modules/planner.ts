@@ -4181,6 +4181,23 @@ function addTagToEngineState(
   renderTaggingEngineCard(state);
 }
 
+function formatUnifiedMetadataSummary(tags: MomentTagItem[]): string {
+  const order: Array<{ key: MomentTagItem['category']; label: string }> = [
+    { key: 'activity', label: 'Activity' },
+    { key: 'location', label: 'Location' },
+    { key: 'people', label: 'People' },
+    { key: 'when', label: 'When' },
+    { key: 'family_member', label: 'Family Member' }
+  ];
+  const parts: string[] = [];
+  order.forEach(({ key, label }) => {
+    const vals = tags.filter(t => t.category === key).map(t => t.tag_value);
+    if (!vals.length) return;
+    parts.push(vals.length === 1 ? `${label}: ${vals[0]}` : `${label}: [${vals.join(', ')}]`);
+  });
+  return `{${parts.join(', ')}}`;
+}
+
 function renderTaggingEngineCard(state: TaggingEngineState): void {
   const mountEl = document.getElementById(state.mountId);
   if (!mountEl) return;
@@ -4194,10 +4211,13 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
   ];
 
   const sessBadgeClass = state.lastSession ? 'badge-green' : 'badge-outline';
+  const sessMetaSummary = state.lastSession
+    ? state.lastSession.metadata_summary || formatUnifiedMetadataSummary(state.tags)
+    : '';
   const sessBadgeText = state.lastSession
     ? state.lastSession.apply_to_folder_name
-      ? `✓ Session #${state.lastSession.session_id} · Used in name (${state.lastSession.created_at_utc.slice(0, 10)})`
-      : `✓ Session #${state.lastSession.session_id} · DB only (${state.lastSession.created_at_utc.slice(0, 10)})`
+      ? `✓ Session #${state.lastSession.session_id} · Used in name (${state.lastSession.created_at_utc.slice(0, 10)})${sessMetaSummary ? ` · ${sessMetaSummary}` : ''}`
+      : `✓ Session #${state.lastSession.session_id} · DB only (${state.lastSession.created_at_utc.slice(0, 10)})${sessMetaSummary ? ` · ${sessMetaSummary}` : ''}`
     : 'Not tagged yet (auto-suggested)';
 
   const composed = composeMomentNameFromTags(state.tags, state.momentName);
@@ -4211,13 +4231,18 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
             .map(tag => {
               const dbStat = state.tagDbCounts[tag.tag_value.toLowerCase()];
               const dbCount = dbStat?.assets ?? tag.tagged_asset_count ?? 0;
-              const dbBadge = dbCount > 0 ? `<span class="tag-pill-db-count">${dbCount} DB</span>` : '';
+              const dbMoments = dbStat?.moments ?? 0;
+              const dbTitle =
+                dbCount > 0
+                  ? `In DB (${dbCount} asset(s)${dbMoments > 0 ? ` across ${dbMoments} moment(s)` : ''}) — click to query DB assets tagged '${tag.tag_value}'`
+                  : `Query assets in DB tagged '${tag.tag_value}'`;
+              const dbBadge = dbCount > 0 ? `<span class="tag-pill-db-count">DB</span>` : '';
               const queryKey = `${c.key}:${tag.tag_value.toLowerCase()}`;
               const isActive = state.activeQueriedTagKey === queryKey;
               return `
                 <span class="tag-pill-card${tag.include_in_name ? ' included' : ''}${isActive ? ' active-query' : ''}">
                   <input type="checkbox" class="tag-pill-check" data-cat="${c.key}" data-val="${escapeHtml(tag.tag_value)}" ${tag.include_in_name ? 'checked' : ''} title="Include '${escapeHtml(tag.tag_value)}' when composing folder name" />
-                  <button type="button" class="tag-pill-query-btn" data-cat="${c.key}" data-val="${escapeHtml(tag.tag_value)}" title="Query assets in DB tagged '${escapeHtml(tag.tag_value)}'">
+                  <button type="button" class="tag-pill-query-btn" data-cat="${c.key}" data-val="${escapeHtml(tag.tag_value)}" title="${escapeHtml(dbTitle)}">
                     <span>${escapeHtml(tag.tag_value)}</span>${dbBadge}
                   </button>
                   <button type="button" class="tag-pill-remove-btn" data-cat="${c.key}" data-val="${escapeHtml(tag.tag_value)}" aria-label="Remove tag" title="Remove tag">×</button>
@@ -4315,7 +4340,7 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
       <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
         <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
           <strong style="font-size: 0.84rem; color: #f5f3ff;">${escapeHtml(state.titleLabel)} · <code>${escapeHtml(state.momentName || '—')}</code></strong>
-          <span class="badge badge-xs ${sessBadgeClass} font-mono">${escapeHtml(sessBadgeText)}</span>
+          <span class="badge badge-xs ${sessBadgeClass} font-mono" style="white-space: normal; text-align: left; line-height: 1.35;">${escapeHtml(sessBadgeText)}</span>
         </div>
         <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
           ${copyBtnHtml}
@@ -4552,7 +4577,8 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
       apply_to_folder_name: applyToFolderName,
       composed_name: applyToFolderName ? composed : '',
       asset_count: data.assets_tagged ?? assetIds.length,
-      created_at_utc: data.created_at_utc || ''
+      created_at_utc: data.created_at_utc || '',
+      metadata_summary: data.metadata_summary || formatUnifiedMetadataSummary(state.tags)
     };
     if (state === candidateTagState && state.momentName) {
       candidateTagsCache.set(state.momentName, {
