@@ -468,6 +468,24 @@ export interface DisjointDetailAsset {
   qualified: boolean;
 }
 
+export interface MomentTagItem {
+  category: 'activity' | 'location' | 'people' | 'when';
+  tag_value: string;
+  include_in_name: boolean;
+  tagged_asset_count?: number;
+  db_asset_count?: number;
+  db_moment_count?: number;
+}
+
+export interface MomentTagSessionSummary {
+  session_id: number;
+  moment_name: string;
+  apply_to_folder_name: boolean;
+  composed_name?: string;
+  asset_count: number;
+  created_at_utc: string;
+}
+
 export interface DisjointNameSuggestion {
   activity: string;
   location: string;
@@ -487,12 +505,55 @@ export interface DisjointDetailResponse {
   assets?: DisjointDetailAsset[];
   albums_present?: Array<{ parent: string; asset_count: number; full_path: string }>;
   name_suggestion?: DisjointNameSuggestion;
+  saved_tags?: MomentTagItem[];
+  last_tag_session?: MomentTagSessionSummary | null;
+  tag_db_counts?: Record<string, { assets: number; moments: number }>;
   nearby_candidates?: Array<{
     moment_name: string;
     qualified_count: number;
     rel_label: string;
     is_suggested: boolean;
   }>;
+}
+
+export interface SaveMomentTagsResponse {
+  ok: boolean;
+  error?: string;
+  session_id?: number;
+  moment_name?: string;
+  apply_to_folder_name?: boolean;
+  composed_name?: string;
+  tags_saved?: number;
+  assets_tagged?: number;
+  created_at_utc?: string;
+}
+
+export interface TagLookupAssetItem {
+  asset_id: string;
+  original_filename: string;
+  moment_name: string;
+  category: string;
+  tag_value: string;
+  score_normalized: number;
+  date_created_utc: string;
+  media_type: 'photo' | 'video';
+  is_current: boolean;
+}
+
+export interface TagLookupResponse {
+  ok: boolean;
+  error?: string;
+  tag_value?: string;
+  category?: string;
+  total_assets?: number;
+  total_moments?: number;
+  moments?: Array<{
+    moment_name: string;
+    asset_count: number;
+    max_score: number;
+    is_current: boolean;
+  }>;
+  assets?: TagLookupAssetItem[];
 }
 
 export interface ResolveDisjointResponse {

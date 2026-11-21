@@ -2200,33 +2200,64 @@
             <div class="disjoint-suggestion-box" id="resolve-disjoint-suggestion-box">
               <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
                 <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
-                  <strong style="font-size: 0.84rem; color: #f5f3ff;">✨ Moment Name Suggestion Engine</strong>
-                  <span class="badge badge-xs badge-purple font-mono">[Activity] [Location] [People] [When]</span>
+                  <strong style="font-size: 0.84rem; color: #f5f3ff;">🏷️ Memory Tagging &amp; Naming Engine</strong>
+                  <span class="badge badge-xs badge-outline font-mono" id="resolve-disjoint-session-badge">Not tagged yet</span>
                 </div>
-                <button type="button" class="btn btn-xs btn-purple" id="btn-apply-disjoint-suggestion" title="Copy composed suggestion into Target Moment Album Name">
-                  ✨ Use as Target Name
-                </button>
+                <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                  <button type="button" class="btn btn-xs btn-outline" id="btn-save-tags-only" title="Record tagging session into media_organizer.db without changing or appending to the folder name">
+                    💾 Save Tags Only (Keep Name)
+                  </button>
+                  <button type="button" class="btn btn-xs btn-purple" id="btn-save-tags-use-name" title="Record tagging session into DB AND copy the checked tags into Target Moment Album Name">
+                    ✨ Save Tags &amp; Use for Name
+                  </button>
+                </div>
               </div>
-              <div class="disjoint-suggested-headline" id="resolve-disjoint-suggested-preview">—</div>
+              <div class="disjoint-suggested-headline">
+                <span class="font-mono text-muted" style="font-size: 0.66rem; font-weight: 400; display: block; margin-bottom: 0.12rem;">Picked Tags (✓) → Flat Folder Name Preview · Click any pill text to query DB assets already tagged</span>
+                <span id="resolve-disjoint-suggested-preview">—</span>
+              </div>
               <div class="disjoint-paradigm-grid">
-                <div>
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.2rem;">Activity</label>
-                  <input type="text" id="resolve-disjoint-field-activity" class="form-control" placeholder="e.g. Skiing, Ocean Fishing" style="width: 100%; font-size: 0.76rem; padding: 0.35rem 0.55rem;" />
+                <div class="tag-category-col" data-tag-cat="activity">
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">Activity</label>
+                  <div class="tag-pills-list" id="resolve-disjoint-pills-activity"></div>
+                  <div class="tag-add-row">
+                    <input type="text" id="resolve-disjoint-add-activity" class="form-control tag-add-input" placeholder="+ add activity" />
+                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="activity">+</button>
+                  </div>
                 </div>
-                <div>
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.2rem;">Location</label>
-                  <input type="text" id="resolve-disjoint-field-location" class="form-control" placeholder="e.g. CamelBack" style="width: 100%; font-size: 0.76rem; padding: 0.35rem 0.55rem;" />
-                  <div class="disjoint-mini-chips" id="resolve-disjoint-loc-chips"></div>
+                <div class="tag-category-col" data-tag-cat="location">
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">Location</label>
+                  <div class="tag-pills-list" id="resolve-disjoint-pills-location"></div>
+                  <div class="tag-add-row">
+                    <input type="text" id="resolve-disjoint-add-location" class="form-control tag-add-input" placeholder="+ add location" />
+                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="location">+</button>
+                  </div>
                 </div>
-                <div>
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.2rem;">People</label>
-                  <input type="text" id="resolve-disjoint-field-people" class="form-control" placeholder="e.g. Roberto, Eva" style="width: 100%; font-size: 0.76rem; padding: 0.35rem 0.55rem;" />
-                  <div class="disjoint-mini-chips" id="resolve-disjoint-people-chips"></div>
+                <div class="tag-category-col" data-tag-cat="people">
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">People</label>
+                  <div class="tag-pills-list" id="resolve-disjoint-pills-people"></div>
+                  <div class="tag-add-row">
+                    <input type="text" id="resolve-disjoint-add-people" class="form-control tag-add-input" placeholder="+ add person" />
+                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="people">+</button>
+                  </div>
                 </div>
-                <div>
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.2rem;">When</label>
-                  <input type="text" id="resolve-disjoint-field-when" class="form-control" placeholder="e.g. Winter 2020" style="width: 100%; font-size: 0.76rem; padding: 0.35rem 0.55rem;" />
+                <div class="tag-category-col" data-tag-cat="when">
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">When</label>
+                  <div class="tag-pills-list" id="resolve-disjoint-pills-when"></div>
+                  <div class="tag-add-row">
+                    <input type="text" id="resolve-disjoint-add-when" class="form-control tag-add-input" placeholder="+ add when" />
+                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="when">+</button>
+                  </div>
                 </div>
+              </div>
+              <div id="resolve-disjoint-tag-save-status" class="font-mono" style="display: none; font-size: 0.7rem;"></div>
+              <div id="resolve-disjoint-tag-query-panel" class="tag-db-query-panel" style="display: none;">
+                <div class="tag-db-query-header">
+                  <span id="resolve-disjoint-tag-query-title" class="font-mono" style="font-size: 0.72rem; font-weight: 600;">🔎 DB Matches</span>
+                  <button type="button" class="btn btn-xs btn-icon" id="btn-close-tag-query-panel" aria-label="Close DB Matches">✕</button>
+                </div>
+                <div id="resolve-disjoint-tag-query-moments" class="tag-db-moments-row"></div>
+                <div id="resolve-disjoint-tag-query-assets" class="tag-db-assets-grid"></div>
               </div>
             </div>
 

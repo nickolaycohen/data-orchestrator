@@ -12,13 +12,16 @@ import type {
   ModeMDedupApplyResponse,
   ModeMDedupDuplicate,
   ModeMDedupPreviewResponse,
+  MomentTagItem,
   PlannerModeB,
   PlannerModeM,
   PlannerOverviewResponse,
   PublishMomentAssetItem,
   PublishMomentInfoResponse,
   PublishMomentResponse,
-  ResolveDisjointResponse
+  ResolveDisjointResponse,
+  SaveMomentTagsResponse,
+  TagLookupResponse
 } from '../types/api.ts';
 import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../utils/formatters.ts';
 import { openCleanupPreviewModal } from './cleanup.ts';
@@ -74,6 +77,10 @@ let resolveDisjointAssets: DisjointDetailAsset[] = [];
 const resolveDisjointSelectedIds = new Set<string>();
 let isSubmittingResolveDisjoint = false;
 let resolveDisjointCompleted = false;
+let currentMomentTags: MomentTagItem[] = [];
+let tagDbCountsMap: Record<string, { assets: number; moments: number }> = {};
+let activeQueriedTagKey = '';
+let isSavingMomentTags = false;
 
 type ClustersSyncLockMode = 'idle' | 'running' | 'awaiting';
 let clustersSyncLockMode: ClustersSyncLockMode = 'idle';
@@ -534,26 +541,39 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   document.getElementById('resolve-disjoint-parent-select')?.addEventListener('change', () => {
     updateResolveDisjointTargetPreview();
   });
-  [
-    'resolve-disjoint-field-activity',
-    'resolve-disjoint-field-location',
-    'resolve-disjoint-field-people',
-    'resolve-disjoint-field-when'
-  ].forEach(id => {
-    document.getElementById(id)?.addEventListener('input', () => {
-      updateResolveDisjointComposedHeadline();
+  document.querySelectorAll<HTMLButtonElement>('.btn-add-tag-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const cat = (btn.dataset.tagCat as MomentTagItem['category']) || 'activity';
+      const inp = document.getElementById(`resolve-disjoint-add-${cat}`) as HTMLInputElement | null;
+      const val = (inp?.value || '').trim();
+      if (!val) return;
+      addMomentTagPill(cat, val, true);
+      if (inp) inp.value = '';
     });
   });
-  document.getElementById('btn-apply-disjoint-suggestion')?.addEventListener('click', () => {
-    const composed = composeResolveDisjointSuggestedName();
-    const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
-    if (targetInp && composed) {
-      targetInp.value = composed;
-      document.querySelectorAll<HTMLButtonElement>('#resolve-disjoint-nearby-chips .disjoint-target-chip').forEach(c => {
-        c.classList.toggle('active', (c.dataset.targetMoment || '') === composed);
-      });
-      updateResolveDisjointTargetPreview();
-    }
+  (['activity', 'location', 'people', 'when'] as MomentTagItem['category'][]).forEach(cat => {
+    document.getElementById(`resolve-disjoint-add-${cat}`)?.addEventListener('keydown', (e) => {
+      if ((e as KeyboardEvent).key === 'Enter') {
+        e.preventDefault();
+        const inp = e.target as HTMLInputElement;
+        const val = (inp?.value || '').trim();
+        if (!val) return;
+        addMomentTagPill(cat, val, true);
+        inp.value = '';
+      }
+    });
+  });
+  document.getElementById('btn-save-tags-only')?.addEventListener('click', () => {
+    void saveMomentTagsToDb(false);
+  });
+  document.getElementById('btn-save-tags-use-name')?.addEventListener('click', () => {
+    void saveMomentTagsToDb(true);
+  });
+  document.getElementById('btn-close-tag-query-panel')?.addEventListener('click', () => {
+    activeQueriedTagKey = '';
+    const panel = document.getElementById('resolve-disjoint-tag-query-panel');
+    if (panel) panel.style.display = 'none';
+    renderMomentTagPills();
   });
   document.getElementById('btn-submit-resolve-disjoint')?.addEventListener('click', () => {
     if (resolveDisjointCompleted) {
@@ -2626,19 +2646,35 @@ function renderMemoriesFolders(items: MemoriesFolderItem[]): void {
           </td>
           <td>${stageHtml}</td>
           <td style="text-align: right;">
-            <button
-              class="btn btn-xs btn-outline btn-use-memories-folder"
-              data-folder-name="${escapeHtml(prefillName)}"
-              data-parent-folder="${escapeHtml(targetParent)}"
-              title="Open AppleScript Create/Update Moment with this folder/album pre-selected"
-            >
-              ${item.is_folder ? '+ New Inside' : '✨ Select'}
-            </button>
+            <div style="display: inline-flex; align-items: center; gap: 0.35rem;">
+              <button
+                type="button"
+                class="btn btn-xs btn-outline btn-retag-memories-folder"
+                data-moment-name="${escapeHtml(item.album_name)}"
+                title="Inspect, tag, or retag '${escapeHtml(item.album_name)}' in DB"
+              >🏷️ Tag</button>
+              <button
+                type="button"
+                class="btn btn-xs btn-outline btn-use-memories-folder"
+                data-folder-name="${escapeHtml(prefillName)}"
+                data-parent-folder="${escapeHtml(targetParent)}"
+                title="Open AppleScript Create/Update Moment with this folder/album pre-selected"
+              >
+                ${item.is_folder ? '+ New Inside' : '✨ Select'}
+              </button>
+            </div>
           </td>
         </tr>
       `;
     })
     .join('');
+
+  tbody.querySelectorAll<HTMLElement>('.btn-retag-memories-folder').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mName = btn.dataset.momentName || '';
+      if (mName) void openResolveDisjointModal(mName);
+    });
+  });
 
   tbody.querySelectorAll<HTMLElement>('.btn-use-memories-folder').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -3604,10 +3640,13 @@ function renderResolveDisjointAssets(): void {
 }
 
 function composeResolveDisjointSuggestedName(): string {
-  const act = ((document.getElementById('resolve-disjoint-field-activity') as HTMLInputElement | null)?.value || '').trim();
-  const loc = ((document.getElementById('resolve-disjoint-field-location') as HTMLInputElement | null)?.value || '').trim();
-  const ppl = ((document.getElementById('resolve-disjoint-field-people') as HTMLInputElement | null)?.value || '').trim();
-  const when = ((document.getElementById('resolve-disjoint-field-when') as HTMLInputElement | null)?.value || '').trim();
+  const picked = (cat: MomentTagItem['category']): string[] =>
+    currentMomentTags.filter(t => t.category === cat && t.include_in_name).map(t => t.tag_value);
+
+  const act = picked('activity').join(' & ');
+  const loc = picked('location').join(', ');
+  const ppl = picked('people').join(', ');
+  const when = picked('when').join(' / ');
 
   const parts: string[] = [];
   if (act) parts.push(act);
@@ -3625,6 +3664,305 @@ function updateResolveDisjointComposedHeadline(): void {
   }
 }
 
+function addMomentTagPill(category: MomentTagItem['category'], rawValue: string, includeInName = true): void {
+  const clean = rawValue.replace(/\s+/g, ' ').trim();
+  if (!clean) return;
+  const existing = currentMomentTags.find(
+    t => t.category === category && t.tag_value.toLowerCase() === clean.toLowerCase()
+  );
+  if (existing) {
+    existing.include_in_name = includeInName;
+  } else {
+    currentMomentTags.push({
+      category,
+      tag_value: clean,
+      include_in_name: includeInName
+    });
+  }
+  renderMomentTagPills();
+  updateResolveDisjointComposedHeadline();
+}
+
+function renderMomentTagPills(): void {
+  const cats: MomentTagItem['category'][] = ['activity', 'location', 'people', 'when'];
+  cats.forEach(cat => {
+    const container = document.getElementById(`resolve-disjoint-pills-${cat}`);
+    if (!container) return;
+    const catTags = currentMomentTags.filter(t => t.category === cat);
+    if (!catTags.length) {
+      container.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.64rem; opacity: 0.7;">No tags</span>';
+      return;
+    }
+    container.innerHTML = catTags
+      .map(tag => {
+        const dbStat = tagDbCountsMap[tag.tag_value.toLowerCase()];
+        const dbCount = dbStat?.assets ?? tag.tagged_asset_count ?? 0;
+        const dbBadge = dbCount > 0 ? `<span class="tag-pill-db-count">${dbCount} DB</span>` : '';
+        const queryKey = `${cat}:${tag.tag_value.toLowerCase()}`;
+        const isActive = activeQueriedTagKey === queryKey;
+        return `
+          <span class="tag-pill-card${tag.include_in_name ? ' included' : ''}${isActive ? ' active-query' : ''}">
+            <input type="checkbox" class="tag-pill-check" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" ${tag.include_in_name ? 'checked' : ''} title="Include '${escapeHtml(tag.tag_value)}' when composing folder name" />
+            <button type="button" class="tag-pill-query-btn" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" title="Query assets in DB tagged '${escapeHtml(tag.tag_value)}'">
+              <span>${escapeHtml(tag.tag_value)}</span>${dbBadge}
+            </button>
+            <button type="button" class="tag-pill-remove-btn" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" aria-label="Remove tag" title="Remove tag">×</button>
+          </span>
+        `;
+      })
+      .join('');
+
+    container.querySelectorAll<HTMLInputElement>('.tag-pill-check').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const c = cb.dataset.cat as MomentTagItem['category'];
+        const v = cb.dataset.val || '';
+        const item = currentMomentTags.find(t => t.category === c && t.tag_value === v);
+        if (item) item.include_in_name = cb.checked;
+        renderMomentTagPills();
+        updateResolveDisjointComposedHeadline();
+      });
+    });
+
+    container.querySelectorAll<HTMLButtonElement>('.tag-pill-query-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const c = (btn.dataset.cat as MomentTagItem['category']) || 'activity';
+        const v = btn.dataset.val || '';
+        if (v) void queryDbAssetsByTag(v, c);
+      });
+    });
+
+    container.querySelectorAll<HTMLButtonElement>('.tag-pill-remove-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const c = btn.dataset.cat as MomentTagItem['category'];
+        const v = btn.dataset.val || '';
+        currentMomentTags = currentMomentTags.filter(t => !(t.category === c && t.tag_value === v));
+        if (activeQueriedTagKey === `${c}:${v.toLowerCase()}`) {
+          activeQueriedTagKey = '';
+          const panel = document.getElementById('resolve-disjoint-tag-query-panel');
+          if (panel) panel.style.display = 'none';
+        }
+        renderMomentTagPills();
+        updateResolveDisjointComposedHeadline();
+      });
+    });
+  });
+}
+
+async function queryDbAssetsByTag(tagValue: string, category: MomentTagItem['category']): Promise<void> {
+  const panel = document.getElementById('resolve-disjoint-tag-query-panel');
+  const titleEl = document.getElementById('resolve-disjoint-tag-query-title');
+  const momentsEl = document.getElementById('resolve-disjoint-tag-query-moments');
+  const assetsEl = document.getElementById('resolve-disjoint-tag-query-assets');
+  if (!panel || !titleEl || !momentsEl || !assetsEl) return;
+
+  activeQueriedTagKey = `${category}:${tagValue.toLowerCase()}`;
+  renderMomentTagPills();
+  panel.style.display = 'flex';
+  titleEl.textContent = `🔎 Querying DB for tag "${tagValue}"...`;
+  momentsEl.innerHTML = '';
+  assetsEl.innerHTML = '<div class="text-muted font-mono" style="font-size: 0.7rem;">Loading matching DB assets...</div>';
+
+  try {
+    const qs = new URLSearchParams({
+      tag_value: tagValue,
+      category,
+      exclude_moment: resolveDisjointMomentName
+    });
+    const res = await fetch(`/api/media/memories/tags/by-tag?${qs.toString()}`);
+    const data: TagLookupResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      titleEl.textContent = `🔎 DB Query Error: ${data.error || `HTTP ${res.status}`}`;
+      assetsEl.innerHTML = '';
+      return;
+    }
+
+    const totalAssets = data.total_assets ?? 0;
+    const totalMoments = data.total_moments ?? 0;
+    titleEl.textContent = `🔎 DB Assets Tagged "${tagValue}" · ${totalAssets} asset(s) across ${totalMoments} moment(s)`;
+
+    const moments = data.moments || [];
+    if (!moments.length) {
+      momentsEl.innerHTML = '';
+    } else {
+      momentsEl.innerHTML = moments
+        .map(m => {
+          const curNote = m.is_current ? ' · current' : ' · → fill target';
+          return `<button type="button" class="disjoint-target-chip${m.is_current ? '' : ' suggested'}" data-tag-moment="${escapeHtml(m.moment_name)}" title="Click to set '${escapeHtml(m.moment_name)}' as Target Moment">
+            ${escapeHtml(m.moment_name)} <span style="opacity:0.75;">(${m.asset_count}${curNote})</span>
+          </button>`;
+        })
+        .join('');
+      momentsEl.querySelectorAll<HTMLButtonElement>('.disjoint-target-chip').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const targetName = btn.dataset.tagMoment || '';
+          const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+          if (targetInp && targetName && targetName.toLowerCase() !== resolveDisjointMomentName.toLowerCase()) {
+            targetInp.value = targetName;
+            updateResolveDisjointTargetPreview();
+          }
+        });
+      });
+    }
+
+    const assets = data.assets || [];
+    if (!assets.length) {
+      assetsEl.innerHTML = `<div class="text-muted font-mono" style="font-size: 0.7rem;">No assets in the DB are saved under tag "${escapeHtml(tagValue)}" yet. Click "💾 Save Tags Only" to record this tag for future lookups.</div>`;
+      return;
+    }
+
+    const assetIdsList = assets.map(a => a.asset_id);
+    assets.forEach(a => {
+      if (!candidateAssetMeta.has(a.asset_id)) {
+        candidateAssetMeta.set(a.asset_id, {
+          asset_id: a.asset_id,
+          filename: a.original_filename,
+          original_filename: a.original_filename,
+          camera_model: 'Library',
+          primary_owner: '',
+          month: (a.date_created_utc || '').slice(0, 7),
+          date_created_utc: a.date_created_utc || '',
+          capture_timestamp: a.date_created_utc || '',
+          file_size_bytes: 0,
+          bytes: 0,
+          file_size_mb: 0,
+          score_normalized: a.score_normalized,
+          score_quartile: a.score_normalized > 0.5315 ? 'Top (>0.5315)' : 'Library',
+          assigned_moment: a.moment_name,
+          media_type: a.media_type,
+          duration_sec: 0,
+          width: 0,
+          height: 0,
+          fps: 0
+        });
+      }
+    });
+
+    assetsEl.innerHTML = assets
+      .map(
+        a => `
+        <div class="tag-db-asset-card" data-asset-id="${escapeHtml(a.asset_id)}" title="${escapeHtml(a.moment_name)} · ${escapeHtml(a.original_filename)}">
+          <img class="tag-db-asset-thumb" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
+          <div style="min-width: 0; flex: 1;">
+            <div class="font-mono" style="font-size: 0.69rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              ${escapeHtml(a.original_filename)}
+            </div>
+            <div class="font-mono text-muted" style="font-size: 0.63rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              ${escapeHtml(a.moment_name)} · ${a.score_normalized.toFixed(4)}
+            </div>
+          </div>
+        </div>
+      `
+      )
+      .join('');
+
+    assetsEl.querySelectorAll<HTMLElement>('.tag-db-asset-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const aid = card.dataset.assetId || '';
+        if (aid) {
+          openCleanupPreviewModal(aid, {
+            assetIds: assetIdsList,
+            groupLabel: `DB Tag: ${tagValue}`,
+            hideMarkRemoved: true
+          });
+        }
+      });
+    });
+  } catch (err: any) {
+    titleEl.textContent = `🔎 Error querying tag "${tagValue}"`;
+    assetsEl.innerHTML = `<div class="text-red font-mono" style="font-size: 0.7rem;">${escapeHtml(err?.message || 'Unknown error')}</div>`;
+  }
+}
+
+async function saveMomentTagsToDb(applyToFolderName: boolean): Promise<void> {
+  if (!resolveDisjointMomentName || isSavingMomentTags) return;
+  const saveStatusEl = document.getElementById('resolve-disjoint-tag-save-status');
+  const sessionBadge = document.getElementById('resolve-disjoint-session-badge');
+  const btnOnly = document.getElementById('btn-save-tags-only') as HTMLButtonElement | null;
+  const btnUse = document.getElementById('btn-save-tags-use-name') as HTMLButtonElement | null;
+
+  const composed = composeResolveDisjointSuggestedName();
+  const assetIds = Array.from(resolveDisjointSelectedIds);
+
+  isSavingMomentTags = true;
+  if (btnOnly) btnOnly.disabled = true;
+  if (btnUse) btnUse.disabled = true;
+  if (saveStatusEl) {
+    saveStatusEl.style.display = 'block';
+    saveStatusEl.className = 'font-mono text-muted';
+    saveStatusEl.textContent = 'Saving tagging session into media_organizer.db...';
+  }
+
+  try {
+    const res = await fetch('/api/media/memories/tags/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        moment_name: resolveDisjointMomentName,
+        tags: currentMomentTags.map(t => ({
+          category: t.category,
+          tag_value: t.tag_value,
+          include_in_name: t.include_in_name
+        })),
+        asset_ids: assetIds,
+        apply_to_folder_name: applyToFolderName,
+        composed_name: applyToFolderName ? composed : null
+      })
+    });
+    const data: SaveMomentTagsResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      if (saveStatusEl) {
+        saveStatusEl.className = 'font-mono text-red';
+        saveStatusEl.textContent = `❌ Failed saving tags: ${data.error || `HTTP ${res.status}`}`;
+      }
+      return;
+    }
+
+    currentMomentTags.forEach(t => {
+      const k = t.tag_value.toLowerCase();
+      const prev = tagDbCountsMap[k] || { assets: 0, moments: 0 };
+      tagDbCountsMap[k] = {
+        assets: Math.max(prev.assets, data.assets_tagged ?? assetIds.length),
+        moments: Math.max(prev.moments, 1)
+      };
+    });
+    renderMomentTagPills();
+
+    if (sessionBadge) {
+      sessionBadge.className = 'badge badge-xs badge-green font-mono';
+      sessionBadge.textContent = applyToFolderName
+        ? `✓ Session #${data.session_id} · Used in target name`
+        : `✓ Session #${data.session_id} · Folder name kept`;
+    }
+
+    if (applyToFolderName && composed) {
+      const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+      if (targetInp) {
+        targetInp.value = composed;
+        document.querySelectorAll<HTMLButtonElement>('#resolve-disjoint-nearby-chips .disjoint-target-chip').forEach(c => {
+          c.classList.toggle('active', (c.dataset.targetMoment || '') === composed);
+        });
+        updateResolveDisjointTargetPreview();
+      }
+    }
+
+    if (saveStatusEl) {
+      saveStatusEl.className = 'font-mono text-green';
+      saveStatusEl.textContent = applyToFolderName
+        ? `✅ Recorded session #${data.session_id}: ${data.tags_saved} tag(s) across ${data.assets_tagged} asset(s) & applied "${composed}" to Target Moment.`
+        : `✅ Recorded session #${data.session_id}: ${data.tags_saved} tag(s) across ${data.assets_tagged} asset(s) in DB (folder name unchanged).`;
+    }
+  } catch (err: any) {
+    if (saveStatusEl) {
+      saveStatusEl.className = 'font-mono text-red';
+      saveStatusEl.textContent = `❌ Network error saving tags: ${err?.message || 'Unknown error'}`;
+    }
+  } finally {
+    isSavingMomentTags = false;
+    if (btnOnly) btnOnly.disabled = false;
+    if (btnUse) btnUse.disabled = false;
+  }
+}
+
 function updateResolveDisjointTargetPreview(): void {
   const previewEl = document.getElementById('resolve-disjoint-target-path-preview');
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
@@ -3639,6 +3977,9 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   resolveDisjointMomentName = momentName;
   resolveDisjointAssets = [];
   resolveDisjointSelectedIds.clear();
+  currentMomentTags = [];
+  tagDbCountsMap = {};
+  activeQueriedTagKey = '';
   setResolveDisjointCompletedState(false);
 
   const modal = document.getElementById('modal-resolve-disjoint');
@@ -3653,18 +3994,15 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
   const statusEl = document.getElementById('resolve-disjoint-status');
 
-  const actInp = document.getElementById('resolve-disjoint-field-activity') as HTMLInputElement | null;
-  const locInp = document.getElementById('resolve-disjoint-field-location') as HTMLInputElement | null;
-  const pplInp = document.getElementById('resolve-disjoint-field-people') as HTMLInputElement | null;
-  const whenInp = document.getElementById('resolve-disjoint-field-when') as HTMLInputElement | null;
   const sugPreviewEl = document.getElementById('resolve-disjoint-suggested-preview');
-  const locChipsEl = document.getElementById('resolve-disjoint-loc-chips');
-  const pplChipsEl = document.getElementById('resolve-disjoint-people-chips');
+  const sessionBadgeEl = document.getElementById('resolve-disjoint-session-badge');
+  const tagSaveStatusEl = document.getElementById('resolve-disjoint-tag-save-status');
+  const tagQueryPanelEl = document.getElementById('resolve-disjoint-tag-query-panel');
 
-  if (titleEl) titleEl.textContent = `🔀 Resolve Disjoint Moment · ${momentName}`;
+  if (titleEl) titleEl.textContent = `🏷️ Tag & Resolve Moment · ${momentName}`;
   if (badgeEl) badgeEl.textContent = 'loading...';
   if (summaryEl) {
-    summaryEl.innerHTML = '<div class="spinner-sm"></div><span>Inspecting disjoint Moment assets and chronological merge targets...</span>';
+    summaryEl.innerHTML = '<div class="spinner-sm"></div><span>Inspecting Moment assets, DB tags, and merge targets...</span>';
   }
   if (albumsBarEl) albumsBarEl.style.display = 'none';
   if (listEl) listEl.innerHTML = '';
@@ -3672,13 +4010,14 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   if (targetInp) targetInp.value = suggestedTarget || '';
   if (parentSel) parentSel.value = 'Moments';
   if (delSrcCb) delSrcCb.checked = true;
-  if (actInp) actInp.value = '';
-  if (locInp) locInp.value = '';
-  if (pplInp) pplInp.value = '';
-  if (whenInp) whenInp.value = '';
-  if (sugPreviewEl) sugPreviewEl.textContent = 'Analyzing asset cues...';
-  if (locChipsEl) locChipsEl.innerHTML = '';
-  if (pplChipsEl) pplChipsEl.innerHTML = '';
+  if (sugPreviewEl) sugPreviewEl.textContent = 'Analyzing tags & asset cues...';
+  if (sessionBadgeEl) {
+    sessionBadgeEl.className = 'badge badge-xs badge-outline font-mono';
+    sessionBadgeEl.textContent = 'Not tagged yet';
+  }
+  if (tagSaveStatusEl) tagSaveStatusEl.style.display = 'none';
+  if (tagQueryPanelEl) tagQueryPanelEl.style.display = 'none';
+  renderMomentTagPills();
   updateResolveDisjointTargetPreview();
   if (statusEl) {
     statusEl.style.display = 'none';
@@ -3742,56 +4081,57 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
         <span>
           <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
           ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s) inside Apple Photos albums` : ''}.
-          Merge into an existing Moment, rename using the flat Memory Naming Engine, move to <code>Moments/SkipPublishing</code>, or Ignore.
+          Save DB tags without renaming folders, pick tags to compose a folder name, or merge/skip/ignore.
         </span>
       `;
     }
 
-    // Populate Moment Name Suggestion Engine fields + quick-pick chips
+    tagDbCountsMap = data.tag_db_counts || {};
+    const savedTags = data.saved_tags || [];
+    const lastSession = data.last_tag_session;
     const sug = data.name_suggestion;
-    if (sug) {
-      if (actInp) actInp.value = sug.activity || '';
-      if (locInp) locInp.value = sug.location || '';
-      if (pplInp) pplInp.value = sug.people || '';
-      if (whenInp) whenInp.value = sug.when || '';
-      if (sugPreviewEl) sugPreviewEl.textContent = sug.suggested_name || composeResolveDisjointSuggestedName();
 
-      if (locChipsEl && sug.location_candidates?.length) {
-        locChipsEl.innerHTML = sug.location_candidates
-          .map(lc => `<button type="button" class="disjoint-mini-chip" data-loc="${escapeHtml(lc)}">${escapeHtml(lc)}</button>`)
-          .join('');
-        locChipsEl.querySelectorAll<HTMLButtonElement>('.disjoint-mini-chip').forEach(btn => {
-          btn.addEventListener('click', () => {
-            if (locInp) locInp.value = btn.dataset.loc || '';
-            updateResolveDisjointComposedHeadline();
-          });
-        });
-      }
-
-      if (pplChipsEl && sug.people_candidates?.length) {
-        pplChipsEl.innerHTML = sug.people_candidates
-          .map(
-            pc =>
-              `<button type="button" class="disjoint-mini-chip" data-person="${escapeHtml(pc.short_name)}" title="${escapeHtml(pc.name)} (${pc.count} photo(s))">+ ${escapeHtml(pc.short_name)}</button>`
-          )
-          .join('');
-        pplChipsEl.querySelectorAll<HTMLButtonElement>('.disjoint-mini-chip').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const pName = (btn.dataset.person || '').trim();
-            if (!pplInp || !pName) return;
-            const current = pplInp.value
-              .split(',')
-              .map(s => s.trim())
-              .filter(Boolean);
-            if (!current.some(c => c.toLowerCase() === pName.toLowerCase())) {
-              current.push(pName);
-              pplInp.value = current.join(', ');
-            }
-            updateResolveDisjointComposedHeadline();
-          });
-        });
+    if (sessionBadgeEl) {
+      if (lastSession) {
+        sessionBadgeEl.className = 'badge badge-xs badge-green font-mono';
+        sessionBadgeEl.textContent = lastSession.apply_to_folder_name
+          ? `✓ Session #${lastSession.session_id} · Used in name (${lastSession.created_at_utc.slice(0, 10)})`
+          : `✓ Session #${lastSession.session_id} · DB only (${lastSession.created_at_utc.slice(0, 10)})`;
+      } else {
+        sessionBadgeEl.className = 'badge badge-xs badge-outline font-mono';
+        sessionBadgeEl.textContent = 'Not tagged yet (auto-suggested)';
       }
     }
+
+    // Seed tag pills from saved DB tags first; otherwise auto-suggested cues
+    if (savedTags.length > 0) {
+      currentMomentTags = savedTags.map(t => ({
+        category: t.category,
+        tag_value: t.tag_value,
+        include_in_name: t.include_in_name,
+        tagged_asset_count: t.tagged_asset_count
+      }));
+    } else if (sug) {
+      if (sug.activity) addMomentTagPill('activity', sug.activity, true);
+      if (sug.location) addMomentTagPill('location', sug.location, true);
+      (sug.location_candidates || []).forEach(lc => {
+        if (lc && lc.toLowerCase() !== (sug.location || '').toLowerCase()) {
+          addMomentTagPill('location', lc, false);
+        }
+      });
+      (sug.people_candidates || []).forEach((pc, idx) => {
+        if (pc.short_name) addMomentTagPill('people', pc.short_name, idx < 3);
+      });
+      if (!sug.people_candidates?.length && sug.people) {
+        sug.people.split(',').forEach(p => {
+          if (p.trim()) addMomentTagPill('people', p.trim(), true);
+        });
+      }
+      if (sug.when) addMomentTagPill('when', sug.when, true);
+    }
+
+    renderMomentTagPills();
+    updateResolveDisjointComposedHeadline();
 
     const albumsPresent = data.albums_present || [];
     if (albumsBarEl) {
