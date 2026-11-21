@@ -513,6 +513,7 @@ export interface DisjointDetailResponse {
   tag_db_counts?: Record<string, { assets: number; moments: number }>;
   metadata_summary?: string;
   metadata_struct?: Record<string, any>;
+  existing_albums?: Array<{ album_name: string; parent_folder_name: string; asset_count: number }>;
   nearby_candidates?: Array<{
     moment_name: string;
     qualified_count: number;

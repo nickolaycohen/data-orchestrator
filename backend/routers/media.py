@@ -5953,6 +5953,24 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
             for x in nearby_candidates:
                 x.pop("_sort_diff", None)
 
+            existing_album_rows = cur.execute(
+                """
+                SELECT TRIM(album_name), TRIM(COALESCE(parent_folder_name, 'Moments')), COALESCE(asset_count, 0)
+                FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND TRIM(COALESCE(album_name, '')) != ''
+                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'generic moments', 'curated', 'tobecurated')
+                """
+            ).fetchall()
+            existing_albums = [
+                {
+                    "album_name": r[0],
+                    "parent_folder_name": r[1],
+                    "asset_count": int(r[2] or 0),
+                }
+                for r in existing_album_rows
+            ]
+
             return {
                 "ok": True,
                 "moment_name": m_name,
@@ -5966,6 +5984,7 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
                 "tag_db_counts": tag_db_counts,
                 "metadata_summary": core["metadata_summary"],
                 "metadata_struct": core["metadata_struct"],
+                "existing_albums": existing_albums,
                 "nearby_candidates": nearby_candidates[:10],
             }
         finally:
@@ -6573,10 +6592,11 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
     if action == "merge":
         if not target_moment:
             return {"ok": False, "error": "Target Moment name is required to merge"}
-        if target_moment.lower() == src_moment.lower() and target_parent.lower() == "moments":
-            return {"ok": False, "error": "Target Moment must differ from source Moment"}
         if "/" in target_moment or "/" in target_parent:
             return {"ok": False, "error": "Moment and folder names cannot contain '/'"}
+        has_extra_sources = any((rm or "").strip() and (rm or "").strip().lower() != target_moment.lower() for rm in (req.additional_moments or []))
+        if target_moment.lower() == src_moment.lower() and target_parent.lower() == "moments" and not has_extra_sources and not (req.asset_ids or []):
+            return {"ok": False, "error": "Select assets or combine another Moment to add into this existing folder"}
 
     clean_ids: list[str] = []
     seen: set[str] = set()

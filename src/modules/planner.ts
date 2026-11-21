@@ -115,6 +115,17 @@ let displayedCandidateMomentsList: Array<{ moment_name: string; qualified_count:
 let momentSearchTimer: number | null = null;
 let lastAutoSyncedTargetName = '';
 let targetNameManuallyEdited = false;
+const existingTargetAlbumsMap = new Map<string, number>();
+
+function getExistingTargetAlbumInfo(parentFolder: string, targetName: string): { exists: boolean; assetCount: number } {
+  const cleanName = targetName.trim().toLowerCase();
+  if (!cleanName) return { exists: false, assetCount: 0 };
+  const key = `${(parentFolder || 'Moments').trim().toLowerCase()}::${cleanName}`;
+  if (existingTargetAlbumsMap.has(key)) {
+    return { exists: true, assetCount: existingTargetAlbumsMap.get(key) ?? 0 };
+  }
+  return { exists: false, assetCount: 0 };
+}
 
 function applyTargetMomentName(name: string, manualOverride: boolean): void {
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
@@ -3710,7 +3721,7 @@ function setResolveDisjointCompletedState(completed: boolean): void {
       btnSubmit.textContent = '✅ OK';
     } else {
       btnSubmit.className = 'btn btn-purple';
-      btnSubmit.textContent = '✨ Merge & Tag into New Moment';
+      updateResolveDisjointTargetPreview();
     }
   }
 }
@@ -3898,10 +3909,13 @@ function updateSingleAssetWarningVisibility(): void {
   const warnEl = document.getElementById('resolve-disjoint-single-warning');
   const countBadge = document.getElementById('resolve-disjoint-combine-count-badge');
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
   const totalCount = getConsolidatedTotalCount();
   const targetVal = (targetInp?.value || '').trim();
+  const existingInfo = getExistingTargetAlbumInfo(parentSel?.value || 'Moments', targetVal);
   const isKnownExistingMulti =
     combinedExtraMoments.size > 0 ||
+    (existingInfo.exists && existingInfo.assetCount >= 2) ||
     nearbyMomentCandidatesList.some(c => c.moment_name.toLowerCase() === targetVal.toLowerCase() && c.qualified_count >= 2);
 
   if (countBadge) {
@@ -4627,10 +4641,30 @@ function updateResolveDisjointTargetPreview(): void {
   const previewEl = document.getElementById('resolve-disjoint-target-path-preview');
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
-  if (!previewEl) return;
+  const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
   const parentName = parentSel?.value || 'Moments';
   const targetName = (targetInp?.value || '').trim() || '—';
-  previewEl.innerHTML = `${escapeHtml(`Media Organizer on LaCie / ${parentName} / `)}<span class="target-path-leaf">${escapeHtml(targetName)}</span>`;
+  const existingInfo = targetName !== '—' ? getExistingTargetAlbumInfo(parentName, targetName) : { exists: false, assetCount: 0 };
+
+  if (previewEl) {
+    const statusNote =
+      targetName === '—'
+        ? ''
+        : existingInfo.exists
+          ? ` <span class="font-mono" style="font-size: 0.74rem; font-weight: 500; color: #a7f3d0;">(existing folder · ${existingInfo.assetCount} asset(s) — copies missing only)</span>`
+          : ` <span class="font-mono text-muted" style="font-size: 0.74rem; font-weight: 500;">(new folder)</span>`;
+    previewEl.innerHTML = `${escapeHtml(`Media Organizer on LaCie / ${parentName} / `)}<span class="target-path-leaf">${escapeHtml(targetName)}</span>${statusNote}`;
+  }
+
+  if (btnSubmit && !resolveDisjointCompleted) {
+    if (existingInfo.exists) {
+      btnSubmit.textContent = '➕ Add Missing Assets & Tag Existing';
+      btnSubmit.title = 'Destination folder already exists — copy only missing assets, update DB tags, and delete disjoint source(s) if checked';
+    } else {
+      btnSubmit.textContent = '✨ Merge & Tag into New Moment';
+      btnSubmit.title = 'Recommended: Consolidate source(s) + apply DB tags into a New Paradigm formatted Moment';
+    }
+  }
 }
 
 async function openResolveDisjointModal(momentName: string, suggestedTarget = ''): Promise<void> {
@@ -4661,6 +4695,7 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   previewedCandidateSelectedIds.clear();
   nearbyMomentCandidatesList = [];
   displayedCandidateMomentsList = [];
+  existingTargetAlbumsMap.clear();
   lastAutoSyncedTargetName = '';
   targetNameManuallyEdited = false;
   setResolveDisjointCompletedState(false);
@@ -4791,6 +4826,12 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
         albumsBarEl.style.display = 'none';
       }
     }
+
+    existingTargetAlbumsMap.clear();
+    (data.existing_albums || []).forEach(al => {
+      const k = `${(al.parent_folder_name || 'Moments').trim().toLowerCase()}::${(al.album_name || '').trim().toLowerCase()}`;
+      existingTargetAlbumsMap.set(k, al.asset_count ?? 0);
+    });
 
     const defaultNewName = composeMomentNameFromTags(sourceTagState.tags, momentName);
     const effectiveDefault = defaultNewName || data.suggested_target || suggestedTarget || '';
