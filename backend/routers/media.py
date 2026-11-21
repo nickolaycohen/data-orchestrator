@@ -6381,21 +6381,8 @@ def _load_moment_detail_core(
         else None
     )
 
-    cur.execute(
-        """
-        SELECT
-            LOWER(tag_value) AS tv,
-            COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS assets_cnt,
-            COUNT(DISTINCT LOWER(moment_name)) AS moments_cnt
-        FROM moment_tags
-        GROUP BY LOWER(tag_value)
-        """
-    )
-    tag_db_counts = {
-        r[0]: {"assets": int(r[1] or 0), "moments": int(r[2] or 0)}
-        for r in cur.fetchall()
-        if r[0]
-    }
+    tag_db_counts = _compute_tag_db_counts(cur)
+    tag_catalog_by_category = _compute_tag_catalog_by_category(cur)
     return {
         "historical_min": hist_min_raw,
         "assets_out": assets_out,
@@ -6405,6 +6392,7 @@ def _load_moment_detail_core(
         "saved_tags": saved_tags,
         "last_tag_session": last_tag_session,
         "tag_db_counts": tag_db_counts,
+        "tag_catalog_by_category": tag_catalog_by_category,
         "metadata_summary": metadata_summary,
         "metadata_struct": metadata_struct,
     }
@@ -6512,6 +6500,7 @@ def _get_disjoint_moment_detail_impl(
                 "saved_tags": saved_tags,
                 "last_tag_session": last_tag_session,
                 "tag_db_counts": tag_db_counts,
+                "tag_catalog_by_category": core["tag_catalog_by_category"],
                 "metadata_summary": core["metadata_summary"],
                 "metadata_struct": core["metadata_struct"],
                 "existing_albums": existing_albums,
@@ -6578,6 +6567,34 @@ def _compute_tag_db_counts(cur: sqlite3.Cursor) -> dict:
         for r in cur.fetchall()
         if r[0]
     }
+
+
+def _compute_tag_catalog_by_category(cur: sqlite3.Cursor) -> dict[str, list[dict]]:
+    """Return all applied DB tags grouped by category, ordered by Moment & asset frequency."""
+    by_cat_lc: dict[str, dict[str, dict]] = {}
+    cur.execute(
+        """
+        SELECT
+            LOWER(TRIM(category)) AS cat,
+            MIN(TRIM(tag_value)) AS tag_val,
+            COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS assets_cnt,
+            COUNT(DISTINCT LOWER(moment_name)) AS moments_cnt
+        FROM moment_tags
+        WHERE TRIM(COALESCE(category, '')) != ''
+          AND TRIM(COALESCE(tag_value, '')) != ''
+        GROUP BY LOWER(TRIM(category)), LOWER(TRIM(tag_value))
+        ORDER BY moments_cnt DESC, assets_cnt DESC, LOWER(TRIM(tag_value)) ASC
+        """
+    )
+    for cat, val, acnt, mcnt in cur.fetchall():
+        c_key = cat or "activity"
+        bucket = by_cat_lc.setdefault(c_key, {})
+        bucket[val.lower()] = {
+            "tag_value": val,
+            "assets": int(acnt or 0),
+            "moments": int(mcnt or 0),
+        }
+    return {c_key: list(items.values()) for c_key, items in by_cat_lc.items()}
 
 
 def _merge_tag_lists(existing_tags: list[dict], incoming_tags: list[dict], removed_lc: set[str]) -> tuple[list[dict], int]:
@@ -6866,6 +6883,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 (session_id,),
             ).fetchone()
             tag_db_counts = _compute_tag_db_counts(cur)
+            tag_catalog_by_category = _compute_tag_catalog_by_category(cur)
             metadata_struct = _build_tag_metadata_struct(saved_tags_out, session_id=session_id, moment_name=m_name)
             metadata_summary = _format_metadata_summary_str(session_tags or saved_tags_out)
             conn.commit()
@@ -6884,6 +6902,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 "metadata_struct": metadata_struct,
                 "created_at_utc": row_ts[0] if row_ts else "",
                 "tag_db_counts": tag_db_counts,
+                "tag_catalog_by_category": tag_catalog_by_category,
             }
         finally:
             conn.close()
@@ -7109,6 +7128,7 @@ def get_moment_assets_preview(moment_name: str):
                 "saved_tags": core["saved_tags"],
                 "last_tag_session": core["last_tag_session"],
                 "tag_db_counts": core["tag_db_counts"],
+                "tag_catalog_by_category": core["tag_catalog_by_category"],
                 "metadata_summary": core["metadata_summary"],
                 "metadata_struct": core["metadata_struct"],
             }

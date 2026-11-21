@@ -505,6 +505,12 @@ export interface DisjointNameSuggestion {
   people_candidates?: Array<{ name: string; short_name: string; count: number }>;
 }
 
+export interface TagCatalogItem {
+  tag_value: string;
+  assets: number;
+  moments: number;
+}
+
 export interface DisjointDetailResponse {
   ok: boolean;
   error?: string;
@@ -517,6 +523,7 @@ export interface DisjointDetailResponse {
   saved_tags?: MomentTagItem[];
   last_tag_session?: MomentTagSessionSummary | null;
   tag_db_counts?: Record<string, { assets: number; moments: number }>;
+  tag_catalog_by_category?: Record<string, TagCatalogItem[]>;
   metadata_summary?: string;
   metadata_struct?: Record<string, any>;
   existing_albums?: Array<{ album_name: string; parent_folder_name: string; asset_count: number }>;
@@ -542,6 +549,7 @@ export interface SaveMomentTagsResponse {
   saved_tags?: MomentTagItem[];
   created_at_utc?: string;
   tag_db_counts?: Record<string, { assets: number; moments: number }>;
+  tag_catalog_by_category?: Record<string, TagCatalogItem[]>;
   metadata_summary?: string;
   metadata_struct?: Record<string, any>;
 }
@@ -601,6 +609,7 @@ export interface MomentAssetsPreviewResponse {
   saved_tags?: MomentTagItem[];
   last_tag_session?: MomentTagSessionSummary | null;
   tag_db_counts?: Record<string, { assets: number; moments: number }>;
+  tag_catalog_by_category?: Record<string, TagCatalogItem[]>;
   metadata_summary?: string;
   metadata_struct?: Record<string, any>;
 }

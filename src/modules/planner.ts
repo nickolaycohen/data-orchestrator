@@ -26,6 +26,7 @@ import type {
   SaveMomentTagsResponse,
   SearchMomentItem,
   SearchMomentsResponse,
+  TagCatalogItem,
   TagLookupResponse
 } from '../types/api.ts';
 import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../utils/formatters.ts';
@@ -84,6 +85,7 @@ interface TaggingEngineState {
   tags: MomentTagItem[];
   lastSession: MomentTagSessionSummary | null;
   tagDbCounts: Record<string, { assets: number; moments: number }>;
+  tagCatalogByCategory: Record<string, TagCatalogItem[]>;
   familyPool: string[];
   removedTagValues: Set<string>;
   activeQueriedTagKey: string;
@@ -156,6 +158,7 @@ function createEmptyTaggingState(
     tags: [],
     lastSession: null,
     tagDbCounts: {},
+    tagCatalogByCategory: {},
     familyPool: ['Niki', 'Milena', 'Roberto', 'Eva', 'Benny'],
     removedTagValues: new Set<string>(),
     activeQueriedTagKey: '',
@@ -4071,6 +4074,7 @@ async function openCandidateMomentPreview(momentName: string): Promise<void> {
 
     const cached = candidateTagsCache.get(momentName);
     candidateTagState.tagDbCounts = data.tag_db_counts || sourceTagState.tagDbCounts || {};
+    candidateTagState.tagCatalogByCategory = data.tag_catalog_by_category || sourceTagState.tagCatalogByCategory || {};
     if (data.name_suggestion?.family_member_pool?.length) {
       candidateTagState.familyPool = data.name_suggestion.family_member_pool;
     }
@@ -4221,6 +4225,63 @@ function formatUnifiedMetadataSummary(tags: MomentTagItem[]): string {
   return `{${parts.join(', ')}}`;
 }
 
+function populateTagCategoryDropdownMenu(
+  menuEl: HTMLElement,
+  state: TaggingEngineState,
+  category: MomentTagItem['category'],
+  catLabel: string,
+  filterText: string
+): void {
+  const catalog = state.tagCatalogByCategory[category] || [];
+  const filterLc = filterText.trim().toLowerCase();
+  const presentLc = new Set(state.tags.map(t => t.tag_value.toLowerCase()));
+
+  const matching = catalog
+    .filter(item => !filterLc || item.tag_value.toLowerCase().includes(filterLc))
+    .sort((a, b) => {
+      const aAdded = presentLc.has(a.tag_value.toLowerCase()) ? 1 : 0;
+      const bAdded = presentLc.has(b.tag_value.toLowerCase()) ? 1 : 0;
+      if (aAdded !== bAdded) return aAdded - bAdded;
+      return b.moments - a.moments || b.assets - a.assets || a.tag_value.localeCompare(b.tag_value);
+    });
+
+  if (!matching.length) {
+    menuEl.innerHTML = `<div class="tag-category-dropdown-empty">${
+      catalog.length
+        ? `No applied ${escapeHtml(catLabel)} tag matches "${escapeHtml(filterText.trim())}"`
+        : `No applied DB tags in ${escapeHtml(catLabel)} yet`
+    }</div>`;
+    return;
+  }
+
+  const headerHtml = `<div class="tag-category-dropdown-header">Applied ${escapeHtml(catLabel)} tags (${matching.length})</div>`;
+  const itemsHtml = matching
+    .map(item => {
+      const isAdded = presentLc.has(item.tag_value.toLowerCase());
+      const metaText = isAdded
+        ? `✓ · ${item.moments}m/${item.assets}a`
+        : `${item.moments}m · ${item.assets}a`;
+      return `
+        <button type="button" class="tag-category-dropdown-item${isAdded ? ' already-added' : ''}" data-cat="${category}" data-val="${escapeHtml(item.tag_value)}">
+          <span class="tag-category-dropdown-label">${escapeHtml(item.tag_value)}</span>
+          <span class="tag-category-dropdown-meta">${metaText}</span>
+        </button>
+      `;
+    })
+    .join('');
+  menuEl.innerHTML = `${headerHtml}${itemsHtml}`;
+
+  menuEl.querySelectorAll<HTMLButtonElement>('.tag-category-dropdown-item').forEach(itemBtn => {
+    itemBtn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const val = itemBtn.dataset.val || '';
+      if (!val) return;
+      menuEl.classList.remove('open');
+      addTagToEngineState(state, category, val);
+    });
+  });
+}
+
 function renderTaggingEngineCard(state: TaggingEngineState): void {
   const mountEl = document.getElementById(state.mountId);
   if (!mountEl) return;
@@ -4290,14 +4351,17 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
         ? `<label class="font-mono text-muted" style="font-size: 0.66rem; display: flex; align-items: center; justify-content: space-between; gap: 0.25rem; margin-bottom: 0.25rem;"><span>${c.label}</span><span style="font-size: 0.57rem; opacity: 0.78;">opt · DB only</span></label>`
         : `<label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">${c.label}</label>`;
 
+      const catCatalog = state.tagCatalogByCategory[c.key] || [];
       return `
         <div class="tag-category-col${c.optional ? ' tag-category-optional' : ''}">
           ${labelHtml}
           <div class="tag-pills-list">${pillsHtml}</div>
           ${extraHtml}
           <div class="tag-add-row">
-            <input type="text" class="form-control tag-add-input tag-engine-add-input" data-cat="${c.key}" placeholder="${c.placeholder}" />
+            <input type="text" class="form-control tag-add-input tag-engine-add-input" data-cat="${c.key}" placeholder="${c.placeholder}" autocomplete="off" />
+            <button type="button" class="btn btn-xs btn-outline tag-category-dropdown-toggle" data-cat="${c.key}" title="Show all applied tags in ${c.label} (${catCatalog.length})" aria-label="Show applied ${c.label} tags">▾</button>
             <button type="button" class="btn btn-xs btn-outline tag-engine-add-btn" data-cat="${c.key}">+</button>
+            <div class="tag-category-dropdown-menu" data-cat="${c.key}"></div>
           </div>
         </div>
       `;
@@ -4439,13 +4503,80 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
     });
   });
 
+  const closeAllDropdowns = (exceptMenu?: HTMLElement | null): void => {
+    mountEl.querySelectorAll<HTMLElement>('.tag-category-dropdown-menu.open').forEach(m => {
+      if (m !== exceptMenu) m.classList.remove('open');
+    });
+  };
+
+  const openCatDropdown = (catKey: MomentTagItem['category'], filterVal: string): void => {
+    const menuEl = mountEl.querySelector<HTMLElement>(`.tag-category-dropdown-menu[data-cat="${catKey}"]`);
+    if (!menuEl) return;
+    closeAllDropdowns(menuEl);
+    const catMeta = cats.find(c => c.key === catKey);
+    populateTagCategoryDropdownMenu(menuEl, state, catKey, catMeta?.label || catKey, filterVal);
+    menuEl.classList.add('open');
+  };
+
+  mountEl.querySelectorAll<HTMLButtonElement>('.tag-category-dropdown-toggle').forEach(btn => {
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const c = (btn.dataset.cat as MomentTagItem['category']) || 'activity';
+      const menuEl = mountEl.querySelector<HTMLElement>(`.tag-category-dropdown-menu[data-cat="${c}"]`);
+      const inp = mountEl.querySelector<HTMLInputElement>(`.tag-engine-add-input[data-cat="${c}"]`);
+      if (menuEl?.classList.contains('open')) {
+        menuEl.classList.remove('open');
+      } else {
+        openCatDropdown(c, inp?.value || '');
+        inp?.focus();
+      }
+    });
+  });
+
   mountEl.querySelectorAll<HTMLInputElement>('.tag-engine-add-input').forEach(inp => {
+    const c = (inp.dataset.cat as MomentTagItem['category']) || 'activity';
+    inp.addEventListener('focus', () => {
+      openCatDropdown(c, inp.value);
+    });
+    inp.addEventListener('input', () => {
+      openCatDropdown(c, inp.value);
+    });
+    inp.addEventListener('blur', () => {
+      const menuEl = mountEl.querySelector<HTMLElement>(`.tag-category-dropdown-menu[data-cat="${c}"]`);
+      if (menuEl) menuEl.classList.remove('open');
+    });
     inp.addEventListener('keydown', (e) => {
-      if ((e as KeyboardEvent).key === 'Enter') {
-        e.preventDefault();
-        const c = (inp.dataset.cat as MomentTagItem['category']) || 'activity';
-        const val = inp.value.trim();
+      const ke = e as KeyboardEvent;
+      const menuEl = mountEl.querySelector<HTMLElement>(`.tag-category-dropdown-menu[data-cat="${c}"]`);
+      if (ke.key === 'Escape') {
+        menuEl?.classList.remove('open');
+        return;
+      }
+      if (ke.key === 'ArrowDown' || ke.key === 'ArrowUp') {
+        ke.preventDefault();
+        if (menuEl && !menuEl.classList.contains('open')) {
+          openCatDropdown(c, inp.value);
+        }
+        const items = Array.from(
+          menuEl?.querySelectorAll<HTMLButtonElement>('.tag-category-dropdown-item:not(.already-added)') || []
+        );
+        if (!items.length) return;
+        const curIdx = items.findIndex(el => el.classList.contains('highlighted'));
+        items.forEach(el => el.classList.remove('highlighted'));
+        const nextIdx =
+          ke.key === 'ArrowDown'
+            ? (curIdx + 1) % items.length
+            : (curIdx - 1 + items.length) % items.length;
+        items[nextIdx].classList.add('highlighted');
+        items[nextIdx].scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      if (ke.key === 'Enter') {
+        ke.preventDefault();
+        const highlighted = menuEl?.querySelector<HTMLButtonElement>('.tag-category-dropdown-item.highlighted');
+        const val = (highlighted?.dataset.val || inp.value).trim();
         if (!val) return;
+        menuEl?.classList.remove('open');
         addTagToEngineState(state, c, val);
       }
     });
@@ -4617,9 +4748,15 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
         lastSession: state.lastSession
       });
     }
-    if (data.tag_db_counts) {
-      sourceTagState.tagDbCounts = data.tag_db_counts;
-      candidateTagState.tagDbCounts = data.tag_db_counts;
+    if (data.tag_db_counts || data.tag_catalog_by_category) {
+      if (data.tag_db_counts) {
+        sourceTagState.tagDbCounts = data.tag_db_counts;
+        candidateTagState.tagDbCounts = data.tag_db_counts;
+      }
+      if (data.tag_catalog_by_category) {
+        sourceTagState.tagCatalogByCategory = data.tag_catalog_by_category;
+        candidateTagState.tagCatalogByCategory = data.tag_catalog_by_category;
+      }
       if (state === candidateTagState && sourceTagState.momentName) {
         renderTaggingEngineCard(sourceTagState);
       } else if (state === sourceTagState && candidateTagState.momentName) {
@@ -4693,6 +4830,7 @@ async function openResolveDisjointModal(
   sourceTagState.removedTagValues.clear();
   sourceTagState.lastSession = null;
   sourceTagState.tagDbCounts = {};
+  sourceTagState.tagCatalogByCategory = {};
   sourceTagState.activeQueriedTagKey = '';
   sourceTagState.saveStatusMsg = '';
   sourceTagState.isQueryOpen = false;
@@ -4702,6 +4840,8 @@ async function openResolveDisjointModal(
   candidateTagState.tags = [];
   candidateTagState.removedTagValues.clear();
   candidateTagState.lastSession = null;
+  candidateTagState.tagDbCounts = {};
+  candidateTagState.tagCatalogByCategory = {};
   candidateTagState.isQueryOpen = false;
   candidateTagState.saveStatusMsg = '';
 
@@ -4850,6 +4990,7 @@ async function openResolveDisjointModal(
     }
 
     sourceTagState.tagDbCounts = data.tag_db_counts || {};
+    sourceTagState.tagCatalogByCategory = data.tag_catalog_by_category || {};
     sourceTagState.lastSession = data.last_tag_session ?? null;
     if (data.name_suggestion?.family_member_pool?.length) {
       sourceTagState.familyPool = data.name_suggestion.family_member_pool;

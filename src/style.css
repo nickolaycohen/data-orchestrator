@@ -4523,6 +4523,7 @@ body {
 }
 
 .tag-add-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.25rem;
@@ -4530,9 +4531,103 @@ body {
 }
 
 .tag-add-input {
+  flex: 1;
+  min-width: 0;
   width: 100%;
   font-size: 0.71rem !important;
   padding: 0.22rem 0.42rem !important;
+}
+
+.tag-category-dropdown-toggle {
+  flex-shrink: 0;
+  padding: 0.22rem 0.36rem !important;
+  font-size: 0.68rem !important;
+  line-height: 1.1;
+}
+
+.tag-category-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  width: max-content;
+  max-width: 250px;
+  z-index: 60;
+  max-height: 220px;
+  overflow-y: auto;
+  background: #0f172a;
+  border: 1px solid rgba(139, 92, 246, 0.55);
+  border-radius: 6px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.68);
+  padding: 0.25rem;
+  display: none;
+  flex-direction: column;
+  gap: 0.14rem;
+}
+
+.tag-category-col:last-child .tag-category-dropdown-menu {
+  left: auto;
+  right: 0;
+}
+
+.tag-category-dropdown-menu.open {
+  display: flex;
+}
+
+.tag-category-dropdown-header {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.59rem;
+  color: rgba(148, 163, 184, 0.85);
+  padding: 0.14rem 0.35rem 0.2rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  margin-bottom: 0.08rem;
+}
+
+.tag-category-dropdown-item {
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0.24rem 0.38rem;
+  color: #e2e8f0;
+  font-size: 0.7rem;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.tag-category-dropdown-item:hover,
+.tag-category-dropdown-item.highlighted {
+  background: rgba(139, 92, 246, 0.22);
+  border-color: rgba(139, 92, 246, 0.45);
+  color: #f5f3ff;
+}
+
+.tag-category-dropdown-item.already-added {
+  opacity: 0.55;
+}
+
+.tag-category-dropdown-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-category-dropdown-meta {
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6rem;
+  color: rgba(196, 181, 253, 0.88);
+}
+
+.tag-category-dropdown-empty {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.64rem;
+  color: rgba(148, 163, 184, 0.8);
+  padding: 0.3rem 0.4rem;
 }
 
 .tag-db-query-panel {
