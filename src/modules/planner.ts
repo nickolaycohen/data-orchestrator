@@ -3771,10 +3771,16 @@ function renderResolveDisjointAssets(): void {
         a.media_type === 'video'
           ? `<span class="badge badge-xs badge-purple font-mono">VIDEO${a.duration ? ` ${formatDuration(a.duration)}` : ''}</span>`
           : '<span class="badge badge-xs badge-blue font-mono">PHOTO</span>';
+      const dupTip = a.is_duplicate_copy
+        ? `Duplicate of ${a.duplicate_keeper_filename || 'another asset'}${a.duplicate_keeper_moment ? ` in "${a.duplicate_keeper_moment}"` : ''} (${a.duplicate_match_tier || 'Match'}${a.duplicate_similarity_pct ? ` · ${a.duplicate_similarity_pct}%` : ''}) — unchecked by default`
+        : '';
+      const dupBadge = a.is_duplicate_copy
+        ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(dupTip)}">♻️ Dup Copy</span>`
+        : '';
       const sizeStr = a.file_size_bytes ? ` · ${formatBytes(a.file_size_bytes)}` : '';
       const dateStr = a.date_created_utc ? a.date_created_utc.slice(0, 10) : a.month || '';
       return `
-        <div class="publish-asset-row">
+        <div class="publish-asset-row${a.is_duplicate_copy ? ' is-dup-copy' : ''}" ${dupTip ? `title="${escapeHtml(dupTip)}"` : ''}>
           <div class="publish-asset-left">
             <input type="checkbox" class="resolve-disjoint-asset-cb" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer;" />
             <button type="button" class="disjoint-row-thumb-btn btn-preview-disjoint-modal-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="Open full preview" style="width: 40px; height: 40px;">
@@ -3787,6 +3793,7 @@ function renderResolveDisjointAssets(): void {
               <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
                 ${qualBadge}
                 ${typeBadge}
+                ${dupBadge}
                 <span class="font-mono text-amber" style="font-size: 0.69rem;">Score ${a.score_normalized.toFixed(4)}</span>
                 <span class="font-mono text-muted" style="font-size: 0.68rem;">${escapeHtml(dateStr)}${escapeHtml(sizeStr)}</span>
               </div>
@@ -4076,11 +4083,13 @@ async function openCandidateMomentPreview(momentName: string): Promise<void> {
     if (existingCombined) {
       existingCombined.assetIds.forEach(id => previewedCandidateSelectedIds.add(id));
     } else {
-      assets.forEach(a => previewedCandidateSelectedIds.add(a.asset_id));
+      const nonDups = assets.filter(a => !a.is_duplicate_copy);
+      (nonDups.length ? nonDups : assets).forEach(a => previewedCandidateSelectedIds.add(a.asset_id));
     }
 
     const qualCnt = assets.filter(a => a.qualified).length;
-    titleEl.textContent = `📂 "${momentName}" · ${assets.length} asset(s) (${qualCnt} qualified)`;
+    const candDupCnt = assets.filter(a => a.is_duplicate_copy).length;
+    titleEl.textContent = `📂 "${momentName}" · ${assets.length} asset(s) (${qualCnt} qualified${candDupCnt > 0 ? ` · ♻️ ${candDupCnt} dup unchecked` : ''})`;
 
     const cached = candidateTagsCache.get(momentName);
     candidateTagState.tagDbCounts = data.tag_db_counts || sourceTagState.tagDbCounts || {};
@@ -4120,23 +4129,30 @@ async function openCandidateMomentPreview(momentName: string): Promise<void> {
         duration_sec: a.duration || 0,
         width: a.width || 0,
         height: a.height || 0,
-        fps: 0
+        fps: 0,
+        is_duplicate_copy: Boolean(a.is_duplicate_copy)
       });
     });
 
     gridEl.innerHTML = assets
       .map(a => {
         const checked = previewedCandidateSelectedIds.has(a.asset_id);
+        const dupTip = a.is_duplicate_copy
+          ? ` · ♻️ Dup of ${a.duplicate_keeper_filename || 'keeper'}${a.duplicate_keeper_moment ? ` (${a.duplicate_keeper_moment})` : ''}`
+          : '';
+        const dupTag = a.is_duplicate_copy
+          ? `<span class="badge badge-xs badge-amber font-mono" style="font-size: 0.56rem; margin-left: 0.25rem;" title="${escapeHtml(dupTip)}">♻️ Dup</span>`
+          : '';
         return `
-          <div class="tag-db-asset-card" title="${escapeHtml(a.original_filename)} · Score ${a.score_normalized.toFixed(4)}">
+          <div class="tag-db-asset-card${a.is_duplicate_copy ? ' is-dup-copy' : ''}" title="${escapeHtml(a.original_filename)} · Score ${a.score_normalized.toFixed(4)}${escapeHtml(dupTip)}">
             <input type="checkbox" class="candidate-preview-cb" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer; flex-shrink: 0;" />
             <img class="tag-db-asset-thumb btn-preview-cand-asset" data-asset-id="${escapeHtml(a.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
             <div class="btn-preview-cand-asset" data-asset-id="${escapeHtml(a.asset_id)}" style="min-width: 0; flex: 1;">
               <div class="font-mono" style="font-size: 0.68rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                 ${escapeHtml(a.original_filename)}
               </div>
-              <div class="font-mono text-muted" style="font-size: 0.62rem;">
-                ${a.qualified ? '★ ' : ''}${a.score_normalized.toFixed(4)} · ${escapeHtml((a.date_created_utc || '').slice(0, 10))}
+              <div class="font-mono text-muted" style="font-size: 0.62rem; display: flex; align-items: center; gap: 0.2rem; flex-wrap: wrap;">
+                <span>${a.qualified ? '★ ' : ''}${a.score_normalized.toFixed(4)} · ${escapeHtml((a.date_created_utc || '').slice(0, 10))}</span>${dupTag}
               </div>
             </div>
           </div>
@@ -4773,7 +4789,7 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
     resolveDisjointAssets = assets;
     const histMinVal = data.historical_min ?? 0.5315;
     assets.forEach(a => {
-      if (a.qualified) resolveDisjointSelectedIds.add(a.asset_id);
+      if (a.qualified && !a.is_duplicate_copy) resolveDisjointSelectedIds.add(a.asset_id);
       const sizeBytes = a.file_size_bytes || 0;
       candidateAssetMeta.set(a.asset_id, {
         asset_id: a.asset_id,
@@ -4794,11 +4810,13 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
         duration_sec: a.duration || 0,
         width: a.width || 0,
         height: a.height || 0,
-        fps: 0
+        fps: 0,
+        is_duplicate_copy: Boolean(a.is_duplicate_copy)
       });
     });
     if (resolveDisjointSelectedIds.size === 0) {
-      assets.forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
+      const nonDups = assets.filter(a => !a.is_duplicate_copy);
+      (nonDups.length ? nonDups : assets).forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
     }
 
     const qualCount = assets.filter(a => a.qualified).length;
@@ -4973,6 +4991,23 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction): void {
     }
 
     noteEl.innerHTML = '✅ Already-present assets in the destination folder will be skipped automatically — no duplicate photos will be added.';
+    const previewPanelOpen =
+      previewedCandidateMomentName &&
+      previewedCandidateMomentName.toLowerCase() !== resolveDisjointMomentName.toLowerCase() &&
+      !combinedExtraMoments.has(previewedCandidateMomentName) &&
+      document.getElementById('resolve-disjoint-candidate-preview-panel')?.style.display !== 'none';
+    if (action === 'merge_new' && previewPanelOpen) {
+      const previewSelCnt =
+        previewedCandidateSelectedIds.size > 0
+          ? previewedCandidateSelectedIds.size
+          : previewedCandidateAssets.length;
+      noteEl.innerHTML = `
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; width: 100%;">
+          <span style="color: #fde68a;">⚠️ You are previewing <code>${escapeHtml(previewedCandidateMomentName)}</code> (${previewSelCnt} asset(s)), which hasn't been added to Sources yet.</span>
+          <button type="button" class="btn btn-xs btn-purple" id="btn-confirm-include-previewed">➕ Include "${escapeHtml(previewedCandidateMomentName)}" Now</button>
+        </div>
+      `;
+    }
     proceedBtn.className = 'btn btn-purple';
     proceedBtn.textContent = existingInfo.exists ? '➕ Confirm & Add Missing Assets' : '✨ Confirm & Merge Moment';
   } else if (action === 'skip_publishing') {
@@ -5000,6 +5035,10 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction): void {
   }
 
   stepsEl.innerHTML = stepsHtml.map(s => `<li>${s}</li>`).join('');
+  document.getElementById('btn-confirm-include-previewed')?.addEventListener('click', () => {
+    document.getElementById('btn-candidate-add-combine')?.click();
+    openResolveActionConfirmDialog(action);
+  });
   pendingResolveConfirmAction = action;
   modal.classList.add('open');
 }

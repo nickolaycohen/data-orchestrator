@@ -11,7 +11,7 @@ import subprocess
 import sqlite3
 from typing import Optional
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import calendar
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
@@ -3768,25 +3768,33 @@ _intake_dedup_cache = {
 }
 
 
+def _load_dedup_module():
+    """Dynamically load dedup_unassigned_moments helper module without duplicating dedup/pHash logic."""
+    scripts_dir = REPOS["media-organizer-pipeline"] / "scripts"
+    script_path = scripts_dir / "dedup_unassigned_moments.py"
+    if not script_path.exists():
+        return None
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("dedup_unassigned_moments", script_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _get_intake_duplicate_ids(force: bool = False) -> set[str]:
     """Computes duplicate unassigned asset IDs via Media-Intake dedup (cached 5m) instead of Photos Merge."""
     now = time.time()
     if not force and (now - _intake_dedup_cache["timestamp"] < 300.0) and _intake_dedup_cache["dup_ids"]:
         return set(_intake_dedup_cache["dup_ids"])
-    scripts_dir = REPOS["media-organizer-pipeline"] / "scripts"
-    script_path = scripts_dir / "dedup_unassigned_moments.py"
-    if not script_path.exists():
-        return set(_intake_dedup_cache["dup_ids"])
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
     try:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("dedup_unassigned_moments", script_path)
-        if spec is None or spec.loader is None:
+        mod = _load_dedup_module()
+        if mod is None:
             return set(_intake_dedup_cache["dup_ids"])
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
         res = mod.analyze_unassigned_duplicates(db_path=str(MEDIA_DB_PATH), use_phash=True)
         dup_ids = {d["duplicate_asset_id"] for d in res.get("duplicates", [])}
         _intake_dedup_cache["timestamp"] = now
@@ -3794,6 +3802,243 @@ def _get_intake_duplicate_ids(force: bool = False) -> set[str]:
         return set(dup_ids)
     except Exception:
         return set(_intake_dedup_cache["dup_ids"])
+
+
+def _detect_duplicates_for_asset_list(
+    conn: sqlite3.Connection,
+    cur: sqlite3.Cursor,
+    asset_ids: list[str],
+    target_threshold: float,
+    excluded_aids: set[str],
+    use_phash: bool = True,
+) -> dict[str, dict]:
+    """Run Media-Intake tier matching (Exact Byte, Same Name+Time, pHash) for a Moment's asset list."""
+    target_set = {aid for aid in asset_ids if aid and aid not in excluded_aids}
+    if not target_set:
+        return {}
+    try:
+        mod = _load_dedup_module()
+    except Exception:
+        return {}
+    if mod is None:
+        return {}
+
+    try:
+        mod.ensure_phash_cache_table(conn)
+        ph_t = ",".join("?" for _ in target_set)
+        dt_rows = cur.execute(
+            f"""
+            SELECT datetime(za.ZDATECREATED + 978307200, 'unixepoch')
+            FROM ZASSET za
+            WHERE za.ZUUID IN ({ph_t}) AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+            """,
+            tuple(sorted(target_set)),
+        ).fetchall()
+        cand_dates: set[str] = set()
+        for (dt_s,) in dt_rows:
+            if dt_s and len(dt_s) >= 10:
+                try:
+                    dt_b = datetime.strptime(dt_s[:10], "%Y-%m-%d")
+                    for delta in (-1, 0, 1):
+                        cand_dates.add((dt_b + timedelta(days=delta)).strftime("%Y-%m-%d"))
+                except ValueError:
+                    pass
+        if not cand_dates:
+            return {}
+
+        date_list = sorted(cand_dates)
+        ph_d = ",".join("?" for _ in date_list)
+        pool_rows = cur.execute(
+            f"""
+            SELECT za.ZUUID,
+                   COALESCE(aaa.ZORIGINALFILENAME, za.ZFILENAME),
+                   datetime(za.ZDATECREATED + 978307200, 'unixepoch'),
+                   za.ZDIRECTORY,
+                   za.ZFILENAME,
+                   COALESCE(aaa.ZORIGINALFILESIZE, 0),
+                   COALESCE(za.ZKIND, 0),
+                   COALESCE(za.ZWIDTH, 0),
+                   COALESCE(za.ZHEIGHT, 0),
+                   (za.ZDATECREATED + 978307200),
+                   ast.MomentsAlbumName,
+                   COALESCE(v.score_normalized, ast.aesthetic_score, 0.0),
+                   COALESCE(ast.apple_favorite, 0),
+                   COALESCE(ast.google_favorite, 0),
+                   COALESCE(ast.month, '')
+            FROM ZASSET za
+            LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+            LEFT JOIN assets ast ON ast.asset_id = za.ZUUID
+            LEFT JOIN ranked_assets_view v ON v.asset_id = za.ZUUID
+            WHERE COALESCE(za.ZTRASHEDSTATE, 0) = 0
+              AND COALESCE(ast.removed_from_source, 0) = 0
+              AND substr(datetime(za.ZDATECREATED + 978307200, 'unixepoch'), 1, 10) IN ({ph_d})
+            """,
+            tuple(date_list),
+        ).fetchall()
+
+        pool_map: dict[str, dict] = {}
+        by_date_kind: dict[tuple[str, int], list[dict]] = {}
+        for row in pool_rows:
+            aid = row[0]
+            if aid in excluded_aids:
+                continue
+            fn = row[1] or row[4] or ""
+            dt = row[2] or ""
+            info = {
+                "asset_id": aid,
+                "filename": fn,
+                "date_utc": dt,
+                "ymd": dt[:10] if len(dt) >= 10 else "",
+                "zdir": row[3] or "",
+                "zfilename": row[4] or "",
+                "size": int(row[5] or 0),
+                "kind": int(row[6] or 0),
+                "width": int(row[7] or 0),
+                "height": int(row[8] or 0),
+                "unix_ts": float(row[9] or 0.0),
+                "moment": row[10] or "",
+                "score": float(row[11] or 0.0),
+                "apple_favorite": int(row[12] or 0),
+                "google_favorite": int(row[13] or 0),
+                "month": row[14] or (dt[:7] if len(dt) >= 7 else ""),
+                "stem": mod.normalize_filename_stem(fn),
+                "ext": os.path.splitext(fn.lower())[1].lstrip("."),
+            }
+            pool_map[aid] = info
+            if info["ymd"]:
+                by_date_kind.setdefault((info["ymd"], info["kind"]), []).append(info)
+
+        cached_hashes_db = {
+            r[0]: r[1]
+            for r in cur.execute("SELECT asset_id, phash FROM asset_phash_cache WHERE phash IS NOT NULL").fetchall()
+        }
+        hash_int_cache: dict[str, Optional[int]] = {}
+        new_hashes_to_persist: list[tuple[str, str, int, str]] = []
+        allow_live_phash = len(target_set) <= 10
+
+        def _get_phash_int(info: dict) -> Optional[int]:
+            a_id = info["asset_id"]
+            if a_id in hash_int_cache:
+                return hash_int_cache[a_id]
+            if a_id in cached_hashes_db:
+                try:
+                    val = int(cached_hashes_db[a_id], 16)
+                    hash_int_cache[a_id] = val
+                    return val
+                except Exception:
+                    pass
+            if allow_live_phash and getattr(mod, "HAS_IMAGEHASH", False):
+                _, h_hex = mod.compute_asset_phash(a_id, info["zdir"], info["zfilename"])
+                if h_hex:
+                    new_hashes_to_persist.append((a_id, info["zfilename"], info["size"], h_hex))
+                    try:
+                        val = int(h_hex, 16)
+                        hash_int_cache[a_id] = val
+                        return val
+                    except Exception:
+                        pass
+            hash_int_cache[a_id] = None
+            return None
+
+        uf = mod._UnionFind(pool_map.keys())
+        edge_meta: dict[tuple[str, str], dict] = {}
+
+        def _record(a_id: str, b_id: str, tier: str, dist: int, sim: float) -> None:
+            uf.union(a_id, b_id)
+            key = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+            prev = edge_meta.get(key)
+            if not prev or sim > prev["similarity_pct"] or (sim == prev["similarity_pct"] and dist < prev["hamming_distance"]):
+                edge_meta[key] = {
+                    "match_tier": tier,
+                    "hamming_distance": dist,
+                    "similarity_pct": round(sim, 2),
+                }
+
+        for aid in sorted(target_set):
+            me = pool_map.get(aid)
+            if not me or not me["ymd"]:
+                continue
+            try:
+                base_dt = datetime.strptime(me["ymd"], "%Y-%m-%d")
+            except ValueError:
+                continue
+            cands = []
+            for delta in (-1, 0, 1):
+                d_str = (base_dt + timedelta(days=delta)).strftime("%Y-%m-%d")
+                cands.extend(by_date_kind.get((d_str, me["kind"]), []))
+
+            matched_meta = False
+            for c in cands:
+                cid = c["asset_id"]
+                if cid == aid:
+                    continue
+                dt_diff = abs(c["unix_ts"] - me["unix_ts"])
+                if dt_diff > 86400:
+                    continue
+                if me["size"] > 0 and c["size"] == me["size"] and (me["stem"] == c["stem"] or dt_diff <= 2.0):
+                    _record(aid, cid, "Tier 1: Exact Byte+Date", 0, 100.0)
+                    matched_meta = True
+                elif me["size"] > 0 and c["size"] == me["size"] and me["ext"] == c["ext"]:
+                    _record(aid, cid, "Tier 1: Exact Byte+Date", 0, 100.0)
+                    matched_meta = True
+                elif me["stem"] and c["stem"] == me["stem"] and dt_diff <= 10.0:
+                    tier = "Tier 2: Same Name+Time" if me["ext"] == c["ext"] else "Tier 2: Format/Quality Pair"
+                    sim = 99.5 if me["ext"] == c["ext"] else 99.0
+                    _record(aid, cid, tier, 0, sim)
+                    matched_meta = True
+
+            if use_phash and me["kind"] == 0 and not matched_meta and (getattr(mod, "HAS_IMAGEHASH", False) or cached_hashes_db):
+                my_h = _get_phash_int(me)
+                if my_h is not None:
+                    near_cands = sorted(
+                        [c for c in cands if c["asset_id"] != aid and abs(c["unix_ts"] - me["unix_ts"]) <= 86400],
+                        key=lambda x: abs(x["unix_ts"] - me["unix_ts"]),
+                    )[:40]
+                    for c in near_cands:
+                        ch = _get_phash_int(c)
+                        if ch is None:
+                            continue
+                        dist = (my_h ^ ch).bit_count()
+                        if dist <= getattr(mod, "PHASH_MAX_HAMMING_DIST", 6):
+                            sim = max(0.0, 1.0 - (dist / 64.0)) * 100.0
+                            _record(aid, c["asset_id"], "Tier 2.5: Visual pHash", dist, sim)
+
+        if new_hashes_to_persist:
+            cur.executemany(
+                """
+                INSERT OR REPLACE INTO asset_phash_cache (asset_id, zfilename, file_size, phash)
+                VALUES (?, ?, ?, ?)
+                """,
+                new_hashes_to_persist,
+            )
+
+        components: dict[str, list[dict]] = {}
+        for aid, info in pool_map.items():
+            components.setdefault(uf.find(aid), []).append(info)
+
+        dup_map: dict[str, dict] = {}
+        for _root, members in components.items():
+            if len(members) < 2 or not any(m["asset_id"] in target_set for m in members):
+                continue
+            keeper = mod.select_keeper_for_group(members, target_threshold)
+            keeper_id = keeper["asset_id"]
+            for m in members:
+                mid = m["asset_id"]
+                if mid == keeper_id or mid not in target_set:
+                    continue
+                ek = (mid, keeper_id) if mid < keeper_id else (keeper_id, mid)
+                em = edge_meta.get(ek) or {"match_tier": "Moment Duplicate", "hamming_distance": 0, "similarity_pct": 98.0}
+                dup_map[mid] = {
+                    "is_duplicate_copy": True,
+                    "duplicate_keeper_id": keeper_id,
+                    "duplicate_keeper_filename": keeper["filename"],
+                    "duplicate_keeper_moment": keeper["moment"],
+                    "duplicate_match_tier": em["match_tier"],
+                    "duplicate_similarity_pct": em["similarity_pct"],
+                }
+        return dup_map
+    except Exception:
+        return {}
 
 
 def _get_pipeline_python_and_dedup_script() -> tuple[str, Path]:
@@ -5758,6 +6003,23 @@ def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Opt
             }
         )
 
+    dup_map = _detect_duplicates_for_asset_list(
+        cur.connection,
+        cur,
+        [a["asset_id"] for a in assets_out],
+        hist_min_raw,
+        excluded_aids,
+    )
+    for a_obj in assets_out:
+        d_info = dup_map.get(a_obj["asset_id"])
+        a_obj["is_duplicate_copy"] = bool(d_info)
+        if d_info:
+            a_obj["duplicate_keeper_id"] = d_info["duplicate_keeper_id"]
+            a_obj["duplicate_keeper_filename"] = d_info["duplicate_keeper_filename"]
+            a_obj["duplicate_keeper_moment"] = d_info["duplicate_keeper_moment"]
+            a_obj["duplicate_match_tier"] = d_info["duplicate_match_tier"]
+            a_obj["duplicate_similarity_pct"] = d_info["duplicate_similarity_pct"]
+
     cur.execute(
         """
         SELECT parent_folder_name, asset_count, full_path
@@ -6863,7 +7125,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                             seen_db.add(aid)
                             merge_db_ids.append(aid)
 
-            for aid in merge_db_ids:
+            for aid in combined_asset_ids:
                 _insert_album_asset_row_if_missing(cur, tgt_pk, aid)
             cur.execute(
                 "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",

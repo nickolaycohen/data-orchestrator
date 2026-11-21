@@ -466,6 +466,12 @@ export interface DisjointDetailAsset {
   camera_model: string;
   primary_owner: string;
   qualified: boolean;
+  is_duplicate_copy?: boolean;
+  duplicate_keeper_id?: string;
+  duplicate_keeper_filename?: string;
+  duplicate_keeper_moment?: string;
+  duplicate_match_tier?: string;
+  duplicate_similarity_pct?: number;
 }
 
 export interface MomentTagItem {
