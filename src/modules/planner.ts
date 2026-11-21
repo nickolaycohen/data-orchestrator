@@ -112,6 +112,21 @@ const previewedCandidateSelectedIds = new Set<string>();
 let nearbyMomentCandidatesList: Array<{ moment_name: string; qualified_count: number; rel_label: string; is_suggested: boolean }> = [];
 let displayedCandidateMomentsList: Array<{ moment_name: string; qualified_count: number; total_count?: number; rel_label: string; is_suggested?: boolean }> = [];
 let momentSearchTimer: number | null = null;
+let lastAutoSyncedTargetName = '';
+let targetNameManuallyEdited = false;
+
+function applyTargetMomentName(name: string, manualOverride: boolean): void {
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  if (targetInp) {
+    targetInp.value = name;
+  }
+  targetNameManuallyEdited = manualOverride;
+  if (!manualOverride) {
+    lastAutoSyncedTargetName = name;
+  }
+  updateResolveDisjointTargetPreview();
+  updateSingleAssetWarningVisibility();
+}
 
 function createEmptyTaggingState(
   mountId: string,
@@ -138,11 +153,8 @@ function createEmptyTaggingState(
     getSelectedAssetIds,
     onTagsChanged: () => renderPropagateTagsPreview(),
     onUseForName: (composedName: string) => {
-      const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
-      if (targetInp && composedName) {
-        targetInp.value = composedName;
-        updateResolveDisjointTargetPreview();
-        updateSingleAssetWarningVisibility();
+      if (composedName) {
+        applyTargetMomentName(composedName, false);
       }
     }
   };
@@ -154,6 +166,17 @@ const sourceTagState: TaggingEngineState = createEmptyTaggingState(
   false,
   () => Array.from(resolveDisjointSelectedIds)
 );
+sourceTagState.onTagsChanged = () => {
+  renderPropagateTagsPreview();
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  const curVal = (targetInp?.value || '').trim();
+  if (!targetNameManuallyEdited || curVal === '' || curVal === lastAutoSyncedTargetName) {
+    const composed = composeMomentNameFromTags(sourceTagState.tags, resolveDisjointMomentName);
+    if (composed) {
+      applyTargetMomentName(composed, false);
+    }
+  }
+};
 
 const candidateTagState: TaggingEngineState = createEmptyTaggingState(
   'resolve-disjoint-candidate-tagging-mount',
@@ -644,7 +667,9 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       closeResolveDisjointModal();
     }
   });
-  document.getElementById('resolve-disjoint-target-input')?.addEventListener('input', () => {
+  document.getElementById('resolve-disjoint-target-input')?.addEventListener('input', (e) => {
+    const curVal = ((e.target as HTMLInputElement)?.value || '').trim();
+    targetNameManuallyEdited = curVal !== '' && curVal !== lastAutoSyncedTargetName;
     updateResolveDisjointTargetPreview();
     updateSingleAssetWarningVisibility();
   });
@@ -710,12 +735,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   });
   document.getElementById('btn-candidate-use-legacy-target')?.addEventListener('click', () => {
     if (!previewedCandidateMomentName) return;
-    const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
-    if (targetInp) {
-      targetInp.value = previewedCandidateMomentName;
-      updateResolveDisjointTargetPreview();
-      updateSingleAssetWarningVisibility();
-    }
+    applyTargetMomentName(previewedCandidateMomentName, true);
   });
 
   // Grouping Rules Panel toggle & reset
@@ -4388,11 +4408,8 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
   mountEl.querySelectorAll<HTMLButtonElement>('.btn-query-fill-moment').forEach(btn => {
     btn.addEventListener('click', () => {
       const targetName = btn.dataset.tagMoment || '';
-      const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
-      if (targetInp && targetName && targetName.toLowerCase() !== resolveDisjointMomentName.toLowerCase()) {
-        targetInp.value = targetName;
-        updateResolveDisjointTargetPreview();
-        updateSingleAssetWarningVisibility();
+      if (targetName && targetName.toLowerCase() !== resolveDisjointMomentName.toLowerCase()) {
+        applyTargetMomentName(targetName, true);
       }
     });
   });
@@ -4581,6 +4598,8 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   previewedCandidateSelectedIds.clear();
   nearbyMomentCandidatesList = [];
   displayedCandidateMomentsList = [];
+  lastAutoSyncedTargetName = '';
+  targetNameManuallyEdited = false;
   setResolveDisjointCompletedState(false);
 
   const modal = document.getElementById('modal-resolve-disjoint');
@@ -4712,8 +4731,8 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
 
     const defaultNewName = composeMomentNameFromTags(sourceTagState.tags, momentName);
     const effectiveDefault = defaultNewName || data.suggested_target || suggestedTarget || '';
-    if (targetInp && effectiveDefault) {
-      targetInp.value = effectiveDefault;
+    if (effectiveDefault) {
+      applyTargetMomentName(effectiveDefault, false);
     }
 
     nearbyMomentCandidatesList = data.nearby_candidates || [];
