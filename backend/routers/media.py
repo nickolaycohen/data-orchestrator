@@ -5324,11 +5324,42 @@ def _build_moment_name_suggestion(
     head = " ".join(parts).strip() or moment_name
     suggested_name = f"{head} - {when_str}" if when_str else head
 
+    # Optional Family Member cues (default excluded from Moment name, recorded in DB tags)
+    family_pool = ["Niki", "Milena", "Roberto", "Eva", "Benny"]
+    family_map = {
+        "niki": "Niki",
+        "nickolay": "Niki",
+        "nickolay c.": "Niki",
+        "milena": "Milena",
+        "roberto": "Roberto",
+        "eva": "Eva",
+        "benny": "Benny",
+    }
+    detected_family: list[str] = []
+    seen_fam: set[str] = set()
+    for src_val in [
+        *(p.get("short_name", "") for p in people_objs),
+        *(p.get("name", "") for p in people_objs),
+        *(a.get("primary_owner", "") for a in assets_out),
+    ]:
+        tok = (src_val or "").strip().lower()
+        first_tok = tok.split()[0] if tok else ""
+        mapped = family_map.get(tok) or family_map.get(first_tok)
+        if mapped and mapped.lower() not in seen_fam:
+            seen_fam.add(mapped.lower())
+            detected_family.append(mapped)
+    for k, canonical in family_map.items():
+        if k in moment_name.lower() and canonical.lower() not in seen_fam:
+            seen_fam.add(canonical.lower())
+            detected_family.append(canonical)
+
     return {
         "activity": activity,
         "location": location,
         "people": people_str,
         "when": when_str,
+        "family_members": detected_family,
+        "family_member_pool": family_pool,
         "suggested_name": suggested_name,
         "location_candidates": location_candidates[:6],
         "people_candidates": people_objs[:8],
@@ -5647,7 +5678,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
     if not m_name:
         return {"ok": False, "error": "moment_name is required"}
 
-    valid_cats = {"activity", "location", "people", "when"}
+    valid_cats = {"activity", "location", "people", "when", "family_member"}
     clean_tags: list[dict] = []
     seen_pairs: set[tuple[str, str]] = set()
     for t in req.tags or []:

@@ -469,7 +469,7 @@ export interface DisjointDetailAsset {
 }
 
 export interface MomentTagItem {
-  category: 'activity' | 'location' | 'people' | 'when';
+  category: 'activity' | 'location' | 'people' | 'when' | 'family_member';
   tag_value: string;
   include_in_name: boolean;
   tagged_asset_count?: number;
@@ -491,6 +491,8 @@ export interface DisjointNameSuggestion {
   location: string;
   people: string;
   when: string;
+  family_members?: string[];
+  family_member_pool?: string[];
   suggested_name: string;
   location_candidates?: string[];
   people_candidates?: Array<{ name: string; short_name: string; count: number }>;

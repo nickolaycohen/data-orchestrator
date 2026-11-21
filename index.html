@@ -2181,7 +2181,7 @@
 
       <!-- Modal: Resolve Disjoint Moment -->
       <div class="modal-backdrop" id="modal-resolve-disjoint">
-        <div class="modal-dialog" style="max-width: 780px; width: 94vw; max-height: 90vh; display: flex; flex-direction: column;">
+        <div class="modal-dialog" style="max-width: 880px; width: 95vw; max-height: 90vh; display: flex; flex-direction: column;">
           <div class="modal-header">
             <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
               <h3 style="margin: 0; font-size: 1.05rem;" id="resolve-disjoint-modal-title">🔀 Resolve Disjoint Moment</h3>
@@ -2247,6 +2247,18 @@
                   <div class="tag-add-row">
                     <input type="text" id="resolve-disjoint-add-when" class="form-control tag-add-input" placeholder="+ add when" />
                     <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="when">+</button>
+                  </div>
+                </div>
+                <div class="tag-category-col tag-category-optional" data-tag-cat="family_member">
+                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: flex; align-items: center; justify-content: space-between; gap: 0.25rem; margin-bottom: 0.25rem;">
+                    <span>Family Member</span>
+                    <span style="font-size: 0.57rem; opacity: 0.78;">opt · DB only</span>
+                  </label>
+                  <div class="tag-pills-list" id="resolve-disjoint-pills-family_member"></div>
+                  <div class="disjoint-mini-chips" id="resolve-disjoint-family-quick-chips"></div>
+                  <div class="tag-add-row">
+                    <input type="text" id="resolve-disjoint-add-family_member" class="form-control tag-add-input" placeholder="+ add family" />
+                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="family_member">+</button>
                   </div>
                 </div>
               </div>

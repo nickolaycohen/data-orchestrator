@@ -78,6 +78,7 @@ const resolveDisjointSelectedIds = new Set<string>();
 let isSubmittingResolveDisjoint = false;
 let resolveDisjointCompleted = false;
 let currentMomentTags: MomentTagItem[] = [];
+let familyMemberPool: string[] = ['Niki', 'Milena', 'Roberto', 'Eva', 'Benny'];
 let tagDbCountsMap: Record<string, { assets: number; moments: number }> = {};
 let activeQueriedTagKey = '';
 let isSavingMomentTags = false;
@@ -547,18 +548,18 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       const inp = document.getElementById(`resolve-disjoint-add-${cat}`) as HTMLInputElement | null;
       const val = (inp?.value || '').trim();
       if (!val) return;
-      addMomentTagPill(cat, val, true);
+      addMomentTagPill(cat, val, cat !== 'family_member');
       if (inp) inp.value = '';
     });
   });
-  (['activity', 'location', 'people', 'when'] as MomentTagItem['category'][]).forEach(cat => {
+  (['activity', 'location', 'people', 'when', 'family_member'] as MomentTagItem['category'][]).forEach(cat => {
     document.getElementById(`resolve-disjoint-add-${cat}`)?.addEventListener('keydown', (e) => {
       if ((e as KeyboardEvent).key === 'Enter') {
         e.preventDefault();
         const inp = e.target as HTMLInputElement;
         const val = (inp?.value || '').trim();
         if (!val) return;
-        addMomentTagPill(cat, val, true);
+        addMomentTagPill(cat, val, cat !== 'family_member');
         inp.value = '';
       }
     });
@@ -3643,6 +3644,7 @@ function composeResolveDisjointSuggestedName(): string {
   const picked = (cat: MomentTagItem['category']): string[] =>
     currentMomentTags.filter(t => t.category === cat && t.include_in_name).map(t => t.tag_value);
 
+  const fam = picked('family_member').join(' & ');
   const act = picked('activity').join(' & ');
   const loc = picked('location').join(', ');
   const ppl = picked('people').join(', ');
@@ -3652,7 +3654,8 @@ function composeResolveDisjointSuggestedName(): string {
   if (act) parts.push(act);
   if (loc) parts.push(act ? `at ${loc}` : loc);
   if (ppl) parts.push(`with ${ppl}`);
-  const head = parts.join(' ').trim();
+  const body = parts.join(' ').trim();
+  const head = fam && body ? `${fam} — ${body}` : fam || body;
   if (!head) return when || resolveDisjointMomentName;
   return when ? `${head} - ${when}` : head;
 }
@@ -3684,68 +3687,92 @@ function addMomentTagPill(category: MomentTagItem['category'], rawValue: string,
 }
 
 function renderMomentTagPills(): void {
-  const cats: MomentTagItem['category'][] = ['activity', 'location', 'people', 'when'];
+  const cats: MomentTagItem['category'][] = ['activity', 'location', 'people', 'when', 'family_member'];
   cats.forEach(cat => {
     const container = document.getElementById(`resolve-disjoint-pills-${cat}`);
     if (!container) return;
     const catTags = currentMomentTags.filter(t => t.category === cat);
     if (!catTags.length) {
-      container.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.64rem; opacity: 0.7;">No tags</span>';
-      return;
+      container.innerHTML =
+        cat === 'family_member'
+          ? '<span class="text-muted font-mono" style="font-size: 0.64rem; opacity: 0.7;">Optional</span>'
+          : '<span class="text-muted font-mono" style="font-size: 0.64rem; opacity: 0.7;">No tags</span>';
+    } else {
+      container.innerHTML = catTags
+        .map(tag => {
+          const dbStat = tagDbCountsMap[tag.tag_value.toLowerCase()];
+          const dbCount = dbStat?.assets ?? tag.tagged_asset_count ?? 0;
+          const dbBadge = dbCount > 0 ? `<span class="tag-pill-db-count">${dbCount} DB</span>` : '';
+          const queryKey = `${cat}:${tag.tag_value.toLowerCase()}`;
+          const isActive = activeQueriedTagKey === queryKey;
+          return `
+            <span class="tag-pill-card${tag.include_in_name ? ' included' : ''}${isActive ? ' active-query' : ''}">
+              <input type="checkbox" class="tag-pill-check" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" ${tag.include_in_name ? 'checked' : ''} title="Include '${escapeHtml(tag.tag_value)}' when composing folder name" />
+              <button type="button" class="tag-pill-query-btn" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" title="Query assets in DB tagged '${escapeHtml(tag.tag_value)}'">
+                <span>${escapeHtml(tag.tag_value)}</span>${dbBadge}
+              </button>
+              <button type="button" class="tag-pill-remove-btn" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" aria-label="Remove tag" title="Remove tag">×</button>
+            </span>
+          `;
+        })
+        .join('');
+
+      container.querySelectorAll<HTMLInputElement>('.tag-pill-check').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const c = cb.dataset.cat as MomentTagItem['category'];
+          const v = cb.dataset.val || '';
+          const item = currentMomentTags.find(t => t.category === c && t.tag_value === v);
+          if (item) item.include_in_name = cb.checked;
+          renderMomentTagPills();
+          updateResolveDisjointComposedHeadline();
+        });
+      });
+
+      container.querySelectorAll<HTMLButtonElement>('.tag-pill-query-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const c = (btn.dataset.cat as MomentTagItem['category']) || 'activity';
+          const v = btn.dataset.val || '';
+          if (v) void queryDbAssetsByTag(v, c);
+        });
+      });
+
+      container.querySelectorAll<HTMLButtonElement>('.tag-pill-remove-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const c = btn.dataset.cat as MomentTagItem['category'];
+          const v = btn.dataset.val || '';
+          currentMomentTags = currentMomentTags.filter(t => !(t.category === c && t.tag_value === v));
+          if (activeQueriedTagKey === `${c}:${v.toLowerCase()}`) {
+            activeQueriedTagKey = '';
+            const panel = document.getElementById('resolve-disjoint-tag-query-panel');
+            if (panel) panel.style.display = 'none';
+          }
+          renderMomentTagPills();
+          updateResolveDisjointComposedHeadline();
+        });
+      });
     }
-    container.innerHTML = catTags
-      .map(tag => {
-        const dbStat = tagDbCountsMap[tag.tag_value.toLowerCase()];
-        const dbCount = dbStat?.assets ?? tag.tagged_asset_count ?? 0;
-        const dbBadge = dbCount > 0 ? `<span class="tag-pill-db-count">${dbCount} DB</span>` : '';
-        const queryKey = `${cat}:${tag.tag_value.toLowerCase()}`;
-        const isActive = activeQueriedTagKey === queryKey;
-        return `
-          <span class="tag-pill-card${tag.include_in_name ? ' included' : ''}${isActive ? ' active-query' : ''}">
-            <input type="checkbox" class="tag-pill-check" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" ${tag.include_in_name ? 'checked' : ''} title="Include '${escapeHtml(tag.tag_value)}' when composing folder name" />
-            <button type="button" class="tag-pill-query-btn" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" title="Query assets in DB tagged '${escapeHtml(tag.tag_value)}'">
-              <span>${escapeHtml(tag.tag_value)}</span>${dbBadge}
-            </button>
-            <button type="button" class="tag-pill-remove-btn" data-cat="${cat}" data-val="${escapeHtml(tag.tag_value)}" aria-label="Remove tag" title="Remove tag">×</button>
-          </span>
-        `;
-      })
-      .join('');
-
-    container.querySelectorAll<HTMLInputElement>('.tag-pill-check').forEach(cb => {
-      cb.addEventListener('change', () => {
-        const c = cb.dataset.cat as MomentTagItem['category'];
-        const v = cb.dataset.val || '';
-        const item = currentMomentTags.find(t => t.category === c && t.tag_value === v);
-        if (item) item.include_in_name = cb.checked;
-        renderMomentTagPills();
-        updateResolveDisjointComposedHeadline();
-      });
-    });
-
-    container.querySelectorAll<HTMLButtonElement>('.tag-pill-query-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const c = (btn.dataset.cat as MomentTagItem['category']) || 'activity';
-        const v = btn.dataset.val || '';
-        if (v) void queryDbAssetsByTag(v, c);
-      });
-    });
-
-    container.querySelectorAll<HTMLButtonElement>('.tag-pill-remove-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const c = btn.dataset.cat as MomentTagItem['category'];
-        const v = btn.dataset.val || '';
-        currentMomentTags = currentMomentTags.filter(t => !(t.category === c && t.tag_value === v));
-        if (activeQueriedTagKey === `${c}:${v.toLowerCase()}`) {
-          activeQueriedTagKey = '';
-          const panel = document.getElementById('resolve-disjoint-tag-query-panel');
-          if (panel) panel.style.display = 'none';
-        }
-        renderMomentTagPills();
-        updateResolveDisjointComposedHeadline();
-      });
-    });
   });
+
+  // Render quick-add family member helper chips (added with include_in_name=false by default)
+  const famQuickEl = document.getElementById('resolve-disjoint-family-quick-chips');
+  if (famQuickEl) {
+    const presentFam = new Set(
+      currentMomentTags.filter(t => t.category === 'family_member').map(t => t.tag_value.toLowerCase())
+    );
+    const remaining = familyMemberPool.filter(f => !presentFam.has(f.toLowerCase()));
+    famQuickEl.innerHTML = remaining
+      .map(
+        f =>
+          `<button type="button" class="disjoint-mini-chip btn-quick-add-family" data-family="${escapeHtml(f)}" title="Add ${escapeHtml(f)} to Family Member tags (not added to folder name by default)">+ ${escapeHtml(f)}</button>`
+      )
+      .join('');
+    famQuickEl.querySelectorAll<HTMLButtonElement>('.btn-quick-add-family').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const f = btn.dataset.family || '';
+        if (f) addMomentTagPill('family_member', f, false);
+      });
+    });
+  }
 }
 
 async function queryDbAssetsByTag(tagValue: string, category: MomentTagItem['category']): Promise<void> {
@@ -4090,6 +4117,9 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
     const savedTags = data.saved_tags || [];
     const lastSession = data.last_tag_session;
     const sug = data.name_suggestion;
+    if (sug?.family_member_pool?.length) {
+      familyMemberPool = sug.family_member_pool;
+    }
 
     if (sessionBadgeEl) {
       if (lastSession) {
@@ -4128,6 +4158,9 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
         });
       }
       if (sug.when) addMomentTagPill('when', sug.when, true);
+      (sug.family_members || []).forEach(fm => {
+        if (fm) addMomentTagPill('family_member', fm, false);
+      });
     }
 
     renderMomentTagPills();
