@@ -5491,6 +5491,12 @@ class MomentAssetTagGroup(BaseModel):
     tags: list[SaveMomentTagItem] = []
 
 
+class DisjointDetailPostRequest(BaseModel):
+    moment_name: str
+    suggested_target: str = ""
+    asset_ids: list[str] = []
+
+
 class ResolveDisjointRequest(BaseModel):
     source_moment: str
     action: str  # "merge" | "skip_publishing" | "ignore"
@@ -5502,6 +5508,7 @@ class ResolveDisjointRequest(BaseModel):
     apply_tags: list[SaveMomentTagItem] = []
     moment_tag_groups: list[MomentAssetTagGroup] = []
     delete_source_albums: bool = True
+    is_unassigned_cluster: bool = False
 
 
 _MERGE_DISJOINT_APPLESCRIPT = r'''
@@ -5772,10 +5779,12 @@ def _build_moment_name_suggestion(
     photos_meta: dict,
 ) -> dict:
     """Synthesize a structured [Activity] [Location] [People] [When] suggestion and subfolder hint."""
-    # Strip YYYY-MM-DD / YYYY-MM / YYYY prefix from legacy album name
+    # Strip YYYY-MM-DD / YYYY-MM / YYYY prefix from legacy album or cluster name
     suffix = re.sub(r"^\d{4}(?:[-/\s]+(?:[A-Za-z]+|\d{2})(?:[-/\s]+\d{2})?)?\s*(?:[-–]\s*)?", "", moment_name).strip()
     if suffix.endswith(")") and "(" not in suffix:
         suffix = suffix[:-1].strip()
+    if re.match(r"^uncategorized\b", suffix, re.IGNORECASE) or re.match(r"^\(\d{4}-\d{2}\)$", suffix):
+        suffix = ""
 
     anchor_dt = qual_dates[len(qual_dates) // 2] if qual_dates else (_parse_utc_dt(assets_out[0]["date_created_utc"]) if assets_out else None)
     when_str = ""
@@ -5788,8 +5797,9 @@ def _build_moment_name_suggestion(
         when_str = str(assets_out[0]["month"])
 
     # Determine Activity cue from moment title & location keywords
+    effective_name_for_search = "" if re.search(r"\buncategorized\b", moment_name, re.IGNORECASE) else moment_name
     search_blob = " ".join(
-        [moment_name, suffix] + [str(pm.get("label") or "") for pm in (photos_meta.get("moments") or [])[:3]]
+        [effective_name_for_search, suffix] + [str(pm.get("label") or "") for pm in (photos_meta.get("moments") or [])[:3]]
     ).lower()
     activity = ""
     for keywords, act_label, _sf_label in _ACTIVITY_RULES:
@@ -6150,7 +6160,12 @@ class SaveMomentTagsRequest(BaseModel):
     removed_tags: list[str] = []
 
 
-def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Optional[int] = None) -> dict:
+def _load_moment_detail_core(
+    cur: sqlite3.Cursor,
+    m_name: str,
+    limit_assets: Optional[int] = None,
+    explicit_asset_ids: Optional[list[str]] = None,
+) -> dict:
     """Shared loader for Moment assets, Apple Photos metadata, name suggestions, saved DB tags, and session history."""
     _ensure_moment_tag_tables(cur)
     cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
@@ -6167,7 +6182,32 @@ def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Opt
     )
     excluded_aids = {r[0] for r in cur.fetchall()}
 
+    clean_explicit_ids: list[str] = []
+    seen_exp: set[str] = set()
+    for raw_aid in explicit_asset_ids or []:
+        s = (raw_aid or "").strip()
+        if s and s not in seen_exp:
+            seen_exp.add(s)
+            clean_explicit_ids.append(s)
+
     limit_sql = f"LIMIT {int(limit_assets)}" if limit_assets else ""
+    if clean_explicit_ids:
+        ph_exp = ",".join("?" for _ in clean_explicit_ids)
+        where_clause = f"a.asset_id IN ({ph_exp})"
+        query_params: tuple = tuple(clean_explicit_ids)
+    else:
+        where_clause = """(
+            TRIM(COALESCE(a.MomentsAlbumName, '')) = TRIM(?)
+            OR a.asset_id IN (
+                SELECT moaa.asset_id
+                FROM media_organizer_album_assets moaa
+                JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                WHERE moa.is_folder = 0
+                  AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+            )
+          )"""
+        query_params = (m_name, m_name)
+
     cur.execute(
         f"""
         SELECT DISTINCT
@@ -6191,22 +6231,13 @@ def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Opt
         LEFT JOIN device_owners do ON do.camera_model = COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device)
             AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
             AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-        WHERE (
-            TRIM(COALESCE(a.MomentsAlbumName, '')) = TRIM(?)
-            OR a.asset_id IN (
-                SELECT moaa.asset_id
-                FROM media_organizer_album_assets moaa
-                JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                WHERE moa.is_folder = 0
-                  AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
-            )
-          )
+        WHERE {where_clause}
           AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
           AND COALESCE(a.removed_from_source, 0) = 0
         ORDER BY COALESCE(v.score_normalized, 0.0) DESC, a.date_created_utc ASC
         {limit_sql}
         """,
-        (m_name, m_name),
+        query_params,
     )
     raw_assets = cur.fetchall()
     assets_out = []
@@ -6379,9 +6410,12 @@ def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Opt
     }
 
 
-@router.get("/memories/disjoint-detail")
-def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
-    """Return full asset metadata, album locations, DB tags, and chronological merge candidates for a Moment."""
+def _get_disjoint_moment_detail_impl(
+    moment_name: str,
+    suggested_target: str = "",
+    explicit_asset_ids: Optional[list[str]] = None,
+) -> dict:
+    """Return full asset metadata, album locations, DB tags, and chronological merge candidates for a Moment or unassigned group."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"ok": False, "error": "Media database unavailable"}
     m_name = (moment_name or "").strip()
@@ -6392,7 +6426,7 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
         try:
             cur = conn.cursor()
-            core = _load_moment_detail_core(cur, m_name)
+            core = _load_moment_detail_core(cur, m_name, explicit_asset_ids=explicit_asset_ids)
             hist_min_raw = core["historical_min"]
             assets_out = core["assets_out"]
             qual_dates = core["qual_dates"]
@@ -6487,6 +6521,18 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
             conn.close()
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+@router.get("/memories/disjoint-detail")
+def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
+    """Return full asset metadata, album locations, DB tags, and chronological merge candidates for a Moment."""
+    return _get_disjoint_moment_detail_impl(moment_name, suggested_target)
+
+
+@router.post("/memories/disjoint-detail")
+def get_disjoint_moment_detail_post(req: DisjointDetailPostRequest):
+    """Return tagging/consolidation metadata for an explicit list of unassigned cluster assets."""
+    return _get_disjoint_moment_detail_impl(req.moment_name, req.suggested_target, req.asset_ids)
 
 
 _VALID_MOMENT_TAG_CATS = {"activity", "location", "people", "when", "family_member"}
@@ -6970,6 +7016,10 @@ def search_moments_for_consolidation(q: str = "", exclude_moment: str = "", anch
                 ).fetchone()
                 if r_anch and r_anch[0]:
                     anchor_dt = _parse_utc_dt(r_anch[0])
+                else:
+                    m_dt_prefix = re.match(r"^(\d{4}-\d{2}-\d{2})\b", anchor)
+                    if m_dt_prefix:
+                        anchor_dt = _parse_utc_dt(m_dt_prefix.group(1) + " 12:00:00")
 
             cur.execute(
                 """
@@ -7240,7 +7290,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
             seen_moments_lc.add(sm.lower())
             add_moments.append(sm)
 
-    combined_src_moments = [src_moment, *add_moments]
+    combined_src_moments = list(add_moments) if req.is_unassigned_cluster else [src_moment, *add_moments]
     combined_asset_ids = list(clean_ids)
     seen_all_ids = set(combined_asset_ids)
     for raw_aid in req.additional_asset_ids or []:
@@ -7404,6 +7454,17 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     )
                     cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (sm,))
                     _delete_source_albums_from_db(cur, sm)
+
+            if req.is_unassigned_cluster and src_moment.lower() != target_moment.lower():
+                cur.execute(
+                    """
+                    UPDATE OR IGNORE moment_tags
+                    SET moment_name = ?, updated_at_utc = datetime('now')
+                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                    """,
+                    (target_moment, src_moment),
+                )
+                cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (src_moment,))
 
             # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
             clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)

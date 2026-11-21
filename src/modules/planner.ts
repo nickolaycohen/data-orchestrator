@@ -101,6 +101,8 @@ interface TaggingEngineState {
 }
 
 let resolveDisjointMomentName = '';
+let resolveDisjointIsUnassignedCluster = false;
+let resolveDisjointExplicitAssetIds: string[] = [];
 let resolveDisjointAssets: DisjointDetailAsset[] = [];
 const resolveDisjointSelectedIds = new Set<string>();
 let isSubmittingResolveDisjoint = false;
@@ -185,7 +187,10 @@ sourceTagState.onTagsChanged = () => {
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const curVal = (targetInp?.value || '').trim();
   if (!targetNameManuallyEdited || curVal === '' || curVal === lastAutoSyncedTargetName) {
-    const composed = composeMomentNameFromTags(sourceTagState.tags, resolveDisjointMomentName);
+    const fallback = resolveDisjointIsUnassignedCluster && /uncategorized/i.test(resolveDisjointMomentName)
+      ? ''
+      : resolveDisjointMomentName;
+    const composed = composeMomentNameFromTags(sourceTagState.tags, fallback);
     if (composed) {
       applyTargetMomentName(composed, false);
     }
@@ -2219,17 +2224,12 @@ function renderUnassignedClustersList(): void {
       if (!cluster || !selSet || !selSet.size) return;
       const selectedAssets = (cluster.assets || []).filter(a => a.asset_id && selSet.has(a.asset_id));
       const allIds = selectedAssets.map(a => a.asset_id);
-      const uniqueIds = selectedAssets.filter(a => !a.is_duplicate_copy).map(a => a.asset_id);
-      const dupCount = selectedAssets.filter(a => a.is_duplicate_copy).length;
       const toolbar = btn.closest('.cluster-split-toolbar');
       const typedName = (toolbar?.querySelector<HTMLInputElement>('.cluster-split-name-input')?.value || '').trim();
-      const prefillName = typedName && !typedName.endsWith(' -') ? typedName : '';
-      openCreateMomentModal({
-        prefillName,
-        sourceClusterFolder: folder,
-        uniqueAssetIds: uniqueIds,
-        allAssetIds: allIds,
-        duplicateCount: dupCount
+      const prefillName = typedName && !typedName.endsWith(' -') && !/uncategorized/i.test(typedName) ? typedName : '';
+      void openResolveDisjointModal(folder, prefillName, {
+        assetIds: allIds,
+        isUnassignedCluster: true
       });
     });
   });
@@ -2271,15 +2271,11 @@ function renderUnassignedClustersList(): void {
       const cluster = (plannerOverviewData?.mode_m?.unassigned_clusters || []).find(c => c.folder === folder);
       if (!cluster) return;
       const allIds = (cluster.assets || []).map(a => a.asset_id).filter(Boolean);
-      const uniqueIds = (cluster.assets || []).filter(a => a.asset_id && !a.is_duplicate_copy).map(a => a.asset_id);
       const isUncategorized = /uncategorized/i.test(cluster.folder);
       const prefillName = isUncategorized ? '' : cluster.folder;
-      openCreateMomentModal({
-        prefillName,
-        sourceClusterFolder: cluster.folder,
-        uniqueAssetIds: uniqueIds,
-        allAssetIds: allIds,
-        duplicateCount: cluster.duplicate_copy_count || 0
+      void openResolveDisjointModal(cluster.folder, prefillName, {
+        assetIds: allIds,
+        isUnassignedCluster: true
       });
     });
   });
@@ -4680,8 +4676,16 @@ function updateResolveDisjointTargetPreview(): void {
   }
 }
 
-async function openResolveDisjointModal(momentName: string, suggestedTarget = ''): Promise<void> {
+async function openResolveDisjointModal(
+  momentName: string,
+  suggestedTarget = '',
+  options?: { assetIds?: string[]; isUnassignedCluster?: boolean }
+): Promise<void> {
+  const isUnassigned = Boolean(options?.isUnassignedCluster);
+  const explicitIds = (options?.assetIds || []).map(s => (s || '').trim()).filter(Boolean);
   resolveDisjointMomentName = momentName;
+  resolveDisjointIsUnassignedCluster = isUnassigned;
+  resolveDisjointExplicitAssetIds = explicitIds;
   resolveDisjointAssets = [];
   resolveDisjointSelectedIds.clear();
   sourceTagState.momentName = momentName;
@@ -4730,10 +4734,16 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   const candPreviewEl = document.getElementById('resolve-disjoint-candidate-preview-panel');
   const statusEl = document.getElementById('resolve-disjoint-status');
 
-  if (titleEl) titleEl.textContent = `🏷️ Tag & Consolidate Moment · ${momentName}`;
+  if (titleEl) {
+    titleEl.textContent = isUnassigned
+      ? `🏷️ Tag & Consolidate Unassigned Group · ${momentName}`
+      : `🏷️ Tag & Consolidate Moment · ${momentName}`;
+  }
   if (badgeEl) badgeEl.textContent = 'loading...';
   if (summaryEl) {
-    summaryEl.innerHTML = '<div class="spinner-sm"></div><span>Inspecting Moment assets, DB tags, and consolidation candidates...</span>';
+    summaryEl.innerHTML = isUnassigned
+      ? '<div class="spinner-sm"></div><span>Inspecting unassigned group assets, duplicates, DB tags, and nearby Moment candidates...</span>'
+      : '<div class="spinner-sm"></div><span>Inspecting Moment assets, DB tags, and consolidation candidates...</span>';
   }
   if (albumsBarEl) albumsBarEl.style.display = 'none';
   if (listEl) listEl.innerHTML = '';
@@ -4757,9 +4767,22 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   modal?.classList.add('open');
 
   try {
-    const qs = new URLSearchParams({ moment_name: momentName });
-    if (suggestedTarget) qs.set('suggested_target', suggestedTarget);
-    const res = await fetch(`/api/media/memories/disjoint-detail?${qs.toString()}`);
+    let res: Response;
+    if (explicitIds.length > 0) {
+      res = await fetch('/api/media/memories/disjoint-detail', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          moment_name: momentName,
+          suggested_target: suggestedTarget,
+          asset_ids: explicitIds
+        })
+      });
+    } else {
+      const qs = new URLSearchParams({ moment_name: momentName });
+      if (suggestedTarget) qs.set('suggested_target', suggestedTarget);
+      res = await fetch(`/api/media/memories/disjoint-detail?${qs.toString()}`);
+    }
     const data: DisjointDetailResponse = await res.json();
     if (!res.ok || !data.ok) {
       if (summaryEl) {
@@ -4809,13 +4832,21 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
       badgeEl.textContent = `${qualCount} qualified · ${assets.length} total`;
     }
     if (summaryEl) {
-      summaryEl.innerHTML = `
-        <span>
-          <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
-          ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s) inside Apple Photos albums` : ''}.
-          Tag independently in DB, click any existing Moment pill to preview &amp; tag its assets identically, or consolidate into a New Format Moment.
-        </span>
-      `;
+      summaryEl.innerHTML = isUnassigned
+        ? `
+          <span>
+            Unassigned group <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
+            ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s)` : ''}.
+            Review duplicates, tag in DB, click any existing Moment pill to preview &amp; merge, or create a New Format Moment.
+          </span>
+        `
+        : `
+          <span>
+            <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
+            ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s) inside Apple Photos albums` : ''}.
+            Tag independently in DB, click any existing Moment pill to preview &amp; tag its assets identically, or consolidate into a New Format Moment.
+          </span>
+        `;
     }
 
     sourceTagState.tagDbCounts = data.tag_db_counts || {};
@@ -4850,8 +4881,14 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
       existingTargetAlbumsMap.set(k, al.asset_count ?? 0);
     });
 
-    const defaultNewName = composeMomentNameFromTags(sourceTagState.tags, momentName);
-    const effectiveDefault = defaultNewName || data.suggested_target || suggestedTarget || '';
+    const fallbackName = isUnassigned && /uncategorized/i.test(momentName) ? '' : momentName;
+    const defaultNewName = composeMomentNameFromTags(sourceTagState.tags, fallbackName);
+    const hasCustomTypedTarget = Boolean(
+      isUnassigned && suggestedTarget && !/uncategorized/i.test(suggestedTarget) && !(data.saved_tags?.length)
+    );
+    const effectiveDefault = hasCustomTypedTarget
+      ? suggestedTarget
+      : (defaultNewName || data.suggested_target || suggestedTarget || '');
     if (effectiveDefault) {
       applyTargetMomentName(effectiveDefault, false);
     }
@@ -5004,7 +5041,10 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     );
 
     const allSourceNamesLc = new Set(
-      [resolveDisjointMomentName, ...extraEntries.map(e => e.momentName)].map(s => s.trim().toLowerCase())
+      [
+        ...(resolveDisjointIsUnassignedCluster ? [] : [resolveDisjointMomentName]),
+        ...extraEntries.map(e => e.momentName)
+      ].map(s => s.trim().toLowerCase())
     );
     const priorAlbumsToRemove = existingAlbumsList.filter(al => {
       const nmLc = (al.album_name || '').trim().toLowerCase();
@@ -5013,7 +5053,7 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
       return !(nmLc === targetMoment.toLowerCase() && parLc === resolvedParent.toLowerCase());
     });
     const deletableSources = [
-      resolveDisjointMomentName,
+      ...(resolveDisjointIsUnassignedCluster ? [] : [resolveDisjointMomentName]),
       ...extraEntries.map(e => e.momentName)
     ].filter(s => s.toLowerCase() !== targetMoment.toLowerCase());
 
@@ -5028,6 +5068,10 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
       } else if (deletableSources.length) {
         stepsHtml.push(
           `<strong>Remove prior Moment albums (once all non-duplicate assets are copied):</strong> Delete obsolete source album(s) ${deletableSources.map(s => `<code>${escapeHtml(s)}</code>`).join(', ')} in Apple Photos (across Moments/ToBeCurated/Curated) &amp; clean DB rows, even if skipped duplicate copies remain.`
+        );
+      } else if (resolveDisjointIsUnassignedCluster) {
+        stepsHtml.push(
+          `<strong>Remove group from Unassigned Clusters:</strong> Group <code>${escapeHtml(resolveDisjointMomentName)}</code> has no prior Photos album to delete; selected assets will be assigned to <code>${escapeHtml(targetMoment)}</code> and cleared from unassigned staging.`
         );
       } else {
         stepsHtml.push(
@@ -5205,7 +5249,8 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
         additional_asset_ids: additionalAssetIds,
         apply_tags: applyTags,
         moment_tag_groups: momentTagGroups,
-        delete_source_albums: Boolean(delSrcCb?.checked ?? true)
+        delete_source_albums: Boolean(delSrcCb?.checked ?? true),
+        is_unassigned_cluster: resolveDisjointIsUnassignedCluster
       })
     });
     const rawText = await res.text();
@@ -5227,6 +5272,10 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
       return;
     }
 
+    if (resolveDisjointIsUnassignedCluster) {
+      applyOptimisticClusterRemoval(new Set([...assetIds, ...additionalAssetIds]));
+      clusterAssetSelection.delete(resolveDisjointMomentName);
+    }
     await Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
     if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
 
