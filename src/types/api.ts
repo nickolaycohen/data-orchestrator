@@ -282,6 +282,8 @@ export interface PlannerModeM {
     published: string;
     action: string;
     details: string;
+    suggested_target?: string;
+    asset_ids?: string[];
   }>;
   unassigned_total_assets: number;
   unassigned_total_clusters: number;
@@ -448,6 +450,50 @@ export interface PublishMomentResponse {
     removed_folder?: boolean;
     pub_rec_dir?: string;
   };
+}
+
+export interface DisjointDetailAsset {
+  asset_id: string;
+  original_filename: string;
+  score_normalized: number;
+  date_created_utc: string;
+  month: string;
+  media_type: 'photo' | 'video';
+  duration: number;
+  width: number;
+  height: number;
+  file_size_bytes: number;
+  camera_model: string;
+  primary_owner: string;
+  qualified: boolean;
+}
+
+export interface DisjointDetailResponse {
+  ok: boolean;
+  error?: string;
+  moment_name?: string;
+  historical_min?: number;
+  suggested_target?: string;
+  assets?: DisjointDetailAsset[];
+  albums_present?: Array<{ parent: string; asset_count: number; full_path: string }>;
+  nearby_candidates?: Array<{
+    moment_name: string;
+    qualified_count: number;
+    rel_label: string;
+    is_suggested: boolean;
+  }>;
+}
+
+export interface ResolveDisjointResponse {
+  ok: boolean;
+  error?: string;
+  action?: string;
+  source_moment?: string;
+  target_moment?: string;
+  target_parent?: string;
+  photos_added?: number;
+  albums_deleted?: number;
+  db_updated?: number;
 }
 
 export type TriggerTaskFn = (

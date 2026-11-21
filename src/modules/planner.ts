@@ -5,6 +5,8 @@
 import type {
   BatchDeviceSummary,
   CreateMomentResponse,
+  DisjointDetailAsset,
+  DisjointDetailResponse,
   MemoriesFolderItem,
   MemoriesFoldersResponse,
   ModeMDedupApplyResponse,
@@ -15,7 +17,8 @@ import type {
   PlannerOverviewResponse,
   PublishMomentAssetItem,
   PublishMomentInfoResponse,
-  PublishMomentResponse
+  PublishMomentResponse,
+  ResolveDisjointResponse
 } from '../types/api.ts';
 import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../utils/formatters.ts';
 import { openCleanupPreviewModal } from './cleanup.ts';
@@ -65,6 +68,12 @@ let publishMomentAssets: PublishMomentAssetItem[] = [];
 const publishSelectedAssetIds = new Set<string>();
 let isSubmittingPublishMoment = false;
 let publishMomentCompleted = false;
+
+let resolveDisjointMomentName = '';
+let resolveDisjointAssets: DisjointDetailAsset[] = [];
+const resolveDisjointSelectedIds = new Set<string>();
+let isSubmittingResolveDisjoint = false;
+let resolveDisjointCompleted = false;
 
 type ClustersSyncLockMode = 'idle' | 'running' | 'awaiting';
 let clustersSyncLockMode: ClustersSyncLockMode = 'idle';
@@ -198,6 +207,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     closeIntakeDedupModal();
     closeCreateMomentModal();
     closePublishMomentModal();
+    closeResolveDisjointModal();
     if (grid) {
       grid.style.display = 'grid';
       grid.classList.add('single-col');
@@ -232,6 +242,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     closeIntakeDedupModal();
     closeCreateMomentModal();
     closePublishMomentModal();
+    closeResolveDisjointModal();
     if (grid) grid.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardFolders) cardFolders.style.display = 'none';
@@ -502,6 +513,35 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   document.getElementById('publish-moment-yt-url')?.addEventListener('input', () => syncPublishOpenLinks());
   document.getElementById('btn-submit-publish-moment')?.addEventListener('click', () => {
     void submitPublishMoment();
+  });
+
+  // Resolve Disjoint Moment Modal wiring
+  document.querySelectorAll<HTMLElement>('.btn-close-resolve-disjoint-modal').forEach(btn => {
+    btn.addEventListener('click', () => closeResolveDisjointModal());
+  });
+  document.getElementById('modal-resolve-disjoint')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement)?.id === 'modal-resolve-disjoint') {
+      closeResolveDisjointModal();
+    }
+  });
+  document.getElementById('resolve-disjoint-target-input')?.addEventListener('input', (e) => {
+    const val = ((e.target as HTMLInputElement)?.value || '').trim();
+    document.querySelectorAll<HTMLButtonElement>('#resolve-disjoint-nearby-chips .disjoint-target-chip').forEach(chip => {
+      chip.classList.toggle('active', (chip.dataset.targetMoment || '') === val && val !== '');
+    });
+  });
+  document.getElementById('btn-submit-resolve-disjoint')?.addEventListener('click', () => {
+    if (resolveDisjointCompleted) {
+      closeResolveDisjointModal();
+      return;
+    }
+    void submitResolveDisjoint('merge');
+  });
+  document.getElementById('btn-resolve-disjoint-skip')?.addEventListener('click', () => {
+    void submitResolveDisjoint('skip_publishing');
+  });
+  document.getElementById('btn-resolve-disjoint-ignore')?.addEventListener('click', () => {
+    void submitResolveDisjoint('ignore');
   });
 
   // Grouping Rules Panel toggle & reset
@@ -1204,20 +1244,66 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
 
   if (disjTbody) {
     if (!disjoint.length) {
-      disjTbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No disjoint moments (&lt;2 assets) detected.</td></tr>';
+      disjTbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No disjoint moments (&lt;2 assets) detected.</td></tr>';
     } else {
       disjTbody.innerHTML = disjoint
-        .map(
-          d => `
-        <tr>
-          <td><strong class="text-primary">${escapeHtml(d.moment_name)}</strong></td>
-          <td style="text-align: right;" class="font-mono">${d.avg_score.toFixed(4)}</td>
-          <td style="text-align: right;" class="font-mono">${d.files}</td>
-          <td style="font-size: 0.72rem; color: var(--accent-amber);">${escapeHtml(d.details)}</td>
-        </tr>
-      `
-        )
+        .map(d => {
+          const assetIds = d.asset_ids || [];
+          const firstAssetId = assetIds[0] || '';
+          const thumbHtml = firstAssetId
+            ? `<button type="button" class="disjoint-row-thumb-btn btn-preview-disjoint-asset" data-asset-id="${escapeHtml(firstAssetId)}" data-moment-name="${escapeHtml(d.moment_name)}" title="Preview assets in ${escapeHtml(d.moment_name)}">
+                <img src="/api/media/thumbnail/${encodeURIComponent(firstAssetId)}" alt="${escapeHtml(d.moment_name)}" loading="lazy" />
+              </button>`
+            : '';
+          const sugTarget = d.suggested_target || '';
+          return `
+            <tr>
+              <td>
+                <div class="disjoint-row-title">
+                  ${thumbHtml}
+                  <strong class="text-primary">${escapeHtml(d.moment_name)}</strong>
+                </div>
+              </td>
+              <td style="text-align: right;" class="font-mono">${d.avg_score.toFixed(4)}</td>
+              <td style="text-align: right;" class="font-mono">${d.files}</td>
+              <td style="font-size: 0.72rem; color: var(--accent-amber);">${escapeHtml(d.details)}</td>
+              <td>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-amber btn-open-resolve-disjoint"
+                  data-moment-name="${escapeHtml(d.moment_name)}"
+                  data-suggested-target="${escapeHtml(sugTarget)}"
+                  title="Inspect &amp; merge, skip publishing, or ignore '${escapeHtml(d.moment_name)}'"
+                >🔀 Resolve</button>
+              </td>
+            </tr>
+          `;
+        })
         .join('');
+
+      disjTbody.querySelectorAll<HTMLButtonElement>('.btn-open-resolve-disjoint').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const momentName = btn.dataset.momentName || '';
+          const suggestedTarget = btn.dataset.suggestedTarget || '';
+          if (momentName) void openResolveDisjointModal(momentName, suggestedTarget);
+        });
+      });
+
+      disjTbody.querySelectorAll<HTMLButtonElement>('.btn-preview-disjoint-asset').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const aid = btn.dataset.assetId || '';
+          const momentName = btn.dataset.momentName || '';
+          const match = disjoint.find(item => item.moment_name === momentName);
+          const ids = match?.asset_ids?.length ? match.asset_ids : aid ? [aid] : [];
+          if (aid) {
+            openCleanupPreviewModal(aid, {
+              assetIds: ids,
+              groupLabel: momentName,
+              hideMarkRemoved: true
+            });
+          }
+        });
+      });
     }
   }
 }
@@ -3370,6 +3456,372 @@ async function submitPublishMoment(): Promise<void> {
   } finally {
     isSubmittingPublishMoment = false;
     setPublishModalCompletedState(succeeded);
+  }
+}
+
+// ==========================================================================
+// Resolve Disjoint Moment Modal (Merge / SkipPublishing / Ignore)
+// ==========================================================================
+
+function closeResolveDisjointModal(): void {
+  document.getElementById('modal-resolve-disjoint')?.classList.remove('open');
+}
+
+function setResolveDisjointCompletedState(completed: boolean): void {
+  resolveDisjointCompleted = completed;
+  const btnCancel = document.getElementById('btn-cancel-resolve-disjoint') as HTMLButtonElement | null;
+  const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
+  const btnSkip = document.getElementById('btn-resolve-disjoint-skip') as HTMLButtonElement | null;
+  const btnIgnore = document.getElementById('btn-resolve-disjoint-ignore') as HTMLButtonElement | null;
+  if (btnCancel) {
+    btnCancel.style.display = completed ? 'none' : '';
+    btnCancel.disabled = false;
+  }
+  if (btnSkip) {
+    btnSkip.style.display = completed ? 'none' : '';
+    btnSkip.disabled = false;
+  }
+  if (btnIgnore) {
+    btnIgnore.style.display = completed ? 'none' : '';
+    btnIgnore.disabled = false;
+  }
+  if (btnSubmit) {
+    btnSubmit.disabled = false;
+    if (completed) {
+      btnSubmit.className = 'btn btn-green';
+      btnSubmit.textContent = '✅ OK';
+    } else {
+      btnSubmit.className = 'btn btn-amber';
+      btnSubmit.textContent = '🔀 Merge into Target';
+    }
+  }
+}
+
+function updateResolveDisjointSelectionSummary(): void {
+  const pill = document.getElementById('resolve-disjoint-selected-pill');
+  if (pill) {
+    const selectedCount = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
+    pill.textContent = `${selectedCount} / ${resolveDisjointAssets.length} selected`;
+  }
+}
+
+function renderResolveDisjointAssets(): void {
+  const listEl = document.getElementById('resolve-disjoint-asset-list');
+  if (!listEl) return;
+
+  if (!resolveDisjointAssets.length) {
+    listEl.innerHTML = '<div class="text-center text-muted" style="padding: 1rem;">No active assets found in DB for this Moment.</div>';
+    updateResolveDisjointSelectionSummary();
+    return;
+  }
+
+  const allAssetIds = resolveDisjointAssets.map(a => a.asset_id);
+  listEl.innerHTML = resolveDisjointAssets
+    .map((a, idx) => {
+      const checked = resolveDisjointSelectedIds.has(a.asset_id);
+      const qualBadge = a.qualified
+        ? '<span class="badge badge-xs badge-green font-mono">★ QUALIFIED</span>'
+        : '<span class="badge badge-xs badge-outline font-mono">Below Threshold</span>';
+      const typeBadge =
+        a.media_type === 'video'
+          ? `<span class="badge badge-xs badge-purple font-mono">VIDEO${a.duration ? ` ${formatDuration(a.duration)}` : ''}</span>`
+          : '<span class="badge badge-xs badge-blue font-mono">PHOTO</span>';
+      const sizeStr = a.file_size_bytes ? ` · ${formatBytes(a.file_size_bytes)}` : '';
+      const dateStr = a.date_created_utc ? a.date_created_utc.slice(0, 10) : a.month || '';
+      return `
+        <div class="publish-asset-row">
+          <div class="publish-asset-left">
+            <input type="checkbox" class="resolve-disjoint-asset-cb" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer;" />
+            <button type="button" class="disjoint-row-thumb-btn btn-preview-disjoint-modal-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="Open full preview" style="width: 40px; height: 40px;">
+              <img src="/api/media/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
+            </button>
+            <div style="min-width: 0; flex: 1;">
+              <div class="font-mono" style="font-size: 0.75rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                #${idx + 1} · ${escapeHtml(a.original_filename || a.asset_id)}
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
+                ${qualBadge}
+                ${typeBadge}
+                <span class="font-mono text-amber" style="font-size: 0.69rem;">Score ${a.score_normalized.toFixed(4)}</span>
+                <span class="font-mono text-muted" style="font-size: 0.68rem;">${escapeHtml(dateStr)}${escapeHtml(sizeStr)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  listEl.querySelectorAll<HTMLInputElement>('.resolve-disjoint-asset-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const aid = cb.dataset.assetId || '';
+      if (!aid) return;
+      if (cb.checked) resolveDisjointSelectedIds.add(aid);
+      else resolveDisjointSelectedIds.delete(aid);
+      updateResolveDisjointSelectionSummary();
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-preview-disjoint-modal-asset').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const aid = btn.dataset.assetId || '';
+      if (aid) {
+        openCleanupPreviewModal(aid, {
+          assetIds: allAssetIds,
+          groupLabel: resolveDisjointMomentName,
+          hideMarkRemoved: true
+        });
+      }
+    });
+  });
+
+  updateResolveDisjointSelectionSummary();
+}
+
+async function openResolveDisjointModal(momentName: string, suggestedTarget = ''): Promise<void> {
+  resolveDisjointMomentName = momentName;
+  resolveDisjointAssets = [];
+  resolveDisjointSelectedIds.clear();
+  setResolveDisjointCompletedState(false);
+
+  const modal = document.getElementById('modal-resolve-disjoint');
+  const titleEl = document.getElementById('resolve-disjoint-modal-title');
+  const badgeEl = document.getElementById('resolve-disjoint-badge');
+  const summaryEl = document.getElementById('resolve-disjoint-summary-banner');
+  const albumsBarEl = document.getElementById('resolve-disjoint-albums-bar');
+  const listEl = document.getElementById('resolve-disjoint-asset-list');
+  const chipsEl = document.getElementById('resolve-disjoint-nearby-chips');
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
+  const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
+  const statusEl = document.getElementById('resolve-disjoint-status');
+
+  if (titleEl) titleEl.textContent = `🔀 Resolve Disjoint Moment · ${momentName}`;
+  if (badgeEl) badgeEl.textContent = 'loading...';
+  if (summaryEl) {
+    summaryEl.innerHTML = '<div class="spinner-sm"></div><span>Inspecting disjoint Moment assets and chronological merge targets...</span>';
+  }
+  if (albumsBarEl) albumsBarEl.style.display = 'none';
+  if (listEl) listEl.innerHTML = '';
+  if (chipsEl) chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">Searching nearby Moments...</span>';
+  if (targetInp) targetInp.value = suggestedTarget || '';
+  if (parentSel) parentSel.value = 'Moments';
+  if (delSrcCb) delSrcCb.checked = true;
+  if (statusEl) {
+    statusEl.style.display = 'none';
+    statusEl.innerHTML = '';
+  }
+
+  modal?.classList.add('open');
+
+  try {
+    const qs = new URLSearchParams({ moment_name: momentName });
+    if (suggestedTarget) qs.set('suggested_target', suggestedTarget);
+    const res = await fetch(`/api/media/memories/disjoint-detail?${qs.toString()}`);
+    const data: DisjointDetailResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      if (summaryEl) {
+        summaryEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    const assets = data.assets || [];
+    resolveDisjointAssets = assets;
+    const histMinVal = data.historical_min ?? 0.5315;
+    assets.forEach(a => {
+      if (a.qualified) resolveDisjointSelectedIds.add(a.asset_id);
+      const sizeBytes = a.file_size_bytes || 0;
+      candidateAssetMeta.set(a.asset_id, {
+        asset_id: a.asset_id,
+        filename: a.original_filename,
+        original_filename: a.original_filename,
+        camera_model: a.camera_model || 'Library',
+        primary_owner: a.primary_owner || '',
+        month: a.month || (a.date_created_utc || '').slice(0, 7),
+        date_created_utc: a.date_created_utc || '',
+        capture_timestamp: a.date_created_utc || '',
+        file_size_bytes: sizeBytes,
+        bytes: sizeBytes,
+        file_size_mb: sizeBytes / (1024 * 1024),
+        score_normalized: a.score_normalized,
+        score_quartile: a.qualified ? `Top (>${histMinVal.toFixed(4)})` : 'Below Threshold',
+        assigned_moment: momentName,
+        media_type: a.media_type,
+        duration_sec: a.duration || 0,
+        width: a.width || 0,
+        height: a.height || 0,
+        fps: 0
+      });
+    });
+    if (resolveDisjointSelectedIds.size === 0) {
+      assets.forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
+    }
+
+    const qualCount = assets.filter(a => a.qualified).length;
+    const belowCount = assets.length - qualCount;
+    const histMin = data.historical_min ?? 0.5315;
+    if (badgeEl) {
+      badgeEl.textContent = `${qualCount} qualified · ${assets.length} total`;
+    }
+    if (summaryEl) {
+      summaryEl.innerHTML = `
+        <span>
+          <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
+          ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s) inside Apple Photos albums` : ''}.
+          Merge into an existing Moment, move to <code>Moments/SkipPublishing</code>, or Ignore.
+        </span>
+      `;
+    }
+
+    const albumsPresent = data.albums_present || [];
+    if (albumsBarEl) {
+      if (albumsPresent.length) {
+        albumsBarEl.style.display = 'flex';
+        albumsBarEl.innerHTML = `
+          <div>
+            <span class="font-mono text-muted" style="font-size: 0.68rem; display: block;">Apple Photos Albums Containing This Moment</span>
+            <span class="font-mono" style="font-size: 0.72rem;">${albumsPresent
+              .map(al => `${escapeHtml(al.parent)} (${al.asset_count})`)
+              .join(' · ')}</span>
+          </div>
+        `;
+      } else {
+        albumsBarEl.style.display = 'none';
+      }
+    }
+
+    const effectiveSuggested = data.suggested_target || suggestedTarget || '';
+    if (targetInp && !targetInp.value.trim() && effectiveSuggested) {
+      targetInp.value = effectiveSuggested;
+    }
+
+    const candidates = data.nearby_candidates || [];
+    if (chipsEl) {
+      if (!candidates.length) {
+        chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">No nearby multi-asset Moments found — enter any target Moment name below.</span>';
+      } else {
+        const currentTarget = (targetInp?.value || '').trim();
+        chipsEl.innerHTML = candidates
+          .map(c => {
+            const isSug = c.is_suggested;
+            const isAct = currentTarget === c.moment_name;
+            return `<button type="button" class="disjoint-target-chip${isSug ? ' suggested' : ''}${isAct ? ' active' : ''}" data-target-moment="${escapeHtml(c.moment_name)}" title="${c.qualified_count} qualified asset(s) · ${escapeHtml(c.rel_label)}">
+              ${isSug ? '★ ' : ''}${escapeHtml(c.moment_name)} <span style="opacity: 0.75;">(${c.qualified_count} · ${escapeHtml(c.rel_label)})</span>
+            </button>`;
+          })
+          .join('');
+
+        chipsEl.querySelectorAll<HTMLButtonElement>('.disjoint-target-chip').forEach(chip => {
+          chip.addEventListener('click', () => {
+            const val = chip.dataset.targetMoment || '';
+            if (targetInp) targetInp.value = val;
+            chipsEl.querySelectorAll('.disjoint-target-chip').forEach(c => c.classList.remove('active'));
+            chip.classList.add('active');
+          });
+        });
+      }
+    }
+
+    renderResolveDisjointAssets();
+  } catch (err: any) {
+    if (summaryEl) {
+      summaryEl.innerHTML = `<span class="text-red">❌ Error loading disjoint details: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  }
+}
+
+async function submitResolveDisjoint(action: 'merge' | 'skip_publishing' | 'ignore'): Promise<void> {
+  if (!resolveDisjointMomentName || isSubmittingResolveDisjoint) return;
+
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
+  const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
+  const statusEl = document.getElementById('resolve-disjoint-status');
+  const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
+  const btnSkip = document.getElementById('btn-resolve-disjoint-skip') as HTMLButtonElement | null;
+  const btnIgnore = document.getElementById('btn-resolve-disjoint-ignore') as HTMLButtonElement | null;
+
+  const targetMoment = (targetInp?.value || '').trim();
+  if (action === 'merge' && !targetMoment) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">❌ Enter or pick a Target Moment Album Name before merging.</span>';
+    }
+    return;
+  }
+
+  const assetIds = Array.from(resolveDisjointSelectedIds);
+  if ((action === 'skip_publishing' || action === 'ignore') && !assetIds.length) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">❌ Select at least 1 asset first.</span>';
+    }
+    return;
+  }
+
+  isSubmittingResolveDisjoint = true;
+  if (btnSubmit) btnSubmit.disabled = true;
+  if (btnSkip) btnSkip.disabled = true;
+  if (btnIgnore) btnIgnore.disabled = true;
+
+  const actionLabel =
+    action === 'merge'
+      ? `Merging into "${targetMoment}" via AppleScript...`
+      : action === 'skip_publishing'
+        ? 'Moving selected asset(s) to Moments/SkipPublishing...'
+        : 'Excluding selected asset(s) via ignore pipeline...';
+
+  if (statusEl) {
+    statusEl.style.display = 'flex';
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>${escapeHtml(actionLabel)}</span>`;
+  }
+
+  let succeeded = false;
+  try {
+    const res = await fetch('/api/media/memories/resolve-disjoint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_moment: resolveDisjointMomentName,
+        action,
+        target_moment: action === 'merge' ? targetMoment : null,
+        target_parent_folder: parentSel?.value || 'Moments',
+        asset_ids: assetIds,
+        delete_source_albums: Boolean(delSrcCb?.checked ?? true)
+      })
+    });
+    const data: ResolveDisjointResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    await Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
+    if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
+
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      if (action === 'merge') {
+        statusEl.innerHTML = `<span class="text-green">✅ Merged <code>${escapeHtml(data.source_moment || resolveDisjointMomentName)}</code> into <code>${escapeHtml(data.target_moment || targetMoment)}</code> (${data.photos_added ?? 0} asset(s) added, ${data.albums_deleted ?? 0} source album(s) deleted, ${data.db_updated ?? 0} DB row(s) updated).</span>`;
+      } else if (action === 'skip_publishing') {
+        statusEl.innerHTML = `<span class="text-green">✅ Moved ${data.photos_added ?? assetIds.length} asset(s) to <code>Moments/SkipPublishing</code> (updated ${data.db_updated ?? 0} DB row(s)).</span>`;
+      } else {
+        statusEl.innerHTML = `<span class="text-green">✅ Ignored &amp; excluded ${assetIds.length} asset(s) (${data.db_updated ?? 0} DB row(s) cleaned).</span>`;
+      }
+    }
+    succeeded = true;
+  } catch (err: any) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  } finally {
+    isSubmittingResolveDisjoint = false;
+    setResolveDisjointCompletedState(succeeded);
   }
 }
 

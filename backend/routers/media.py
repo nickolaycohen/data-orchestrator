@@ -3105,10 +3105,12 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 "curated_count": 0,
                 "unpublished_scores": [],
                 "curated_unpublished": [],
+                "qualified_aids": [],
                 "all_dates": [],
             },
         )
         md["total_qualified"] += 1
+        md["qualified_aids"].append(aid)
         in_tbc = aid in tbc_aids
         in_cur = aid in curated_aids_by_album.get(m_name.strip(), set()) or aid in curated_aids_all
         if in_tbc:
@@ -3188,10 +3190,10 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         if md["total_qualified"] < 2 and pub_count == 0:
             # Find nearest moment with >= 2 assets
             merge_hint = "Merge candidate (<2 assets)"
+            best_other = None
             if name in moment_midpoints:
                 t_mid = moment_midpoints[name]["mid"]
                 best_diff = None
-                best_other = None
                 for other_name, o_info in moment_midpoints.items():
                     if other_name == name or o_info["count"] < 2:
                         continue
@@ -3213,6 +3215,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 "recommended": 0,
                 "action": "Disjoint: Merge needed (<2 assets)",
                 "details": merge_hint,
+                "suggested_target": best_other or "",
+                "asset_ids": list(md.get("qualified_aids") or []),
             })
             continue
 
@@ -4973,3 +4977,608 @@ def publish_moment_assets(req: PublishMomentRequest):
             conn.close()
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+class ResolveDisjointRequest(BaseModel):
+    source_moment: str
+    action: str  # "merge" | "skip_publishing" | "ignore"
+    target_moment: Optional[str] = None
+    target_parent_folder: str = "Moments"
+    asset_ids: list[str] = []
+    delete_source_albums: bool = True
+
+
+_MERGE_DISJOINT_APPLESCRIPT = r'''
+on run argv
+    set topFolderName to item 1 of argv
+    set srcAlbumName to item 2 of argv
+    set targetParentName to item 3 of argv
+    set targetAlbumName to item 4 of argv
+    set deleteSource to (item 5 of argv) is "1"
+    set assetIds to {}
+    if (count of argv) > 5 then
+        set assetIds to items 6 thru (count of argv) of argv
+    end if
+
+    tell application "Photos"
+        if not (exists folder topFolderName) then
+            make new folder named topFolderName
+        end if
+        set topFolder to folder topFolderName
+
+        if targetParentName is not "" and targetParentName is not topFolderName then
+            if not (exists folder targetParentName of topFolder) then
+                make new folder named targetParentName at topFolder
+            end if
+            set targetParent to folder targetParentName of topFolder
+        else
+            set targetParent to topFolder
+        end if
+
+        set targetAction to "created"
+        if exists album targetAlbumName of targetParent then
+            set targetAlbum to album targetAlbumName of targetParent
+            set targetAction to "existing"
+        else
+            make new album named targetAlbumName at targetParent
+            set targetAlbum to album targetAlbumName of targetParent
+        end if
+
+        set existingIds to {}
+        try
+            repeat with exItem in (every media item of targetAlbum)
+                copy (id of exItem) to end of existingIds
+            end repeat
+        end try
+
+        set itemsToAdd to {}
+        set candidateItems to {}
+        set folderNamesToCheck to {"Moments", "Curated", "ToBeCurated", "Generic Moments"}
+        repeat with fName in folderNamesToCheck
+            if exists folder (fName as string) of topFolder then
+                set subF to folder (fName as string) of topFolder
+                if exists album srcAlbumName of subF then
+                    set srcAlb to album srcAlbumName of subF
+                    if (count of assetIds) is 0 then
+                        try
+                            repeat with mIt in (every media item of srcAlb)
+                                copy mIt to end of candidateItems
+                            end repeat
+                        end try
+                    end if
+                end if
+            end if
+        end repeat
+
+        if (count of assetIds) > 0 then
+            repeat with anId in assetIds
+                try
+                    set mItem to media item id (anId & "/L0/001")
+                    copy mItem to end of candidateItems
+                on error
+                    try
+                        set foundItems to (media items whose id contains anId)
+                        if (count of foundItems) > 0 then
+                            copy (item 1 of foundItems) to end of candidateItems
+                        end if
+                    end try
+                end try
+            end repeat
+        end if
+
+        repeat with cand in candidateItems
+            set candId to (id of cand) as string
+            set alreadyInTarget to false
+            repeat with exId in existingIds
+                if (exId as string) is candId then
+                    set alreadyInTarget to true
+                    exit repeat
+                end if
+            end repeat
+            if not alreadyInTarget then
+                copy cand to end of itemsToAdd
+                copy candId to end of existingIds
+            end if
+        end repeat
+
+        set addedCount to (count of itemsToAdd)
+        if addedCount > 0 then
+            add itemsToAdd to targetAlbum
+        end if
+
+        set deletedCount to 0
+        if deleteSource then
+            repeat with fName in folderNamesToCheck
+                if exists folder (fName as string) of topFolder then
+                    set subF to folder (fName as string) of topFolder
+                    if exists album srcAlbumName of subF then
+                        set srcAlb to album srcAlbumName of subF
+                        try
+                            delete album id (id of srcAlb)
+                            set deletedCount to deletedCount + 1
+                        end try
+                    end if
+                end if
+            end repeat
+        end if
+
+        return targetAction & "|" & (addedCount as string) & "|" & (deletedCount as string)
+    end tell
+end run
+'''
+
+
+def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> None:
+    """Remove obsolete album & folder entries for a merged/deleted disjoint Moment from local DB."""
+    alb_rows = cur.execute(
+        """
+        SELECT album_pk FROM media_organizer_albums
+        WHERE is_folder = 0
+          AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+        """,
+        (source_moment,),
+    ).fetchall()
+    pks = [int(r[0]) for r in alb_rows]
+    if pks:
+        ph = ",".join("?" for _ in pks)
+        cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph})", pks)
+        cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph})", pks)
+    cur.execute("DELETE FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))", (source_moment,))
+    cur.execute("DELETE FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (source_moment,))
+
+    for folder in (PUBLISHING_RECOMMENDATION_DIR / source_moment, CURATED_LACIE_DIR / source_moment):
+        if folder.exists() and folder.is_dir():
+            try:
+                shutil.rmtree(folder)
+            except Exception:
+                pass
+
+
+@router.get("/memories/disjoint-detail")
+def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
+    """Return full asset metadata, album locations, and chronological merge candidates for a disjoint Moment."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    m_name = (moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+            min_row = cur.fetchone()
+            hist_min_raw = float(min_row[0]) if min_row and min_row[0] else 0.5315
+
+            cur.execute(
+                """
+                SELECT DISTINCT moaa.asset_id
+                FROM media_organizer_album_assets moaa
+                JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+                """
+            )
+            excluded_aids = {r[0] for r in cur.fetchall()}
+
+            cur.execute(
+                """
+                SELECT
+                    a.asset_id,
+                    COALESCE(v.original_filename, a.original_filename, ''),
+                    COALESCE(v.score_normalized, 0.0),
+                    COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                    a.month,
+                    COALESCE(za.ZKIND, 0),
+                    ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
+                    COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
+                    COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
+                    COALESCE(aaa.ZORIGINALFILESIZE, 0),
+                    COALESCE(ze.ZCAMERAMODEL, a.carrier_device, 'Unknown'),
+                    COALESCE(do.owner_name, 'Shared/Other')
+                FROM assets a
+                LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+                LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+                LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, ze.ZCAMERAMODEL)
+                    AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                    AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                WHERE TRIM(COALESCE(a.MomentsAlbumName, '')) = TRIM(?)
+                  AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+                ORDER BY COALESCE(v.score_normalized, 0.0) DESC, a.date_created_utc ASC
+                """,
+                (m_name,),
+            )
+            raw_assets = cur.fetchall()
+            assets_out = []
+            qual_dates: list[datetime] = []
+            for r in raw_assets:
+                aid, fn, sc, dt_s, mo, zkind, dur, w, h, fbytes, cam, owner = r
+                if aid in excluded_aids:
+                    continue
+                is_qual = float(sc or 0.0) > hist_min_raw
+                dt_obj = _parse_utc_dt(dt_s)
+                if is_qual and dt_obj:
+                    qual_dates.append(dt_obj)
+                assets_out.append(
+                    {
+                        "asset_id": aid,
+                        "original_filename": fn,
+                        "score_normalized": round(float(sc or 0.0), 4),
+                        "date_created_utc": (dt_s or "")[:19],
+                        "month": mo or "",
+                        "media_type": "video" if int(zkind or 0) == 1 else "photo",
+                        "duration": float(dur or 0.0),
+                        "width": int(w or 0),
+                        "height": int(h or 0),
+                        "file_size_bytes": int(fbytes or 0),
+                        "camera_model": cam or "Unknown",
+                        "primary_owner": owner or "Shared/Other",
+                        "qualified": is_qual,
+                    }
+                )
+
+            cur.execute(
+                """
+                SELECT parent_folder_name, asset_count, full_path
+                FROM media_organizer_albums
+                WHERE is_folder = 0 AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+                """,
+                (m_name,),
+            )
+            albums_present = [
+                {"parent": r[0], "asset_count": int(r[1] or 0), "full_path": r[2]}
+                for r in cur.fetchall()
+            ]
+
+            # Build nearby multi-asset merge candidates
+            cur.execute(
+                """
+                SELECT
+                    TRIM(v.MomentsAlbumName) as m_alb,
+                    COUNT(*) as qual_cnt,
+                    MIN(v.date_created_utc) as min_dt,
+                    MAX(v.date_created_utc) as max_dt
+                FROM ranked_assets_view v
+                JOIN month_batches mb ON v.month = mb.month
+                WHERE mb.status_code >= '600'
+                  AND v.MomentsAlbumName IS NOT NULL AND TRIM(v.MomentsAlbumName) != ''
+                  AND TRIM(v.MomentsAlbumName) != TRIM(?)
+                  AND LOWER(v.MomentsAlbumName) NOT IN ('ignore', 'skippublishing', 'topscore excluded')
+                  AND v.score_normalized > ?
+                GROUP BY TRIM(v.MomentsAlbumName)
+                HAVING COUNT(*) >= 2
+                """,
+                (m_name, hist_min_raw),
+            )
+            anchor_dt = qual_dates[0] if qual_dates else (_parse_utc_dt(assets_out[0]["date_created_utc"]) if assets_out else None)
+            nearby_candidates = []
+            for cand_name, qual_cnt, min_dt_s, max_dt_s in cur.fetchall():
+                d_min = _parse_utc_dt(min_dt_s)
+                d_max = _parse_utc_dt(max_dt_s)
+                days_diff = None
+                rel_label = ""
+                if anchor_dt and d_min and d_max:
+                    mid_ts = (d_min.timestamp() + d_max.timestamp()) / 2.0
+                    diff_d = (mid_ts - anchor_dt.timestamp()) / 86400.0
+                    days_diff = abs(diff_d)
+                    d_int = round(abs(diff_d))
+                    rel_label = f"+{d_int}d" if diff_d > 0 else (f"-{d_int}d" if diff_d < 0 else "0d")
+                nearby_candidates.append(
+                    {
+                        "moment_name": cand_name,
+                        "qualified_count": int(qual_cnt or 0),
+                        "rel_label": rel_label,
+                        "is_suggested": bool(suggested_target and cand_name.lower() == suggested_target.lower()),
+                        "_sort_diff": days_diff if days_diff is not None else 999999.0,
+                    }
+                )
+            nearby_candidates.sort(key=lambda x: (0 if x["is_suggested"] else 1, x["_sort_diff"], -x["qualified_count"]))
+            for x in nearby_candidates:
+                x.pop("_sort_diff", None)
+
+            return {
+                "ok": True,
+                "moment_name": m_name,
+                "historical_min": round(hist_min_raw, 4),
+                "suggested_target": suggested_target,
+                "assets": assets_out,
+                "albums_present": albums_present,
+                "nearby_candidates": nearby_candidates[:10],
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/memories/resolve-disjoint")
+def resolve_disjoint_moment(req: ResolveDisjointRequest):
+    """Resolve a disjoint (<2 qualified assets) Moment via Merge, SkipPublishing, or Ignore."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    src_moment = (req.source_moment or "").strip()
+    action = (req.action or "").strip().lower()
+    if not src_moment:
+        return {"ok": False, "error": "source_moment is required"}
+    if action not in ("merge", "skip_publishing", "ignore"):
+        return {"ok": False, "error": f"Unsupported action: {action}"}
+
+    top_folder = "Media Organizer on LaCie"
+    target_moment = (req.target_moment or "").strip()
+    target_parent = (req.target_parent_folder or "Moments").strip() or "Moments"
+
+    if action == "merge":
+        if not target_moment:
+            return {"ok": False, "error": "Target Moment name is required to merge"}
+        if target_moment.lower() == src_moment.lower() and target_parent.lower() == "moments":
+            return {"ok": False, "error": "Target Moment must differ from source Moment"}
+        if "/" in target_moment or "/" in target_parent:
+            return {"ok": False, "error": "Moment and folder names cannot contain '/'"}
+
+    clean_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_aid in req.asset_ids or []:
+        s = (raw_aid or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            clean_ids.append(s)
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            if not clean_ids:
+                cur.execute(
+                    """
+                    SELECT asset_id FROM assets
+                    WHERE TRIM(COALESCE(MomentsAlbumName, '')) = TRIM(?)
+                    """,
+                    (src_moment,),
+                )
+                clean_ids = [r[0] for r in cur.fetchall() if r[0]]
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    if action == "ignore":
+        if not clean_ids:
+            return {"ok": False, "error": f"No assets found in '{src_moment}' to ignore"}
+        python_bin, script_path = _get_pipeline_python_and_dedup_script()
+        if not script_path.exists():
+            return {"ok": False, "error": f"Dedup ignore script not found at {script_path}"}
+        try:
+            proc = subprocess.run(
+                [python_bin, str(script_path), "--apply", "--json", "--asset-ids", *clean_ids],
+                cwd=str(REPOS["media-organizer-pipeline"]),
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if proc.returncode != 0:
+                return {"ok": False, "error": proc.stderr.strip() or proc.stdout.strip() or f"Exit {proc.returncode}"}
+            ign_data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        if req.delete_source_albums:
+            conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+            try:
+                cur = conn.cursor()
+                _delete_source_albums_from_db(cur, src_moment)
+                conn.commit()
+            finally:
+                conn.close()
+
+        return {
+            "ok": True,
+            "action": "ignore",
+            "source_moment": src_moment,
+            "photos_added": int(ign_data.get("photos_added") or 0),
+            "db_updated": int(ign_data.get("db_updated") or 0),
+        }
+
+    if action == "skip_publishing":
+        if not clean_ids:
+            return {"ok": False, "error": f"No assets found in '{src_moment}' to move to SkipPublishing"}
+        argv = [top_folder, "Moments", "SkipPublishing", "1", *clean_ids]
+        try:
+            proc = subprocess.run(
+                ["osascript", "-", *argv],
+                input=_MOMENTS_APPLESCRIPT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"Failed executing AppleScript: {e}"}
+
+        out = (proc.stdout or "").strip()
+        if proc.returncode != 0 or out.startswith("ERROR|"):
+            return {"ok": False, "error": out or (proc.stderr or "").strip() or "AppleScript error"}
+
+        parts = out.split("|")
+        photos_added = int(parts[1] or 0) if len(parts) >= 2 and parts[1].isdigit() else 0
+
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            skip_row = cur.execute(
+                """
+                SELECT album_pk FROM media_organizer_albums
+                WHERE is_folder = 0 AND LOWER(album_name) = 'skippublishing'
+                  AND LOWER(COALESCE(parent_folder_name, '')) = 'moments'
+                LIMIT 1
+                """
+            ).fetchone()
+            skip_pk = int(skip_row[0]) if skip_row else None
+            if skip_pk is None:
+                skip_pk = _allocate_synthetic_album_pk(cur)
+                cur.execute(
+                    """
+                    INSERT INTO media_organizer_albums
+                        (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                    VALUES (?, 'SkipPublishing', NULL, 'Moments', 'Media Organizer on LaCie/Moments/SkipPublishing', 0, 3, 2, 0, datetime('now'))
+                    """,
+                    (skip_pk,),
+                )
+            for aid in clean_ids:
+                exists = cur.execute(
+                    "SELECT 1 FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id = ? LIMIT 1",
+                    (skip_pk, aid),
+                ).fetchone()
+                if not exists:
+                    cur.execute(
+                        "INSERT INTO media_organizer_album_assets (album_pk, asset_id) VALUES (?, ?)",
+                        (skip_pk, aid),
+                    )
+            cur.execute(
+                "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?) WHERE album_pk = ?",
+                (skip_pk, skip_pk),
+            )
+            pub_rec_sub = PUBLISHING_RECOMMENDATION_DIR / src_moment
+            if pub_rec_sub.exists() and pub_rec_sub.is_dir():
+                try:
+                    shutil.rmtree(pub_rec_sub)
+                except Exception:
+                    pass
+            conn.commit()
+        finally:
+            conn.close()
+
+        return {
+            "ok": True,
+            "action": "skip_publishing",
+            "source_moment": src_moment,
+            "photos_added": photos_added,
+            "asset_count": len(clean_ids),
+        }
+
+    # action == "merge"
+    del_flag = "1" if req.delete_source_albums else "0"
+    argv = [top_folder, src_moment, target_parent, target_moment, del_flag, *clean_ids]
+    try:
+        proc = subprocess.run(
+            ["osascript", "-", *argv],
+            input=_MERGE_DISJOINT_APPLESCRIPT,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"Failed executing AppleScript merge: {e}"}
+
+    out = (proc.stdout or "").strip()
+    if proc.returncode != 0 or out.startswith("ERROR|"):
+        return {"ok": False, "error": out or (proc.stderr or "").strip() or f"AppleScript error (exit {proc.returncode})"}
+
+    parts = out.split("|")
+    target_action = parts[0] if parts else "existing"
+    photos_added = int(parts[1] or 0) if len(parts) >= 2 and parts[1].isdigit() else 0
+    albums_deleted = int(parts[2] or 0) if len(parts) >= 3 and parts[2].isdigit() else 0
+
+    # Reflect merge in local media_organizer.db immediately
+    conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        cur = conn.cursor()
+        full_path = f"{top_folder}/{target_parent}/{target_moment}"
+        tgt_row = cur.execute(
+            """
+            SELECT album_pk FROM media_organizer_albums
+            WHERE is_folder = 0
+              AND (LOWER(full_path) = LOWER(?) OR (LOWER(album_name) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?)))
+            LIMIT 1
+            """,
+            (full_path, target_moment, target_parent),
+        ).fetchone()
+        if tgt_row:
+            tgt_pk = int(tgt_row[0])
+        else:
+            p_row = cur.execute(
+                "SELECT album_pk FROM media_organizer_albums WHERE is_folder = 1 AND LOWER(album_name) = LOWER(?) LIMIT 1",
+                (target_parent,),
+            ).fetchone()
+            p_pk = int(p_row[0]) if p_row else None
+            tgt_pk = _allocate_synthetic_album_pk(cur)
+            cur.execute(
+                """
+                INSERT INTO media_organizer_albums
+                    (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                VALUES (?, ?, ?, ?, ?, 0, 3, 2, 0, datetime('now'))
+                """,
+                (tgt_pk, target_moment, p_pk, target_parent, full_path),
+            )
+
+        if target_parent.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments"):
+            m_exists = cur.execute(
+                "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
+                (target_moment,),
+            ).fetchone()
+            if not m_exists:
+                cur.execute(
+                    "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, ?)",
+                    (tgt_pk, target_moment, target_parent),
+                )
+
+        # Collect all asset IDs from source Moment in DB if delete_source_albums (even lower-rated ones)
+        merge_db_ids = list(clean_ids)
+        if req.delete_source_albums:
+            all_src_rows = cur.execute(
+                "SELECT asset_id FROM assets WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
+                (src_moment,),
+            ).fetchall()
+            for (aid,) in all_src_rows:
+                if aid and aid not in seen:
+                    seen.add(aid)
+                    merge_db_ids.append(aid)
+
+        for aid in merge_db_ids:
+            exists = cur.execute(
+                "SELECT 1 FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id = ? LIMIT 1",
+                (tgt_pk, aid),
+            ).fetchone()
+            if not exists:
+                cur.execute(
+                    "INSERT INTO media_organizer_album_assets (album_pk, asset_id) VALUES (?, ?)",
+                    (tgt_pk, aid),
+                )
+        cur.execute(
+            "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
+            (tgt_pk, tgt_pk),
+        )
+
+        if merge_db_ids:
+            ph = ",".join("?" for _ in merge_db_ids)
+            cur.execute(
+                f"UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph})",
+                [target_moment, *merge_db_ids],
+            )
+        if req.delete_source_albums:
+            cur.execute(
+                "UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
+                (target_moment, src_moment),
+            )
+            _delete_source_albums_from_db(cur, src_moment)
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "ok": True,
+        "action": "merge",
+        "source_moment": src_moment,
+        "target_moment": target_moment,
+        "target_parent": target_parent,
+        "target_action": target_action,
+        "photos_added": photos_added,
+        "albums_deleted": albums_deleted,
+    }
