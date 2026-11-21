@@ -284,6 +284,7 @@ export interface PlannerModeM {
     details: string;
     suggested_target?: string;
     asset_ids?: string[];
+    is_tagged?: boolean;
   }>;
   unassigned_total_assets: number;
   unassigned_total_clusters: number;

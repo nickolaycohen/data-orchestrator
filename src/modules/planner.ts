@@ -1469,12 +1469,16 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
               </button>`
             : '';
           const sugTarget = d.suggested_target || '';
+          const taggedBadgeHtml = d.is_tagged
+            ? `<span class="badge badge-xs badge-green font-mono" style="margin-left: 0.35rem;" title="Already tagged — placed at bottom while awaiting another asset group to merge with">✓ Tagged · awaiting merge</span>`
+            : '';
           return `
-            <tr>
+            <tr${d.is_tagged ? ' style="opacity: 0.84;"' : ''}>
               <td>
                 <div class="disjoint-row-title">
                   ${thumbHtml}
                   <strong class="text-primary">${escapeHtml(d.moment_name)}</strong>
+                  ${taggedBadgeHtml}
                 </div>
               </td>
               <td style="text-align: right;" class="font-mono">${d.avg_score.toFixed(4)}</td>

@@ -3177,6 +3177,43 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         m["idx"] = idx
 
     # Actionable & Disjoint publishing recommendations
+    tagged_moments_lc: set[str] = set()
+    tagged_aids: set[str] = set()
+    existing_tables = {
+        r[0]
+        for r in cur.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "moment_tags" in existing_tables:
+        for m_lc, aid in cur.execute(
+            "SELECT DISTINCT TRIM(LOWER(moment_name)), COALESCE(asset_id, '') FROM moment_tags WHERE TRIM(COALESCE(moment_name, '')) != ''"
+        ).fetchall():
+            if m_lc:
+                tagged_moments_lc.add(m_lc)
+            if aid:
+                tagged_aids.add(aid)
+    if "moment_tag_sessions" in existing_tables:
+        for (m_lc,) in cur.execute(
+            "SELECT DISTINCT TRIM(LOWER(moment_name)) FROM moment_tag_sessions WHERE TRIM(COALESCE(moment_name, '')) != ''"
+        ).fetchall():
+            if m_lc:
+                tagged_moments_lc.add(m_lc)
+    for tbl in ("moments", "media_organizer_albums"):
+        if tbl in existing_tables:
+            t_cols = {r[1] for r in cur.execute(f"PRAGMA table_info({tbl})").fetchall()}
+            if "tagging_paradigm" in t_cols:
+                for (m_lc,) in cur.execute(
+                    f"SELECT DISTINCT TRIM(LOWER(album_name)) FROM {tbl} WHERE TRIM(COALESCE(tagging_paradigm, '')) != '' OR TRIM(COALESCE(tags_metadata_json, '')) != ''"
+                ).fetchall():
+                    if m_lc:
+                        tagged_moments_lc.add(m_lc)
+    a_cols = {r[1] for r in cur.execute("PRAGMA table_info(assets)").fetchall()}
+    if "tags_metadata_json" in a_cols:
+        for (aid,) in cur.execute(
+            "SELECT asset_id FROM assets WHERE TRIM(COALESCE(tags_metadata_json, '')) != ''"
+        ).fetchall():
+            if aid:
+                tagged_aids.add(aid)
+
     actionable_recs = []
     disjoint_recs = []
     now_local = datetime.now()
@@ -3206,6 +3243,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                     rel = f"+{days_int}d" if best_diff > 0 else (f"-{days_int}d" if best_diff < 0 else "0d")
                     merge_hint = f"💡 Suggest merge with: '{best_other}' ({rel})"
 
+            qual_aids_list = list(md.get("qualified_aids") or [])
+            is_tagged = (name.strip().lower() in tagged_moments_lc) or any(aid in tagged_aids for aid in qual_aids_list)
             unpub = md["unpublished_scores"]
             disjoint_recs.append({
                 "moment_name": name,
@@ -3216,7 +3255,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 "action": "Disjoint: Merge needed (<2 assets)",
                 "details": merge_hint,
                 "suggested_target": best_other or "",
-                "asset_ids": list(md.get("qualified_aids") or []),
+                "asset_ids": qual_aids_list,
+                "is_tagged": is_tagged,
             })
             continue
 
@@ -3266,7 +3306,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     actionable_recs.sort(key=lambda x: -x["avg_score"])
     for idx, rec in enumerate(actionable_recs, 1):
         rec["idx"] = idx
-    disjoint_recs.sort(key=lambda x: -x["avg_score"])
+    disjoint_recs.sort(key=lambda x: (1 if x.get("is_tagged") else 0, -x["avg_score"]))
 
     return {
         "threshold_aligned": threshold_aligned,
@@ -3880,7 +3920,7 @@ def get_planner_overview(mode: str = "all"):
                     "unassigned_clusters": unassigned_clusters,
                     "grouping_rules": mode_m_live["grouping_rules"],
                     "actionable_recommendations": mode_m_live["actionable_recs"][:12],
-                    "disjoint_recommendations": mode_m_live["disjoint_recs"][:10]
+                    "disjoint_recommendations": mode_m_live["disjoint_recs"][:25]
                 }
 
             return {
