@@ -4622,7 +4622,7 @@ function updateResolveDisjointTargetPreview(): void {
   if (!previewEl) return;
   const parentName = parentSel?.value || 'Moments';
   const targetName = (targetInp?.value || '').trim() || '—';
-  previewEl.textContent = `Media Organizer on LaCie / ${parentName} / ${targetName}`;
+  previewEl.innerHTML = `${escapeHtml(`Media Organizer on LaCie / ${parentName} / `)}<span class="target-path-leaf">${escapeHtml(targetName)}</span>`;
 }
 
 async function openResolveDisjointModal(momentName: string, suggestedTarget = ''): Promise<void> {

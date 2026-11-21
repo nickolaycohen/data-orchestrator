@@ -4381,6 +4381,27 @@ body {
   word-break: break-word;
 }
 
+.disjoint-target-path-box {
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+#resolve-disjoint-target-path-preview {
+  display: block;
+  font-size: 1.04rem;
+  font-weight: 600;
+  color: #cbd5e1;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+#resolve-disjoint-target-path-preview .target-path-leaf {
+  color: #6ee7b7;
+  font-weight: 700;
+}
+
 .disjoint-paradigm-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
