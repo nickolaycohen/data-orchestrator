@@ -4560,7 +4560,15 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
         removed_tags: Array.from(state.removedTagValues)
       })
     });
-    const data: SaveMomentTagsResponse = await res.json();
+    const rawText = await res.text();
+    let data: SaveMomentTagsResponse;
+    try {
+      data = rawText ? JSON.parse(rawText) : { ok: false };
+    } catch {
+      state.saveStatusOk = false;
+      state.saveStatusMsg = `❌ Server returned HTTP ${res.status}: ${rawText.slice(0, 140) || 'Invalid JSON'}`;
+      return;
+    }
     if (!res.ok || !data.ok) {
       state.saveStatusOk = false;
       state.saveStatusMsg = `❌ Failed saving tags: ${data.error || `HTTP ${res.status}`}`;
@@ -4909,7 +4917,17 @@ async function submitResolveDisjoint(action: 'merge_new' | 'merge_legacy' | 'ski
         delete_source_albums: Boolean(delSrcCb?.checked ?? true)
       })
     });
-    const data: ResolveDisjointResponse = await res.json();
+    const rawText = await res.text();
+    let data: ResolveDisjointResponse;
+    try {
+      data = rawText ? JSON.parse(rawText) : { ok: false };
+    } catch {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="text-red">❌ Server returned HTTP ${res.status}: ${escapeHtml(rawText.slice(0, 180) || 'Invalid JSON response')}</span>`;
+      }
+      return;
+    }
     if (!res.ok || !data.ok) {
       if (statusEl) {
         statusEl.style.display = 'flex';

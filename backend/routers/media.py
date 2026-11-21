@@ -4058,6 +4058,35 @@ def _allocate_synthetic_album_pk(cur: sqlite3.Cursor) -> int:
     return min(min_pk, -10000) - 1
 
 
+def _insert_album_asset_row_if_missing(cur: sqlite3.Cursor, album_pk: int, aid: str) -> bool:
+    """Insert an asset into media_organizer_album_assets with metadata and synced_at_utc if absent."""
+    exists = cur.execute(
+        "SELECT 1 FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id = ? LIMIT 1",
+        (album_pk, aid),
+    ).fetchone()
+    if exists:
+        return False
+    cur.execute(
+        """
+        INSERT INTO media_organizer_album_assets (album_pk, asset_id, original_filename, date_created_utc, synced_at_utc)
+        SELECT ?, ?, a.original_filename, a.date_created_utc, datetime('now')
+        FROM assets a
+        WHERE a.asset_id = ?
+        LIMIT 1
+        """,
+        (album_pk, aid, aid),
+    )
+    if cur.rowcount == 0:
+        cur.execute(
+            """
+            INSERT INTO media_organizer_album_assets (album_pk, asset_id, synced_at_utc)
+            VALUES (?, ?, datetime('now'))
+            """,
+            (album_pk, aid),
+        )
+    return True
+
+
 @router.get("/memories/folders")
 def query_memories_folders(
     scope: str = "moments",
@@ -4355,15 +4384,7 @@ def create_moment_via_applescript(req: CreateMomentRequest):
 
             if clean_ids:
                 for aid in clean_ids:
-                    exists = cur.execute(
-                        "SELECT 1 FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id = ? LIMIT 1",
-                        (album_pk_out, aid),
-                    ).fetchone()
-                    if not exists:
-                        cur.execute(
-                            "INSERT INTO media_organizer_album_assets (album_pk, asset_id) VALUES (?, ?)",
-                            (album_pk_out, aid),
-                        )
+                    if _insert_album_asset_row_if_missing(cur, album_pk_out, aid):
                         db_inserted_assets += 1
 
                 cur.execute(
@@ -6643,52 +6664,47 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
         parts = out.split("|")
         photos_added = int(parts[1] or 0) if len(parts) >= 2 and parts[1].isdigit() else 0
 
-        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
-        conn.execute("PRAGMA busy_timeout = 30000")
         try:
-            cur = conn.cursor()
-            skip_row = cur.execute(
-                """
-                SELECT album_pk FROM media_organizer_albums
-                WHERE is_folder = 0 AND LOWER(album_name) = 'skippublishing'
-                  AND LOWER(COALESCE(parent_folder_name, '')) = 'moments'
-                LIMIT 1
-                """
-            ).fetchone()
-            skip_pk = int(skip_row[0]) if skip_row else None
-            if skip_pk is None:
-                skip_pk = _allocate_synthetic_album_pk(cur)
-                cur.execute(
+            conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            try:
+                cur = conn.cursor()
+                skip_row = cur.execute(
                     """
-                    INSERT INTO media_organizer_albums
-                        (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
-                    VALUES (?, 'SkipPublishing', NULL, 'Moments', 'Media Organizer on LaCie/Moments/SkipPublishing', 0, 3, 2, 0, datetime('now'))
-                    """,
-                    (skip_pk,),
-                )
-            for aid in clean_ids:
-                exists = cur.execute(
-                    "SELECT 1 FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id = ? LIMIT 1",
-                    (skip_pk, aid),
+                    SELECT album_pk FROM media_organizer_albums
+                    WHERE is_folder = 0 AND LOWER(album_name) = 'skippublishing'
+                      AND LOWER(COALESCE(parent_folder_name, '')) = 'moments'
+                    LIMIT 1
+                    """
                 ).fetchone()
-                if not exists:
+                skip_pk = int(skip_row[0]) if skip_row else None
+                if skip_pk is None:
+                    skip_pk = _allocate_synthetic_album_pk(cur)
                     cur.execute(
-                        "INSERT INTO media_organizer_album_assets (album_pk, asset_id) VALUES (?, ?)",
-                        (skip_pk, aid),
+                        """
+                        INSERT INTO media_organizer_albums
+                            (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                        VALUES (?, 'SkipPublishing', NULL, 'Moments', 'Media Organizer on LaCie/Moments/SkipPublishing', 0, 3, 2, 0, datetime('now'))
+                        """,
+                        (skip_pk,),
                     )
-            cur.execute(
-                "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?) WHERE album_pk = ?",
-                (skip_pk, skip_pk),
-            )
-            pub_rec_sub = PUBLISHING_RECOMMENDATION_DIR / src_moment
-            if pub_rec_sub.exists() and pub_rec_sub.is_dir():
-                try:
-                    shutil.rmtree(pub_rec_sub)
-                except Exception:
-                    pass
-            conn.commit()
-        finally:
-            conn.close()
+                for aid in clean_ids:
+                    _insert_album_asset_row_if_missing(cur, skip_pk, aid)
+                cur.execute(
+                    "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
+                    (skip_pk, skip_pk),
+                )
+                pub_rec_sub = PUBLISHING_RECOMMENDATION_DIR / src_moment
+                if pub_rec_sub.exists() and pub_rec_sub.is_dir():
+                    try:
+                        shutil.rmtree(pub_rec_sub)
+                    except Exception:
+                        pass
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            return {"ok": False, "error": f"Failed updating DB for SkipPublishing: {e}"}
 
         return {
             "ok": True,
@@ -6768,184 +6784,179 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
     # Reflect merge + optional tag application across all combined assets in local DB immediately
     tag_session_id = None
     tags_applied_count = 0
-    conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
-    conn.execute("PRAGMA busy_timeout = 30000")
     try:
-        cur = conn.cursor()
-        _ensure_moment_tag_tables(cur)
-        full_path = f"{top_folder}/{target_parent}/{target_moment}"
-        tgt_row = cur.execute(
-            """
-            SELECT album_pk FROM media_organizer_albums
-            WHERE is_folder = 0
-              AND (LOWER(full_path) = LOWER(?) OR (LOWER(album_name) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?)))
-            LIMIT 1
-            """,
-            (full_path, target_moment, target_parent),
-        ).fetchone()
-        if tgt_row:
-            tgt_pk = int(tgt_row[0])
-        else:
-            p_row = cur.execute(
-                "SELECT album_pk FROM media_organizer_albums WHERE is_folder = 1 AND LOWER(album_name) = LOWER(?) LIMIT 1",
-                (target_parent,),
-            ).fetchone()
-            p_pk = int(p_row[0]) if p_row else None
-            tgt_pk = _allocate_synthetic_album_pk(cur)
-            cur.execute(
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            _ensure_moment_tag_tables(cur)
+            full_path = f"{top_folder}/{target_parent}/{target_moment}"
+            tgt_row = cur.execute(
                 """
-                INSERT INTO media_organizer_albums
-                    (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
-                VALUES (?, ?, ?, ?, ?, 0, 3, 2, 0, datetime('now'))
+                SELECT album_pk FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND (LOWER(full_path) = LOWER(?) OR (LOWER(album_name) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?)))
+                LIMIT 1
                 """,
-                (tgt_pk, target_moment, p_pk, target_parent, full_path),
-            )
-
-        if target_parent.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments"):
-            m_exists = cur.execute(
-                "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
-                (target_moment,),
+                (full_path, target_moment, target_parent),
             ).fetchone()
-            if not m_exists:
-                cur.execute(
-                    "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, ?)",
-                    (tgt_pk, target_moment, target_parent),
-                )
-
-        # Collect all asset IDs from all source Moments in DB if delete_source_albums (even lower-rated ones)
-        merge_db_ids = list(combined_asset_ids)
-        seen_db = set(merge_db_ids)
-        if req.delete_source_albums:
-            for sm in combined_src_moments:
-                all_src_rows = cur.execute(
-                    "SELECT asset_id FROM assets WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
-                    (sm,),
-                ).fetchall()
-                for (aid,) in all_src_rows:
-                    if aid and aid not in seen_db:
-                        seen_db.add(aid)
-                        merge_db_ids.append(aid)
-
-        for aid in merge_db_ids:
-            exists = cur.execute(
-                "SELECT 1 FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id = ? LIMIT 1",
-                (tgt_pk, aid),
-            ).fetchone()
-            if not exists:
-                cur.execute(
-                    "INSERT INTO media_organizer_album_assets (album_pk, asset_id) VALUES (?, ?)",
-                    (tgt_pk, aid),
-                )
-        cur.execute(
-            "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
-            (tgt_pk, tgt_pk),
-        )
-
-        if merge_db_ids:
-            ph = ",".join("?" for _ in merge_db_ids)
-            cur.execute(
-                f"UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph})",
-                [target_moment, *merge_db_ids],
-            )
-        if req.delete_source_albums:
-            for sm in combined_src_moments:
-                if sm.lower() == target_moment.lower():
-                    continue
-                cur.execute(
-                    "UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
-                    (target_moment, sm),
-                )
+            if tgt_row:
+                tgt_pk = int(tgt_row[0])
+            else:
+                p_row = cur.execute(
+                    "SELECT album_pk FROM media_organizer_albums WHERE is_folder = 1 AND LOWER(album_name) = LOWER(?) LIMIT 1",
+                    (target_parent,),
+                ).fetchone()
+                p_pk = int(p_row[0]) if p_row else None
+                tgt_pk = _allocate_synthetic_album_pk(cur)
                 cur.execute(
                     """
-                    UPDATE OR IGNORE moment_tags
-                    SET moment_name = ?, updated_at_utc = datetime('now')
-                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                    INSERT INTO media_organizer_albums
+                        (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                    VALUES (?, ?, ?, ?, ?, 0, 3, 2, 0, datetime('now'))
                     """,
-                    (target_moment, sm),
+                    (tgt_pk, target_moment, p_pk, target_parent, full_path),
                 )
-                cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (sm,))
-                _delete_source_albums_from_db(cur, sm)
 
-        # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
-        clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
-        clean_groups: list[tuple[list[str], list[dict]]] = []
-        union_tags: list[dict] = list(clean_apply_tags)
-        seen_union_vals = {t["tag_value"].lower() for t in union_tags}
-        for grp in req.moment_tag_groups or []:
-            g_tags = _normalize_unique_moment_tags(grp.tags)
-            g_aids = [s.strip() for s in (grp.asset_ids or []) if s and s.strip()]
-            if g_tags and g_aids:
-                clean_groups.append((g_aids, g_tags))
-                for t in g_tags:
-                    tv_lc = t["tag_value"].lower()
-                    if tv_lc not in seen_union_vals:
-                        seen_union_vals.add(tv_lc)
-                        union_tags.append(t)
+            if target_parent.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments"):
+                m_exists = cur.execute(
+                    "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
+                    (target_moment,),
+                ).fetchone()
+                if not m_exists:
+                    cur.execute(
+                        "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, ?)",
+                        (tgt_pk, target_moment, target_parent),
+                    )
 
-        if clean_apply_tags or clean_groups:
-            cur.execute(
-                """
-                INSERT INTO moment_tag_sessions
-                    (moment_name, apply_to_folder_name, composed_name, selected_tags_json, asset_count, notes)
-                VALUES (?, 1, ?, ?, ?, ?)
-                """,
-                (
-                    target_moment,
-                    target_moment,
-                    json.dumps(union_tags),
-                    len(merge_db_ids),
-                    f"Consolidated from: {', '.join(combined_src_moments)}",
-                ),
-            )
-            tag_session_id = int(cur.lastrowid)
+            # Collect all asset IDs from all source Moments in DB if delete_source_albums (even lower-rated ones)
+            merge_db_ids = list(combined_asset_ids)
+            seen_db = set(merge_db_ids)
+            if req.delete_source_albums:
+                for sm in combined_src_moments:
+                    all_src_rows = cur.execute(
+                        "SELECT asset_id FROM assets WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
+                        (sm,),
+                    ).fetchall()
+                    for (aid,) in all_src_rows:
+                        if aid and aid not in seen_db:
+                            seen_db.add(aid)
+                            merge_db_ids.append(aid)
 
-            def _upsert_tag_rows(aid_list: list[str], tag_list: list[dict]) -> None:
-                for aid in aid_list:
-                    for t in tag_list:
-                        cur.execute(
-                            """
-                            INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
-                            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                            ON CONFLICT(LOWER(moment_name), asset_id, LOWER(tag_value))
-                            DO UPDATE SET category = excluded.category, include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
-                            """,
-                            (
-                                target_moment,
-                                aid,
-                                t["category"],
-                                t["tag_value"],
-                                1 if t["include_in_name"] else 0,
-                                tag_session_id,
-                            ),
-                        )
-
-            if union_tags:
-                _upsert_tag_rows([""], union_tags)
-            for g_aids, g_tags in clean_groups:
-                _upsert_tag_rows(g_aids, g_tags)
-            if clean_apply_tags and merge_db_ids:
-                _upsert_tag_rows(merge_db_ids, clean_apply_tags)
             for aid in merge_db_ids:
-                cur_aid_rows = cur.execute(
-                    """
-                    SELECT category, tag_value, include_in_name
-                    FROM moment_tags
-                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ?
-                    ORDER BY id ASC
-                    """,
-                    (target_moment, aid),
-                ).fetchall()
-                cur_aid_tags = [
-                    {"category": r[0], "tag_value": r[1], "include_in_name": bool(r[2])}
-                    for r in cur_aid_rows
-                ]
-                if cur_aid_tags:
-                    _sync_asset_metadata_json(cur, aid, target_moment, cur_aid_tags, tag_session_id)
-            tags_applied_count = len(union_tags)
+                _insert_album_asset_row_if_missing(cur, tgt_pk, aid)
+            cur.execute(
+                "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
+                (tgt_pk, tgt_pk),
+            )
 
-        conn.commit()
-    finally:
-        conn.close()
+            if merge_db_ids:
+                ph = ",".join("?" for _ in merge_db_ids)
+                cur.execute(
+                    f"UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph})",
+                    [target_moment, *merge_db_ids],
+                )
+            if req.delete_source_albums:
+                for sm in combined_src_moments:
+                    if sm.lower() == target_moment.lower():
+                        continue
+                    cur.execute(
+                        "UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
+                        (target_moment, sm),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE OR IGNORE moment_tags
+                        SET moment_name = ?, updated_at_utc = datetime('now')
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                        """,
+                        (target_moment, sm),
+                    )
+                    cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (sm,))
+                    _delete_source_albums_from_db(cur, sm)
+
+            # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
+            clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
+            clean_groups: list[tuple[list[str], list[dict]]] = []
+            union_tags: list[dict] = list(clean_apply_tags)
+            seen_union_vals = {t["tag_value"].lower() for t in union_tags}
+            for grp in req.moment_tag_groups or []:
+                g_tags = _normalize_unique_moment_tags(grp.tags)
+                g_aids = [s.strip() for s in (grp.asset_ids or []) if s and s.strip()]
+                if g_tags and g_aids:
+                    clean_groups.append((g_aids, g_tags))
+                    for t in g_tags:
+                        tv_lc = t["tag_value"].lower()
+                        if tv_lc not in seen_union_vals:
+                            seen_union_vals.add(tv_lc)
+                            union_tags.append(t)
+
+            if clean_apply_tags or clean_groups:
+                cur.execute(
+                    """
+                    INSERT INTO moment_tag_sessions
+                        (moment_name, apply_to_folder_name, composed_name, selected_tags_json, asset_count, notes)
+                    VALUES (?, 1, ?, ?, ?, ?)
+                    """,
+                    (
+                        target_moment,
+                        target_moment,
+                        json.dumps(union_tags),
+                        len(merge_db_ids),
+                        f"Consolidated from: {', '.join(combined_src_moments)}",
+                    ),
+                )
+                tag_session_id = int(cur.lastrowid)
+
+                def _upsert_tag_rows(aid_list: list[str], tag_list: list[dict]) -> None:
+                    for aid in aid_list:
+                        for t in tag_list:
+                            cur.execute(
+                                """
+                                INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
+                                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                                ON CONFLICT(LOWER(moment_name), asset_id, LOWER(tag_value))
+                                DO UPDATE SET category = excluded.category, include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
+                                """,
+                                (
+                                    target_moment,
+                                    aid,
+                                    t["category"],
+                                    t["tag_value"],
+                                    1 if t["include_in_name"] else 0,
+                                    tag_session_id,
+                                ),
+                            )
+
+                if union_tags:
+                    _upsert_tag_rows([""], union_tags)
+                for g_aids, g_tags in clean_groups:
+                    _upsert_tag_rows(g_aids, g_tags)
+                if clean_apply_tags and merge_db_ids:
+                    _upsert_tag_rows(merge_db_ids, clean_apply_tags)
+                for aid in merge_db_ids:
+                    cur_aid_rows = cur.execute(
+                        """
+                        SELECT category, tag_value, include_in_name
+                        FROM moment_tags
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ?
+                        ORDER BY id ASC
+                        """,
+                        (target_moment, aid),
+                    ).fetchall()
+                    cur_aid_tags = [
+                        {"category": r[0], "tag_value": r[1], "include_in_name": bool(r[2])}
+                        for r in cur_aid_rows
+                    ]
+                    if cur_aid_tags:
+                        _sync_asset_metadata_json(cur, aid, target_moment, cur_aid_tags, tag_session_id)
+                tags_applied_count = len(union_tags)
+
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": f"Failed updating DB after Photos merge: {e}"}
 
     return {
         "ok": True,
