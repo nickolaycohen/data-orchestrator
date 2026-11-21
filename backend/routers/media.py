@@ -3878,6 +3878,7 @@ def _detect_duplicates_for_asset_list(
 
         pool_map: dict[str, dict] = {}
         by_date_kind: dict[tuple[str, int], list[dict]] = {}
+        by_date_stem: dict[tuple[str, str], list[dict]] = {}
         for row in pool_rows:
             aid = row[0]
             if aid in excluded_aids:
@@ -3907,6 +3908,8 @@ def _detect_duplicates_for_asset_list(
             pool_map[aid] = info
             if info["ymd"]:
                 by_date_kind.setdefault((info["ymd"], info["kind"]), []).append(info)
+                if info["stem"]:
+                    by_date_stem.setdefault((info["ymd"], info["stem"]), []).append(info)
 
         cached_hashes_db = {
             r[0]: r[1]
@@ -3967,6 +3970,16 @@ def _detect_duplicates_for_asset_list(
                 d_str = (base_dt + timedelta(days=delta)).strftime("%Y-%m-%d")
                 cands.extend(by_date_kind.get((d_str, me["kind"]), []))
 
+            # Also pair same-stem photo + video (e.g. Live Photo companion IMG_7098.HEIC + IMG_7098.MOV)
+            if me["stem"]:
+                for delta in (-1, 0, 1):
+                    d_str = (base_dt + timedelta(days=delta)).strftime("%Y-%m-%d")
+                    for c in by_date_stem.get((d_str, me["stem"]), []):
+                        if c["asset_id"] == aid or c["kind"] == me["kind"]:
+                            continue
+                        if abs(c["unix_ts"] - me["unix_ts"]) <= 30.0:
+                            _record(aid, c["asset_id"], "Tier 2: Same-Name Photo+Video Pair", 0, 99.0)
+
             matched_meta = False
             for c in cands:
                 cid = c["asset_id"]
@@ -4017,10 +4030,38 @@ def _detect_duplicates_for_asset_list(
             components.setdefault(uf.find(aid), []).append(info)
 
         dup_map: dict[str, dict] = {}
+        ext_prio_map = getattr(mod, "EXTENSION_PRIORITY", {"heic": 0, "heif": 0, "dng": 1, "raw": 1, "png": 2, "jpg": 3, "jpeg": 3, "mp4": 4, "mov": 5})
+        excluded_names = getattr(mod, "EXCLUDED_ALBUM_NAMES", ("ignore", "skippublishing", "topscore excluded"))
+
+        def _keeper_rank(m: dict) -> tuple:
+            mom = (m.get("moment") or "").strip()
+            is_assigned = 1 if mom and mom.lower() not in excluded_names else 0
+            above_thresh = 1 if m["score"] > target_threshold else 0
+            is_still_photo = 1 if m["kind"] == 0 else 0
+            is_heic = 1 if m["ext"] in ("heic", "heif") else 0
+            pixels = (m["width"] or 0) * (m["height"] or 0)
+            pixel_bucket = int(pixels // 100000)
+            ext_prio = ext_prio_map.get(m["ext"], 99)
+            clean_name = 0 if mod.has_copy_suffix(m["filename"]) else 1
+            fav = 1 if (m.get("apple_favorite") or m.get("google_favorite")) else 0
+            return (
+                is_assigned,
+                is_heic,
+                is_still_photo,
+                above_thresh,
+                pixel_bucket,
+                -ext_prio,
+                m["size"],
+                round(m["score"], 4),
+                clean_name,
+                fav,
+                m["asset_id"],
+            )
+
         for _root, members in components.items():
             if len(members) < 2 or not any(m["asset_id"] in target_set for m in members):
                 continue
-            keeper = mod.select_keeper_for_group(members, target_threshold)
+            keeper = max(members, key=_keeper_rank)
             keeper_id = keeper["asset_id"]
             for m in members:
                 mid = m["asset_id"]
