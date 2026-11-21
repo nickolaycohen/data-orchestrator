@@ -701,16 +701,31 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       closeResolveDisjointModal();
       return;
     }
-    void submitResolveDisjoint('merge_new');
+    openResolveActionConfirmDialog('merge_new');
   });
   document.getElementById('btn-resolve-disjoint-legacy-merge')?.addEventListener('click', () => {
-    void submitResolveDisjoint('merge_legacy');
+    openResolveActionConfirmDialog('merge_legacy');
   });
   document.getElementById('btn-resolve-disjoint-skip')?.addEventListener('click', () => {
-    void submitResolveDisjoint('skip_publishing');
+    openResolveActionConfirmDialog('skip_publishing');
   });
   document.getElementById('btn-resolve-disjoint-ignore')?.addEventListener('click', () => {
-    void submitResolveDisjoint('ignore');
+    openResolveActionConfirmDialog('ignore');
+  });
+  document.querySelectorAll<HTMLElement>('.btn-close-resolve-confirm-modal').forEach(btn => {
+    btn.addEventListener('click', () => closeResolveActionConfirmDialog());
+  });
+  document.getElementById('modal-resolve-action-confirm')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement)?.id === 'modal-resolve-action-confirm') {
+      closeResolveActionConfirmDialog();
+    }
+  });
+  document.getElementById('btn-resolve-confirm-proceed')?.addEventListener('click', () => {
+    const act = pendingResolveConfirmAction;
+    closeResolveActionConfirmDialog();
+    if (act) {
+      void submitResolveDisjoint(act);
+    }
   });
   document.getElementById('resolve-disjoint-moment-search')?.addEventListener('input', (e) => {
     const q = ((e.target as HTMLInputElement)?.value || '').trim();
@@ -4852,7 +4867,144 @@ async function openResolveDisjointModal(momentName: string, suggestedTarget = ''
   }
 }
 
-async function submitResolveDisjoint(action: 'merge_new' | 'merge_legacy' | 'skip_publishing' | 'ignore'): Promise<void> {
+type ResolveDisjointAction = 'merge_new' | 'merge_legacy' | 'skip_publishing' | 'ignore';
+let pendingResolveConfirmAction: ResolveDisjointAction | null = null;
+
+function closeResolveActionConfirmDialog(): void {
+  pendingResolveConfirmAction = null;
+  document.getElementById('modal-resolve-action-confirm')?.classList.remove('open');
+}
+
+function openResolveActionConfirmDialog(action: ResolveDisjointAction): void {
+  if (!resolveDisjointMomentName || isSubmittingResolveDisjoint) return;
+
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
+  const delSrcCb = document.getElementById('resolve-disjoint-delete-source') as HTMLInputElement | null;
+  const savePerSource = (document.getElementById('resolve-disjoint-save-per-source-tags') as HTMLInputElement | null)?.checked ?? true;
+  const shareDisjoint = (document.getElementById('resolve-disjoint-share-disjoint-tags') as HTMLInputElement | null)?.checked ?? false;
+  const statusEl = document.getElementById('resolve-disjoint-status');
+
+  const isMerge = action === 'merge_new' || action === 'merge_legacy';
+  const targetMoment = (targetInp?.value || '').trim();
+  const resolvedParent = parentSel?.value || 'Moments';
+  const assetIds = Array.from(resolveDisjointSelectedIds);
+  const delSrc = Boolean(delSrcCb?.checked ?? true);
+
+  if (isMerge && !targetMoment) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">❌ Enter or compose a Target Moment Album Name before merging.</span>';
+    }
+    return;
+  }
+  if ((action === 'skip_publishing' || action === 'ignore') && !assetIds.length) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">❌ Select at least 1 asset first.</span>';
+    }
+    return;
+  }
+
+  const modal = document.getElementById('modal-resolve-action-confirm');
+  const titleEl = document.getElementById('resolve-confirm-title');
+  const subEl = document.getElementById('resolve-confirm-subtitle');
+  const stepsEl = document.getElementById('resolve-confirm-steps-list');
+  const noteEl = document.getElementById('resolve-confirm-note');
+  const proceedBtn = document.getElementById('btn-resolve-confirm-proceed') as HTMLButtonElement | null;
+  if (!modal || !titleEl || !subEl || !stepsEl || !noteEl || !proceedBtn) {
+    void submitResolveDisjoint(action);
+    return;
+  }
+
+  const stepsHtml: string[] = [];
+  if (isMerge) {
+    const existingInfo = getExistingTargetAlbumInfo(resolvedParent, targetMoment);
+    const fullTargetPath = `Media Organizer on LaCie / ${resolvedParent} / ${targetMoment}`;
+    const extraEntries = action === 'merge_new' ? Array.from(combinedExtraMoments.values()) : [];
+    const totalAssetSel = assetIds.length + extraEntries.reduce((acc, e) => acc + e.assetIds.size, 0);
+
+    titleEl.textContent = existingInfo.exists
+      ? '➕ Confirm Add Missing Assets & Merge Plan'
+      : '✨ Confirm New Moment Merge Plan';
+    subEl.innerHTML = `Target: <code>${escapeHtml(fullTargetPath)}</code>`;
+
+    stepsHtml.push(
+      existingInfo.exists
+        ? `<strong>Destination folder (already exists):</strong> Open existing album <code>${escapeHtml(fullTargetPath)}</code> (${existingInfo.assetCount} asset(s) currently tracked).`
+        : `<strong>Destination folder (create new):</strong> Create new Apple Photos album <code>${escapeHtml(fullTargetPath)}</code>.`
+    );
+
+    const sourceListParts = [
+      `<code>${escapeHtml(resolveDisjointMomentName)}</code> (${assetIds.length} asset(s))`,
+      ...extraEntries.map(e => `<code>${escapeHtml(e.momentName)}</code> (${e.assetIds.size} asset(s))`)
+    ];
+    stepsHtml.push(
+      `<strong>Copy only missing assets (${totalAssetSel} selected total):</strong> Inspect items from ${sourceListParts.join(' + ')} and add only assets not already inside the destination album.`
+    );
+
+    const deletableSources = [
+      resolveDisjointMomentName,
+      ...extraEntries.map(e => e.momentName)
+    ].filter(s => s.toLowerCase() !== targetMoment.toLowerCase());
+    if (delSrc) {
+      if (deletableSources.length) {
+        stepsHtml.push(
+          `<strong>Delete disjoint / source album(s):</strong> Delete obsolete source album(s) ${deletableSources.map(s => `<code>${escapeHtml(s)}</code>`).join(', ')} in Apple Photos (if they exist) and clean up their old DB album/Moment rows.`
+        );
+      } else {
+        stepsHtml.push(
+          `<strong>Preserve destination &amp; clean duplicate source copies:</strong> Keep target album <code>${escapeHtml(targetMoment)}</code> and remove any duplicate disjoint source album copies with a different album ID (if any exist).`
+        );
+      }
+    } else {
+      stepsHtml.push('<strong>Keep source albums:</strong> Leave all source albums intact in Apple Photos.');
+    }
+
+    if (action === 'merge_new' && (savePerSource || shareDisjoint)) {
+      const tagSummary = formatUnifiedMetadataSummary(sourceTagState.tags);
+      stepsHtml.push(
+        `<strong>Update DB &amp; active JSON tag metadata:</strong> Reassign <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code>, sync <code>media_organizer_album_assets</code>, and record active tags/flags ${shareDisjoint ? '(copied across combined assets)' : '(saved per source Moment)'} <code>${escapeHtml(tagSummary)}</code>.`
+      );
+    } else {
+      stepsHtml.push(
+        `<strong>Update local DB:</strong> Reassign <code>MomentsAlbumName</code> to <code>${escapeHtml(targetMoment)}</code> and sync <code>media_organizer_album_assets</code>.`
+      );
+    }
+
+    noteEl.innerHTML = '✅ Already-present assets in the destination folder will be skipped automatically — no duplicate photos will be added.';
+    proceedBtn.className = 'btn btn-purple';
+    proceedBtn.textContent = existingInfo.exists ? '➕ Confirm & Add Missing Assets' : '✨ Confirm & Merge Moment';
+  } else if (action === 'skip_publishing') {
+    titleEl.textContent = '⏭️ Confirm SkipPublishing Action';
+    subEl.innerHTML = `Source Moment: <code>${escapeHtml(resolveDisjointMomentName)}</code>`;
+    stepsHtml.push(
+      `<strong>Move to SkipPublishing:</strong> Add ${assetIds.length} selected asset(s) to <code>Media Organizer on LaCie / Moments / SkipPublishing</code> in Apple Photos (skipping any already there).`
+    );
+    stepsHtml.push('<strong>Sync DB &amp; folders:</strong> Record asset links in <code>media_organizer_album_assets</code> and remove any local recommendation export folder if present.');
+    noteEl.innerHTML = 'ℹ️ Assets stay in your library but are excluded from Publishing Recommendations.';
+    proceedBtn.className = 'btn btn-purple';
+    proceedBtn.textContent = '⏭️ Confirm SkipPublishing';
+  } else {
+    titleEl.textContent = '🗑️ Confirm Ignore Selected Action';
+    subEl.innerHTML = `Source Moment: <code>${escapeHtml(resolveDisjointMomentName)}</code>`;
+    stepsHtml.push(
+      `<strong>Ignore assets:</strong> Run dedup ignore pipeline (<code>--apply --asset-ids</code>) for ${assetIds.length} selected asset(s).`
+    );
+    if (delSrc) {
+      stepsHtml.push(`<strong>Delete source album rows:</strong> Clean up obsolete album rows for <code>${escapeHtml(resolveDisjointMomentName)}</code> in <code>media_organizer.db</code>.`);
+    }
+    noteEl.innerHTML = '⚠️ Selected assets will be marked ignored and excluded from the Media Organizer.';
+    proceedBtn.className = 'btn btn-purple';
+    proceedBtn.textContent = '🗑️ Confirm Ignore Selected';
+  }
+
+  stepsEl.innerHTML = stepsHtml.map(s => `<li>${s}</li>`).join('');
+  pendingResolveConfirmAction = action;
+  modal.classList.add('open');
+}
+
+async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<void> {
   if (!resolveDisjointMomentName || isSubmittingResolveDisjoint) return;
 
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;

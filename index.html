@@ -2304,6 +2304,24 @@
       </div>
     </div>
 
+    <div class="modal-backdrop" id="modal-resolve-action-confirm" style="z-index: 340;">
+      <div class="modal-dialog" style="width: 600px; max-width: 94vw; border-color: rgba(139, 92, 246, 0.45);">
+        <div class="modal-header">
+          <h3 id="resolve-confirm-title">📋 Confirm Action Steps</h3>
+          <button type="button" class="btn-icon btn-close-resolve-confirm-modal" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body" style="display: flex; flex-direction: column; gap: 0.75rem;">
+          <div id="resolve-confirm-subtitle" class="font-mono text-muted" style="font-size: 0.76rem;"></div>
+          <ol id="resolve-confirm-steps-list" style="margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.8rem; color: var(--text-primary); line-height: 1.45;"></ol>
+          <div id="resolve-confirm-note" class="dedup-status-banner" style="padding: 0.45rem 0.65rem; font-size: 0.74rem; border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.08); color: #a7f3d0;"></div>
+        </div>
+        <div class="modal-footer" style="justify-content: flex-end; gap: 0.5rem;">
+          <button type="button" class="btn btn-outline btn-close-resolve-confirm-modal" id="btn-resolve-confirm-back">← Back &amp; Edit</button>
+          <button type="button" class="btn btn-purple" id="btn-resolve-confirm-proceed">✨ Confirm &amp; Execute</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
