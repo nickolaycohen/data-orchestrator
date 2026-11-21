@@ -273,6 +273,9 @@ export interface PlannerModeM {
     published: string;
     action: string;
     details: string;
+    is_tagged?: boolean;
+    paradigm_confirmed?: boolean;
+    tag_summary?: string;
   }>;
   disjoint_recommendations: Array<{
     moment_name: string;
@@ -285,6 +288,8 @@ export interface PlannerModeM {
     suggested_target?: string;
     asset_ids?: string[];
     is_tagged?: boolean;
+    paradigm_confirmed?: boolean;
+    tag_summary?: string;
   }>;
   unassigned_total_assets: number;
   unassigned_total_clusters: number;
@@ -361,6 +366,9 @@ export interface MemoriesFolderItem {
   memory_stage: string | null;
   curated_count: number;
   published_count: number;
+  is_tagged?: boolean;
+  paradigm_confirmed?: boolean;
+  tag_summary?: string;
 }
 
 export interface MemoriesFoldersResponse {

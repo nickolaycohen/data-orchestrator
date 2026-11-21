@@ -3177,42 +3177,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         m["idx"] = idx
 
     # Actionable & Disjoint publishing recommendations
-    tagged_moments_lc: set[str] = set()
-    tagged_aids: set[str] = set()
-    existing_tables = {
-        r[0]
-        for r in cur.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-    }
-    if "moment_tags" in existing_tables:
-        for m_lc, aid in cur.execute(
-            "SELECT DISTINCT TRIM(LOWER(moment_name)), COALESCE(asset_id, '') FROM moment_tags WHERE TRIM(COALESCE(moment_name, '')) != ''"
-        ).fetchall():
-            if m_lc:
-                tagged_moments_lc.add(m_lc)
-            if aid:
-                tagged_aids.add(aid)
-    if "moment_tag_sessions" in existing_tables:
-        for (m_lc,) in cur.execute(
-            "SELECT DISTINCT TRIM(LOWER(moment_name)) FROM moment_tag_sessions WHERE TRIM(COALESCE(moment_name, '')) != ''"
-        ).fetchall():
-            if m_lc:
-                tagged_moments_lc.add(m_lc)
-    for tbl in ("moments", "media_organizer_albums"):
-        if tbl in existing_tables:
-            t_cols = {r[1] for r in cur.execute(f"PRAGMA table_info({tbl})").fetchall()}
-            if "tagging_paradigm" in t_cols:
-                for (m_lc,) in cur.execute(
-                    f"SELECT DISTINCT TRIM(LOWER(album_name)) FROM {tbl} WHERE TRIM(COALESCE(tagging_paradigm, '')) != '' OR TRIM(COALESCE(tags_metadata_json, '')) != ''"
-                ).fetchall():
-                    if m_lc:
-                        tagged_moments_lc.add(m_lc)
-    a_cols = {r[1] for r in cur.execute("PRAGMA table_info(assets)").fetchall()}
-    if "tags_metadata_json" in a_cols:
-        for (aid,) in cur.execute(
-            "SELECT asset_id FROM assets WHERE TRIM(COALESCE(tags_metadata_json, '')) != ''"
-        ).fetchall():
-            if aid:
-                tagged_aids.add(aid)
+    tag_status_by_lc, tagged_aids = _load_moment_tagging_status_map(cur)
 
     actionable_recs = []
     disjoint_recs = []
@@ -3223,6 +3188,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         pub_count = p_info.get("pub_count", 0)
         last_pub_raw = p_info.get("last_pub_utc")
         cur_files_cnt = max(cm.get("curated_count", 0), md["curated_count"], len(curated_aids_by_album.get(name.strip(), ())))
+        t_info = tag_status_by_lc.get(name.strip().lower())
 
         if md["total_qualified"] < 2 and pub_count == 0:
             # Find nearest moment with >= 2 assets
@@ -3244,7 +3210,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                     merge_hint = f"💡 Suggest merge with: '{best_other}' ({rel})"
 
             qual_aids_list = list(md.get("qualified_aids") or [])
-            is_tagged = (name.strip().lower() in tagged_moments_lc) or any(aid in tagged_aids for aid in qual_aids_list)
+            is_tagged = bool(t_info) or any(aid in tagged_aids for aid in qual_aids_list)
             unpub = md["unpublished_scores"]
             disjoint_recs.append({
                 "moment_name": name,
@@ -3257,6 +3223,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                 "suggested_target": best_other or "",
                 "asset_ids": qual_aids_list,
                 "is_tagged": is_tagged,
+                "paradigm_confirmed": bool(t_info and t_info.get("paradigm_confirmed")),
+                "tag_summary": (t_info or {}).get("tag_summary", ""),
             })
             continue
 
@@ -3292,6 +3260,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         else:
             details_str = ", ".join(bases[:4]) + f" (+{len(bases) - 4} more)"
 
+        rec_tagged = bool(t_info) or any(x[0] in tagged_aids for x in md.get("curated_unpublished") or [])
         actionable_recs.append({
             "idx": 0,
             "moment_name": name,
@@ -3301,6 +3270,9 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             "recommended": len(rec_batch),
             "action": action,
             "details": details_str or "—",
+            "is_tagged": rec_tagged,
+            "paradigm_confirmed": bool(t_info and t_info.get("paradigm_confirmed")),
+            "tag_summary": (t_info or {}).get("tag_summary", ""),
         })
 
     actionable_recs.sort(key=lambda x: -x["avg_score"])
@@ -4736,23 +4708,29 @@ def query_memories_folders(
                 LIMIT ?
             """
             rows = cur.execute(sql, [*params, safe_limit]).fetchall()
-            items = [
-                {
-                    "album_pk": int(r[0]),
-                    "album_name": r[1],
-                    "parent_folder_pk": int(r[2]) if r[2] is not None else None,
-                    "parent_folder_name": r[3] or "",
-                    "full_path": r[4],
-                    "is_folder": bool(r[5]),
-                    "depth": int(r[6]),
-                    "asset_count": int(r[7] or 0),
-                    "synced_at_utc": r[8] or "",
-                    "memory_stage": r[9] or None,
-                    "curated_count": int(r[10] or 0),
-                    "published_count": int(r[11] or 0),
-                }
-                for r in rows
-            ]
+            tag_status_by_lc, _ = _load_moment_tagging_status_map(cur)
+            items = []
+            for r in rows:
+                t_info = None if bool(r[5]) else tag_status_by_lc.get((r[1] or "").strip().lower())
+                items.append(
+                    {
+                        "album_pk": int(r[0]),
+                        "album_name": r[1],
+                        "parent_folder_pk": int(r[2]) if r[2] is not None else None,
+                        "parent_folder_name": r[3] or "",
+                        "full_path": r[4],
+                        "is_folder": bool(r[5]),
+                        "depth": int(r[6]),
+                        "asset_count": int(r[7] or 0),
+                        "synced_at_utc": r[8] or "",
+                        "memory_stage": r[9] or None,
+                        "curated_count": int(r[10] or 0),
+                        "published_count": int(r[11] or 0),
+                        "is_tagged": bool(t_info),
+                        "paradigm_confirmed": bool(t_info and t_info.get("paradigm_confirmed")),
+                        "tag_summary": (t_info or {}).get("tag_summary", ""),
+                    }
+                )
 
             return {
                 "connected": True,
@@ -6204,6 +6182,102 @@ def _sync_moment_folder_metadata_json(
         (payload_json, paradigm, m_name),
     )
     return union_tags
+
+
+def _load_moment_tagging_status_map(cur: sqlite3.Cursor) -> tuple[dict[str, dict], set[str]]:
+    """Load per-Moment DB tagging & paradigm confirmation status plus tagged asset IDs."""
+    status_by_lc: dict[str, dict] = {}
+    tagged_aids: set[str] = set()
+    existing_tables = {
+        r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+
+    def _entry(m_lc: str) -> dict:
+        return status_by_lc.setdefault(
+            m_lc,
+            {
+                "is_tagged": True,
+                "paradigm_confirmed": False,
+                "tags": [],
+                "tag_summary": "",
+            },
+        )
+
+    if "moment_tags" in existing_tables:
+        seen_vals: dict[str, set[str]] = {}
+        for m_lc, aid, cat, val, inc in cur.execute(
+            """
+            SELECT
+                TRIM(LOWER(moment_name)),
+                COALESCE(asset_id, ''),
+                LOWER(TRIM(COALESCE(category, ''))),
+                TRIM(COALESCE(tag_value, '')),
+                COALESCE(include_in_name, 1)
+            FROM moment_tags
+            WHERE TRIM(COALESCE(moment_name, '')) != ''
+            ORDER BY id ASC
+            """
+        ).fetchall():
+            if m_lc:
+                ent = _entry(m_lc)
+                v_lc = val.lower()
+                if val and cat in _TAG_CAT_DISPLAY and v_lc not in seen_vals.setdefault(m_lc, set()):
+                    seen_vals[m_lc].add(v_lc)
+                    ent["tags"].append({"category": cat, "tag_value": val, "include_in_name": bool(inc)})
+            if aid:
+                tagged_aids.add(aid)
+
+    if "moment_tag_sessions" in existing_tables:
+        for (m_lc,) in cur.execute(
+            "SELECT DISTINCT TRIM(LOWER(moment_name)) FROM moment_tag_sessions WHERE TRIM(COALESCE(moment_name, '')) != ''"
+        ).fetchall():
+            if m_lc:
+                _entry(m_lc)
+
+    for tbl in ("moments", "media_organizer_albums"):
+        if tbl in existing_tables:
+            t_cols = {r[1] for r in cur.execute(f"PRAGMA table_info({tbl})").fetchall()}
+            if "tagging_paradigm" in t_cols:
+                for m_lc, par, raw_json in cur.execute(
+                    f"""
+                    SELECT DISTINCT
+                        TRIM(LOWER(album_name)),
+                        TRIM(COALESCE(tagging_paradigm, '')),
+                        COALESCE(tags_metadata_json, '')
+                    FROM {tbl}
+                    WHERE TRIM(COALESCE(tagging_paradigm, '')) != ''
+                       OR TRIM(COALESCE(tags_metadata_json, '')) != ''
+                    """
+                ).fetchall():
+                    if m_lc:
+                        ent = _entry(m_lc)
+                        if par:
+                            ent["paradigm_confirmed"] = True
+                        if raw_json and not ent["tags"]:
+                            try:
+                                parsed = json.loads(raw_json)
+                                for t in parsed.get("active_tags") or []:
+                                    c = (t.get("category") or "").strip().lower()
+                                    v = (t.get("tag_value") or "").strip()
+                                    if c in _TAG_CAT_DISPLAY and v:
+                                        ent["tags"].append(
+                                            {"category": c, "tag_value": v, "include_in_name": bool(t.get("include_in_name", True))}
+                                        )
+                            except Exception:
+                                pass
+
+    a_cols = {r[1] for r in cur.execute("PRAGMA table_info(assets)").fetchall()}
+    if "tags_metadata_json" in a_cols:
+        for (aid,) in cur.execute(
+            "SELECT asset_id FROM assets WHERE TRIM(COALESCE(tags_metadata_json, '')) != ''"
+        ).fetchall():
+            if aid:
+                tagged_aids.add(aid)
+
+    for ent in status_by_lc.values():
+        if ent["tags"]:
+            ent["tag_summary"] = _format_metadata_summary_str(ent["tags"])
+    return status_by_lc, tagged_aids
 
 
 def _read_asset_metadata_tags(cur: sqlite3.Cursor, asset_id: str) -> list[dict]:

@@ -96,6 +96,7 @@ interface TaggingEngineState {
   queryData: TagLookupResponse | null;
   isQueryOpen: boolean;
   showCopyFromDisjointBtn: boolean;
+  hideSaveUseBtn?: boolean;
   getSelectedAssetIds: () => string[];
   onTagsChanged: () => void;
   onUseForName: (composedName: string) => void;
@@ -239,6 +240,18 @@ candidateTagState.onTagsChanged = () => {
     }
   }
   renderPropagateTagsPreview();
+};
+
+let publishTagsDirty = false;
+const publishTagState: TaggingEngineState = createEmptyTaggingState(
+  'publish-moment-tagging-mount',
+  '🏷️ Memory Tagging & Naming Engine',
+  false,
+  () => Array.from(publishSelectedAssetIds)
+);
+publishTagState.hideSaveUseBtn = true;
+publishTagState.onTagsChanged = () => {
+  publishTagsDirty = true;
 };
 
 type ClustersSyncLockMode = 'idle' | 'running' | 'awaiting';
@@ -1209,6 +1222,27 @@ function formatDeviceSummaryCell(ds: BatchDeviceSummary | null | undefined): str
   `;
 }
 
+function renderMomentTaggedBadge(
+  isTagged?: boolean,
+  paradigmConfirmed?: boolean,
+  tagSummary?: string,
+  extraLabel = ''
+): string {
+  if (!isTagged) return '';
+  const cls = paradigmConfirmed ? 'badge-green' : 'badge-purple';
+  const label = paradigmConfirmed
+    ? `✓ Tagged${extraLabel ? ` · ${extraLabel}` : ''}`
+    : `🏷️ Tagged${extraLabel ? ` · ${extraLabel}` : ''}`;
+  const titleParts: string[] = [];
+  if (paradigmConfirmed) {
+    titleParts.push('Passed New Tagging Paradigm');
+  } else {
+    titleParts.push('Tags saved in DB');
+  }
+  if (tagSummary) titleParts.push(tagSummary);
+  return `<span class="badge badge-xs ${cls} font-mono" style="margin-left: 0.35rem;" title="${escapeHtml(titleParts.join(' — '))}">${escapeHtml(label)}</span>`;
+}
+
 function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   const th: any = modeM.threshold || {};
   const sc: any = modeM.stage_counts || {};
@@ -1427,9 +1461,10 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
           const isRepub = r.action.startsWith('Republish');
           const actionBtnClass = isRepub ? 'btn-purple' : 'btn-green';
           const actionBtn = `<button type="button" class="btn btn-xs ${actionBtnClass} btn-open-publish-moment" data-moment-name="${escapeHtml(r.moment_name)}" title="Open Publish / Republish workflow for '${escapeHtml(r.moment_name)}'">${escapeHtml(r.action)}</button>`;
+          const tagBadgeHtml = renderMomentTaggedBadge(r.is_tagged, r.paradigm_confirmed, r.tag_summary);
           return `
           <tr>
-            <td><strong class="text-primary">${escapeHtml(r.moment_name)}</strong></td>
+            <td><strong class="text-primary">${escapeHtml(r.moment_name)}</strong>${tagBadgeHtml}</td>
             <td style="text-align: right;" class="font-mono text-amber">${r.avg_score.toFixed(4)}</td>
             <td style="text-align: right;" class="font-mono">${r.files}</td>
             <td style="text-align: right;" class="font-mono">${r.published}</td>
@@ -1469,9 +1504,12 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
               </button>`
             : '';
           const sugTarget = d.suggested_target || '';
-          const taggedBadgeHtml = d.is_tagged
-            ? `<span class="badge badge-xs badge-green font-mono" style="margin-left: 0.35rem;" title="Already tagged — placed at bottom while awaiting another asset group to merge with">✓ Tagged · awaiting merge</span>`
-            : '';
+          const taggedBadgeHtml = renderMomentTaggedBadge(
+            d.is_tagged,
+            d.paradigm_confirmed,
+            d.tag_summary,
+            'awaiting merge'
+          );
           return `
             <tr${d.is_tagged ? ' style="opacity: 0.84;"' : ''}>
               <td>
@@ -2793,11 +2831,15 @@ function renderMemoriesFolders(items: MemoriesFolderItem[]): void {
         : item.parent_folder_name || 'Moments';
       const prefillName = item.is_folder ? '' : item.album_name;
 
+      const taggedBadgeHtml = !item.is_folder
+        ? renderMomentTaggedBadge(item.is_tagged, item.paradigm_confirmed, item.tag_summary)
+        : '';
+
       return `
         <tr>
           <td>
-            <div style="font-weight: 600; color: var(--text-primary); font-size: 0.76rem;">
-              ${icon} ${escapeHtml(item.album_name)}
+            <div style="font-weight: 600; color: var(--text-primary); font-size: 0.76rem; display: flex; align-items: center; flex-wrap: wrap; gap: 0.2rem;">
+              <span>${icon} ${escapeHtml(item.album_name)}</span>${taggedBadgeHtml}
             </div>
             <div class="memories-folder-path">${escapeHtml(item.full_path)}</div>
           </td>
@@ -3521,6 +3563,17 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
   publishMomentName = momentName;
   publishMomentAssets = [];
   publishSelectedAssetIds.clear();
+  publishTagsDirty = false;
+  publishTagState.momentName = momentName;
+  publishTagState.tags = [];
+  publishTagState.removedTagValues.clear();
+  publishTagState.lastSession = null;
+  publishTagState.tagDbCounts = {};
+  publishTagState.tagCatalogByCategory = {};
+  publishTagState.activeQueriedTagKey = '';
+  publishTagState.saveStatusMsg = '';
+  publishTagState.isQueryOpen = false;
+  publishTagState.queryData = null;
   setPublishModalCompletedState(false);
 
   if (titleEl) titleEl.textContent = `📢 Publish / Republish: ${momentName}`;
@@ -3534,11 +3587,15 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
     statusEl.innerHTML = '';
   }
   renderPublishMomentAssets();
+  renderTaggingEngineCard(publishTagState);
   modal.classList.add('open');
 
   try {
     const params = new URLSearchParams({ moment_name: momentName });
-    const res = await fetch(`/api/media/memories/publish-info?${params.toString()}`);
+    const [res, tagRes] = await Promise.all([
+      fetch(`/api/media/memories/publish-info?${params.toString()}`),
+      fetch(`/api/media/memories/moment-assets?${params.toString()}`).catch(() => null)
+    ]);
     const data: PublishMomentInfoResponse = await res.json();
     if (!data.ok) {
       if (summaryEl) {
@@ -3587,6 +3644,25 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
     publishMomentAssets = data.assets || [];
     publishMomentAssets.forEach(a => publishSelectedAssetIds.add(a.asset_id));
     renderPublishMomentAssets();
+
+    if (tagRes && tagRes.ok) {
+      try {
+        const tagData: MomentAssetsPreviewResponse = await tagRes.json();
+        if (tagData.ok) {
+          publishTagState.tagDbCounts = tagData.tag_db_counts || {};
+          publishTagState.tagCatalogByCategory = tagData.tag_catalog_by_category || {};
+          publishTagState.lastSession = tagData.last_tag_session ?? null;
+          if (tagData.name_suggestion?.family_member_pool?.length) {
+            publishTagState.familyPool = tagData.name_suggestion.family_member_pool;
+          }
+          publishTagState.tags = buildTagListFromSuggestion(tagData.saved_tags, tagData.name_suggestion);
+          publishTagsDirty = false;
+          renderTaggingEngineCard(publishTagState);
+        }
+      } catch {
+        // Non-fatal: publish workflow still succeeds if tag preview fails to parse
+      }
+    }
   } catch (err: any) {
     if (summaryEl) {
       summaryEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
@@ -3632,6 +3708,9 @@ async function submitPublishMoment(): Promise<void> {
 
   let succeeded = false;
   try {
+    if (publishTagsDirty && (publishTagState.tags.length > 0 || publishTagState.removedTagValues.size > 0)) {
+      await saveMomentTagsForState(publishTagState, false);
+    }
     const res = await fetch('/api/media/memories/publish', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4426,6 +4505,13 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
     `;
   }
 
+  const saveOnlyLabel = state.hideSaveUseBtn ? '💾 Save DB Tags (This Batch)' : '💾 Save Tags Only (Keep Name)';
+  const saveUseBtnHtml = state.hideSaveUseBtn
+    ? ''
+    : `<button type="button" class="btn btn-xs btn-purple btn-engine-save-use" ${state.isSaving ? 'disabled' : ''} title="Record tagging session into DB AND copy checked tags into Target Moment Album Name">
+            ✨ Save Tags &amp; Use for Name
+          </button>`;
+
   mountEl.innerHTML = `
     <div class="disjoint-suggestion-box">
       <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
@@ -4436,11 +4522,9 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
         <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
           ${copyBtnHtml}
           <button type="button" class="btn btn-xs btn-outline btn-engine-save-only" ${state.isSaving ? 'disabled' : ''} title="Record tagging session into media_organizer.db for ONLY this Moment's selected assets without changing folder names">
-            💾 Save Tags Only (Keep Name)
+            ${saveOnlyLabel}
           </button>
-          <button type="button" class="btn btn-xs btn-purple btn-engine-save-use" ${state.isSaving ? 'disabled' : ''} title="Record tagging session into DB AND copy checked tags into Target Moment Album Name">
-            ✨ Save Tags &amp; Use for Name
-          </button>
+          ${saveUseBtnHtml}
         </div>
       </div>
       <div class="disjoint-suggested-headline">
@@ -4756,10 +4840,12 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
       if (data.tag_db_counts) {
         sourceTagState.tagDbCounts = data.tag_db_counts;
         candidateTagState.tagDbCounts = data.tag_db_counts;
+        publishTagState.tagDbCounts = data.tag_db_counts;
       }
       if (data.tag_catalog_by_category) {
         sourceTagState.tagCatalogByCategory = data.tag_catalog_by_category;
         candidateTagState.tagCatalogByCategory = data.tag_catalog_by_category;
+        publishTagState.tagCatalogByCategory = data.tag_catalog_by_category;
       }
       if (state === candidateTagState && sourceTagState.momentName) {
         renderTaggingEngineCard(sourceTagState);
@@ -4773,6 +4859,10 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
       state.onUseForName(updatedComposed || composed);
     }
     state.onTagsChanged();
+    if (state === publishTagState) {
+      publishTagsDirty = false;
+      void Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
+    }
     const mergedNote = (data.merged_existing_count ?? 0) > 0 ? ` · merged ${data.merged_existing_count} existing DB tag(s)` : '';
     state.saveStatusOk = true;
     state.saveStatusMsg = applyToFolderName
