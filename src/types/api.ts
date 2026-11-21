@@ -580,7 +580,11 @@ export interface MomentAssetsPreviewResponse {
   moment_name?: string;
   historical_min?: number;
   assets?: DisjointDetailAsset[];
+  albums_present?: Array<{ parent: string; asset_count: number; full_path: string }>;
+  name_suggestion?: DisjointNameSuggestion;
   saved_tags?: MomentTagItem[];
+  last_tag_session?: MomentTagSessionSummary | null;
+  tag_db_counts?: Record<string, { assets: number; moments: number }>;
 }
 
 export interface ResolveDisjointResponse {

@@ -2197,81 +2197,7 @@
 
             <div id="resolve-disjoint-albums-bar" class="publish-folder-bar" style="display: none; font-size: 0.72rem;"></div>
 
-            <div class="disjoint-suggestion-box" id="resolve-disjoint-suggestion-box">
-              <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
-                <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
-                  <strong style="font-size: 0.84rem; color: #f5f3ff;">🏷️ Memory Tagging &amp; Naming Engine</strong>
-                  <span class="badge badge-xs badge-outline font-mono" id="resolve-disjoint-session-badge">Not tagged yet</span>
-                </div>
-                <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
-                  <button type="button" class="btn btn-xs btn-outline" id="btn-save-tags-only" title="Record tagging session into media_organizer.db without changing or appending to the folder name">
-                    💾 Save Tags Only (Keep Name)
-                  </button>
-                  <button type="button" class="btn btn-xs btn-purple" id="btn-save-tags-use-name" title="Record tagging session into DB AND copy the checked tags into Target Moment Album Name">
-                    ✨ Save Tags &amp; Use for Name
-                  </button>
-                </div>
-              </div>
-              <div class="disjoint-suggested-headline">
-                <span class="font-mono text-muted" style="font-size: 0.66rem; font-weight: 400; display: block; margin-bottom: 0.12rem;">Picked Tags (✓) → Flat Folder Name Preview · Click any pill text to query DB assets already tagged</span>
-                <span id="resolve-disjoint-suggested-preview">—</span>
-              </div>
-              <div class="disjoint-paradigm-grid">
-                <div class="tag-category-col" data-tag-cat="activity">
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">Activity</label>
-                  <div class="tag-pills-list" id="resolve-disjoint-pills-activity"></div>
-                  <div class="tag-add-row">
-                    <input type="text" id="resolve-disjoint-add-activity" class="form-control tag-add-input" placeholder="+ add activity" />
-                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="activity">+</button>
-                  </div>
-                </div>
-                <div class="tag-category-col" data-tag-cat="location">
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">Location</label>
-                  <div class="tag-pills-list" id="resolve-disjoint-pills-location"></div>
-                  <div class="tag-add-row">
-                    <input type="text" id="resolve-disjoint-add-location" class="form-control tag-add-input" placeholder="+ add location" />
-                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="location">+</button>
-                  </div>
-                </div>
-                <div class="tag-category-col" data-tag-cat="people">
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">People</label>
-                  <div class="tag-pills-list" id="resolve-disjoint-pills-people"></div>
-                  <div class="tag-add-row">
-                    <input type="text" id="resolve-disjoint-add-people" class="form-control tag-add-input" placeholder="+ add person" />
-                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="people">+</button>
-                  </div>
-                </div>
-                <div class="tag-category-col" data-tag-cat="when">
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: block; margin-bottom: 0.25rem;">When</label>
-                  <div class="tag-pills-list" id="resolve-disjoint-pills-when"></div>
-                  <div class="tag-add-row">
-                    <input type="text" id="resolve-disjoint-add-when" class="form-control tag-add-input" placeholder="+ add when" />
-                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="when">+</button>
-                  </div>
-                </div>
-                <div class="tag-category-col tag-category-optional" data-tag-cat="family_member">
-                  <label class="font-mono text-muted" style="font-size: 0.66rem; display: flex; align-items: center; justify-content: space-between; gap: 0.25rem; margin-bottom: 0.25rem;">
-                    <span>Family Member</span>
-                    <span style="font-size: 0.57rem; opacity: 0.78;">opt · DB only</span>
-                  </label>
-                  <div class="tag-pills-list" id="resolve-disjoint-pills-family_member"></div>
-                  <div class="disjoint-mini-chips" id="resolve-disjoint-family-quick-chips"></div>
-                  <div class="tag-add-row">
-                    <input type="text" id="resolve-disjoint-add-family_member" class="form-control tag-add-input" placeholder="+ add family" />
-                    <button type="button" class="btn btn-xs btn-outline btn-add-tag-pill" data-tag-cat="family_member">+</button>
-                  </div>
-                </div>
-              </div>
-              <div id="resolve-disjoint-tag-save-status" class="font-mono" style="display: none; font-size: 0.7rem;"></div>
-              <div id="resolve-disjoint-tag-query-panel" class="tag-db-query-panel" style="display: none;">
-                <div class="tag-db-query-header">
-                  <span id="resolve-disjoint-tag-query-title" class="font-mono" style="font-size: 0.72rem; font-weight: 600;">🔎 DB Matches</span>
-                  <button type="button" class="btn btn-xs btn-icon" id="btn-close-tag-query-panel" aria-label="Close DB Matches">✕</button>
-                </div>
-                <div id="resolve-disjoint-tag-query-moments" class="tag-db-moments-row"></div>
-                <div id="resolve-disjoint-tag-query-assets" class="tag-db-assets-grid"></div>
-              </div>
-            </div>
+            <div id="resolve-disjoint-source-tagging-mount"></div>
 
             <div>
               <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
@@ -2304,11 +2230,10 @@
                 <div class="tag-db-query-header" style="flex-wrap: wrap;">
                   <div style="min-width: 0; flex: 1;">
                     <div id="resolve-disjoint-candidate-preview-title" class="font-mono" style="font-size: 0.73rem; font-weight: 600;">📂 Moment Preview</div>
-                    <div id="resolve-disjoint-candidate-preview-tags" class="disjoint-mini-chips" style="margin-top: 0.2rem;"></div>
                   </div>
                   <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
-                    <button type="button" class="btn btn-xs btn-purple" id="btn-candidate-add-combine" title="Add this Moment and its selected assets to the New Moment consolidation & apply active DB tags">
-                      ➕ Add &amp; Tag with Above
+                    <button type="button" class="btn btn-xs btn-purple" id="btn-candidate-add-combine" title="Add this Moment, its selected assets, and its own tags to the consolidation list">
+                      ➕ Add Moment to Consolidation
                     </button>
                     <button type="button" class="btn btn-xs btn-outline" id="btn-candidate-use-legacy-target" title="Set Target Moment Name to this existing album for legacy Merge into Target">
                       🔀 Use as Legacy Target
@@ -2317,6 +2242,7 @@
                   </div>
                 </div>
                 <div id="resolve-disjoint-candidate-assets-grid" class="tag-db-assets-grid"></div>
+                <div id="resolve-disjoint-candidate-tagging-mount"></div>
               </div>
 
               <div class="publish-urls-grid">
@@ -2335,10 +2261,14 @@
                 </div>
               </div>
 
-              <div id="resolve-disjoint-propagate-tags-box" style="padding: 0.45rem 0.6rem; border-radius: 6px; background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); display: flex; flex-direction: column; gap: 0.3rem;">
+              <div id="resolve-disjoint-propagate-tags-box" style="padding: 0.45rem 0.6rem; border-radius: 6px; background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); display: flex; flex-direction: column; gap: 0.32rem;">
                 <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: #ede9fe; font-weight: 500;">
-                  <input type="checkbox" id="resolve-disjoint-propagate-tags" checked />
-                  <span>Tag all combined assets (disjoint + added Moments) &amp; record tagging session in DB</span>
+                  <input type="checkbox" id="resolve-disjoint-save-per-source-tags" checked />
+                  <span>Save each Moment's own DB tags onto its respective assets (Disjoint → disjoint tags; Combined Moment → its own tags)</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.71rem; cursor: pointer; color: var(--text-secondary);">
+                  <input type="checkbox" id="resolve-disjoint-share-disjoint-tags" />
+                  <span>Also copy Disjoint Moment's tags onto combined existing Moment assets</span>
                 </label>
                 <div id="resolve-disjoint-propagate-tags-list" class="disjoint-mini-chips"></div>
               </div>

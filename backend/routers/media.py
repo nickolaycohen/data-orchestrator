@@ -4985,6 +4985,12 @@ class SaveMomentTagItem(BaseModel):
     include_in_name: bool = True
 
 
+class MomentAssetTagGroup(BaseModel):
+    moment_name: str
+    asset_ids: list[str] = []
+    tags: list[SaveMomentTagItem] = []
+
+
 class ResolveDisjointRequest(BaseModel):
     source_moment: str
     action: str  # "merge" | "skip_publishing" | "ignore"
@@ -4994,6 +5000,7 @@ class ResolveDisjointRequest(BaseModel):
     additional_moments: list[str] = []
     additional_asset_ids: list[str] = []
     apply_tags: list[SaveMomentTagItem] = []
+    moment_tag_groups: list[MomentAssetTagGroup] = []
     delete_source_albums: bool = True
 
 
@@ -5436,6 +5443,185 @@ class SaveMomentTagsRequest(BaseModel):
     notes: Optional[str] = None
 
 
+def _load_moment_detail_core(cur: sqlite3.Cursor, m_name: str, limit_assets: Optional[int] = None) -> dict:
+    """Shared loader for Moment assets, Apple Photos metadata, name suggestions, saved DB tags, and session history."""
+    _ensure_moment_tag_tables(cur)
+    cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+    min_row = cur.fetchone()
+    hist_min_raw = float(min_row[0]) if min_row and min_row[0] else 0.5315
+
+    cur.execute(
+        """
+        SELECT DISTINCT moaa.asset_id
+        FROM media_organizer_album_assets moaa
+        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+        """
+    )
+    excluded_aids = {r[0] for r in cur.fetchall()}
+
+    limit_sql = f"LIMIT {int(limit_assets)}" if limit_assets else ""
+    cur.execute(
+        f"""
+        SELECT DISTINCT
+            a.asset_id,
+            COALESCE(v.original_filename, a.original_filename, ''),
+            COALESCE(v.score_normalized, 0.0),
+            COALESCE(v.date_created_utc, a.date_created_utc, ''),
+            a.month,
+            COALESCE(za.ZKIND, 0),
+            ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
+            COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
+            COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
+            COALESCE(aaa.ZORIGINALFILESIZE, 0),
+            COALESCE(ze.ZCAMERAMODEL, a.carrier_device, 'Unknown'),
+            COALESCE(do.owner_name, 'Shared/Other')
+        FROM assets a
+        LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+        LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+        LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+        LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, ze.ZCAMERAMODEL)
+            AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+            AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+        WHERE (
+            TRIM(COALESCE(a.MomentsAlbumName, '')) = TRIM(?)
+            OR a.asset_id IN (
+                SELECT moaa.asset_id
+                FROM media_organizer_album_assets moaa
+                JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                WHERE moa.is_folder = 0
+                  AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+            )
+          )
+          AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+          AND COALESCE(a.removed_from_source, 0) = 0
+        ORDER BY COALESCE(v.score_normalized, 0.0) DESC, a.date_created_utc ASC
+        {limit_sql}
+        """,
+        (m_name, m_name),
+    )
+    raw_assets = cur.fetchall()
+    assets_out = []
+    qual_dates: list[datetime] = []
+    for r in raw_assets:
+        aid, fn, sc, dt_s, mo, zkind, dur, w, h, fbytes, cam, owner = r
+        if aid in excluded_aids:
+            continue
+        is_qual = float(sc or 0.0) > hist_min_raw
+        dt_obj = _parse_utc_dt(dt_s)
+        if is_qual and dt_obj:
+            qual_dates.append(dt_obj)
+        assets_out.append(
+            {
+                "asset_id": aid,
+                "original_filename": fn,
+                "score_normalized": round(float(sc or 0.0), 4),
+                "date_created_utc": (dt_s or "")[:19],
+                "month": mo or "",
+                "media_type": "video" if int(zkind or 0) == 1 else "photo",
+                "duration": float(dur or 0.0),
+                "width": int(w or 0),
+                "height": int(h or 0),
+                "file_size_bytes": int(fbytes or 0),
+                "camera_model": cam or "Unknown",
+                "primary_owner": owner or "Shared/Other",
+                "qualified": is_qual,
+            }
+        )
+
+    cur.execute(
+        """
+        SELECT parent_folder_name, asset_count, full_path
+        FROM media_organizer_albums
+        WHERE is_folder = 0 AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+        """,
+        (m_name,),
+    )
+    albums_present = [
+        {"parent": r[0], "asset_count": int(r[1] or 0), "full_path": r[2]}
+        for r in cur.fetchall()
+    ]
+
+    photos_meta = _load_photos_moment_metadata([a["asset_id"] for a in assets_out])
+    name_suggestion = _build_moment_name_suggestion(m_name, assets_out, qual_dates, photos_meta)
+
+    cur.execute(
+        """
+        SELECT
+            category,
+            tag_value,
+            MAX(include_in_name) AS inc,
+            COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS asset_cnt
+        FROM moment_tags
+        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+        GROUP BY LOWER(category), LOWER(tag_value)
+        ORDER BY MIN(id) ASC
+        """,
+        (m_name,),
+    )
+    saved_tags = [
+        {
+            "category": r[0],
+            "tag_value": r[1],
+            "include_in_name": bool(r[2]),
+            "tagged_asset_count": int(r[3] or 0),
+        }
+        for r in cur.fetchall()
+    ]
+
+    cur.execute(
+        """
+        SELECT session_id, moment_name, apply_to_folder_name, composed_name, asset_count, created_at_utc
+        FROM moment_tag_sessions
+        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+        ORDER BY session_id DESC
+        LIMIT 1
+        """,
+        (m_name,),
+    )
+    sess_row = cur.fetchone()
+    last_tag_session = (
+        {
+            "session_id": int(sess_row[0]),
+            "moment_name": sess_row[1],
+            "apply_to_folder_name": bool(sess_row[2]),
+            "composed_name": sess_row[3] or "",
+            "asset_count": int(sess_row[4] or 0),
+            "created_at_utc": sess_row[5] or "",
+        }
+        if sess_row
+        else None
+    )
+
+    cur.execute(
+        """
+        SELECT
+            LOWER(tag_value) AS tv,
+            COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS assets_cnt,
+            COUNT(DISTINCT LOWER(moment_name)) AS moments_cnt
+        FROM moment_tags
+        GROUP BY LOWER(tag_value)
+        """
+    )
+    tag_db_counts = {
+        r[0]: {"assets": int(r[1] or 0), "moments": int(r[2] or 0)}
+        for r in cur.fetchall()
+        if r[0]
+    }
+    return {
+        "historical_min": hist_min_raw,
+        "assets_out": assets_out,
+        "qual_dates": qual_dates,
+        "albums_present": albums_present,
+        "name_suggestion": name_suggestion,
+        "saved_tags": saved_tags,
+        "last_tag_session": last_tag_session,
+        "tag_db_counts": tag_db_counts,
+    }
+
+
 @router.get("/memories/disjoint-detail")
 def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
     """Return full asset metadata, album locations, DB tags, and chronological merge candidates for a Moment."""
@@ -5449,169 +5635,15 @@ def get_disjoint_moment_detail(moment_name: str, suggested_target: str = ""):
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
         try:
             cur = conn.cursor()
-            _ensure_moment_tag_tables(cur)
-            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
-            min_row = cur.fetchone()
-            hist_min_raw = float(min_row[0]) if min_row and min_row[0] else 0.5315
-
-            cur.execute(
-                """
-                SELECT DISTINCT moaa.asset_id
-                FROM media_organizer_album_assets moaa
-                JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
-                """
-            )
-            excluded_aids = {r[0] for r in cur.fetchall()}
-
-            cur.execute(
-                """
-                SELECT DISTINCT
-                    a.asset_id,
-                    COALESCE(v.original_filename, a.original_filename, ''),
-                    COALESCE(v.score_normalized, 0.0),
-                    COALESCE(v.date_created_utc, a.date_created_utc, ''),
-                    a.month,
-                    COALESCE(za.ZKIND, 0),
-                    ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
-                    COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
-                    COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
-                    COALESCE(aaa.ZORIGINALFILESIZE, 0),
-                    COALESCE(ze.ZCAMERAMODEL, a.carrier_device, 'Unknown'),
-                    COALESCE(do.owner_name, 'Shared/Other')
-                FROM assets a
-                LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
-                LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
-                LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
-                LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
-                LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, ze.ZCAMERAMODEL)
-                    AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                    AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                WHERE (
-                    TRIM(COALESCE(a.MomentsAlbumName, '')) = TRIM(?)
-                    OR a.asset_id IN (
-                        SELECT moaa.asset_id
-                        FROM media_organizer_album_assets moaa
-                        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                        WHERE moa.is_folder = 0
-                          AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
-                    )
-                  )
-                  AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
-                ORDER BY COALESCE(v.score_normalized, 0.0) DESC, a.date_created_utc ASC
-                """,
-                (m_name, m_name),
-            )
-            raw_assets = cur.fetchall()
-            assets_out = []
-            qual_dates: list[datetime] = []
-            for r in raw_assets:
-                aid, fn, sc, dt_s, mo, zkind, dur, w, h, fbytes, cam, owner = r
-                if aid in excluded_aids:
-                    continue
-                is_qual = float(sc or 0.0) > hist_min_raw
-                dt_obj = _parse_utc_dt(dt_s)
-                if is_qual and dt_obj:
-                    qual_dates.append(dt_obj)
-                assets_out.append(
-                    {
-                        "asset_id": aid,
-                        "original_filename": fn,
-                        "score_normalized": round(float(sc or 0.0), 4),
-                        "date_created_utc": (dt_s or "")[:19],
-                        "month": mo or "",
-                        "media_type": "video" if int(zkind or 0) == 1 else "photo",
-                        "duration": float(dur or 0.0),
-                        "width": int(w or 0),
-                        "height": int(h or 0),
-                        "file_size_bytes": int(fbytes or 0),
-                        "camera_model": cam or "Unknown",
-                        "primary_owner": owner or "Shared/Other",
-                        "qualified": is_qual,
-                    }
-                )
-
-            cur.execute(
-                """
-                SELECT parent_folder_name, asset_count, full_path
-                FROM media_organizer_albums
-                WHERE is_folder = 0 AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
-                """,
-                (m_name,),
-            )
-            albums_present = [
-                {"parent": r[0], "asset_count": int(r[1] or 0), "full_path": r[2]}
-                for r in cur.fetchall()
-            ]
-
-            photos_meta = _load_photos_moment_metadata([a["asset_id"] for a in assets_out])
-            name_suggestion = _build_moment_name_suggestion(m_name, assets_out, qual_dates, photos_meta)
-
-            # Load saved DB tags & last tagging session for this Moment (enables retagging anytime)
-            cur.execute(
-                """
-                SELECT
-                    category,
-                    tag_value,
-                    MAX(include_in_name) AS inc,
-                    COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS asset_cnt
-                FROM moment_tags
-                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-                GROUP BY LOWER(category), LOWER(tag_value)
-                ORDER BY MIN(id) ASC
-                """,
-                (m_name,),
-            )
-            saved_tags = [
-                {
-                    "category": r[0],
-                    "tag_value": r[1],
-                    "include_in_name": bool(r[2]),
-                    "tagged_asset_count": int(r[3] or 0),
-                }
-                for r in cur.fetchall()
-            ]
-
-            cur.execute(
-                """
-                SELECT session_id, moment_name, apply_to_folder_name, composed_name, asset_count, created_at_utc
-                FROM moment_tag_sessions
-                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-                ORDER BY session_id DESC
-                LIMIT 1
-                """,
-                (m_name,),
-            )
-            sess_row = cur.fetchone()
-            last_tag_session = (
-                {
-                    "session_id": int(sess_row[0]),
-                    "moment_name": sess_row[1],
-                    "apply_to_folder_name": bool(sess_row[2]),
-                    "composed_name": sess_row[3] or "",
-                    "asset_count": int(sess_row[4] or 0),
-                    "created_at_utc": sess_row[5] or "",
-                }
-                if sess_row
-                else None
-            )
-
-            cur.execute(
-                """
-                SELECT
-                    LOWER(tag_value) AS tv,
-                    COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS assets_cnt,
-                    COUNT(DISTINCT LOWER(moment_name)) AS moments_cnt
-                FROM moment_tags
-                GROUP BY LOWER(tag_value)
-                """
-            )
-            tag_db_counts = {
-                r[0]: {"assets": int(r[1] or 0), "moments": int(r[2] or 0)}
-                for r in cur.fetchall()
-                if r[0]
-            }
+            core = _load_moment_detail_core(cur, m_name)
+            hist_min_raw = core["historical_min"]
+            assets_out = core["assets_out"]
+            qual_dates = core["qual_dates"]
+            albums_present = core["albums_present"]
+            name_suggestion = core["name_suggestion"]
+            saved_tags = core["saved_tags"]
+            last_tag_session = core["last_tag_session"]
+            tag_db_counts = core["tag_db_counts"]
             conn.commit()
 
             # Build nearby multi-asset merge candidates
@@ -5991,7 +6023,7 @@ def search_moments_for_consolidation(q: str = "", exclude_moment: str = "", anch
 
 @router.get("/memories/moment-assets")
 def get_moment_assets_preview(moment_name: str):
-    """Return asset thumbnails, metadata, and DB tags for any Moment folder pill preview."""
+    """Return full tagging context, asset thumbnails, and suggestions for any existing Moment pill."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"ok": False, "error": "Media database unavailable"}
     m_name = (moment_name or "").strip()
@@ -6002,91 +6034,18 @@ def get_moment_assets_preview(moment_name: str):
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
         try:
             cur = conn.cursor()
-            _ensure_moment_tag_tables(cur)
-            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
-            min_row = cur.fetchone()
-            hist_min_raw = float(min_row[0]) if min_row and min_row[0] else 0.5315
-
-            cur.execute(
-                """
-                SELECT DISTINCT
-                    a.asset_id,
-                    COALESCE(v.original_filename, a.original_filename, ''),
-                    COALESCE(v.score_normalized, 0.0),
-                    COALESCE(v.date_created_utc, a.date_created_utc, ''),
-                    a.month,
-                    COALESCE(za.ZKIND, 0),
-                    ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
-                    COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
-                    COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
-                    COALESCE(aaa.ZORIGINALFILESIZE, 0),
-                    COALESCE(ze.ZCAMERAMODEL, a.carrier_device, 'Unknown'),
-                    COALESCE(do.owner_name, 'Shared/Other')
-                FROM assets a
-                LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
-                LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
-                LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
-                LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
-                LEFT JOIN device_owners do ON do.camera_model = COALESCE(a.carrier_device, ze.ZCAMERAMODEL)
-                    AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                    AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
-                WHERE (
-                    TRIM(COALESCE(a.MomentsAlbumName, '')) = TRIM(?)
-                    OR a.asset_id IN (
-                        SELECT moaa.asset_id
-                        FROM media_organizer_album_assets moaa
-                        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                        WHERE moa.is_folder = 0 AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
-                    )
-                )
-                  AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
-                  AND COALESCE(a.removed_from_source, 0) = 0
-                ORDER BY COALESCE(v.score_normalized, 0.0) DESC, a.date_created_utc ASC
-                LIMIT 100
-                """,
-                (m_name, m_name),
-            )
-            assets_out = []
-            for aid, fn, sc, dt_s, mo, zkind, dur, w, h, fbytes, cam, owner in cur.fetchall():
-                sc_val = float(sc or 0.0)
-                assets_out.append(
-                    {
-                        "asset_id": aid,
-                        "original_filename": fn,
-                        "score_normalized": round(sc_val, 4),
-                        "date_created_utc": (dt_s or "")[:19],
-                        "month": mo or "",
-                        "media_type": "video" if int(zkind or 0) == 1 else "photo",
-                        "duration": float(dur or 0.0),
-                        "width": int(w or 0),
-                        "height": int(h or 0),
-                        "file_size_bytes": int(fbytes or 0),
-                        "camera_model": cam or "Unknown",
-                        "primary_owner": owner or "Shared/Other",
-                        "qualified": sc_val > hist_min_raw,
-                    }
-                )
-
-            cur.execute(
-                """
-                SELECT category, tag_value, MAX(include_in_name)
-                FROM moment_tags
-                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-                GROUP BY LOWER(category), LOWER(tag_value)
-                ORDER BY MIN(id) ASC
-                """,
-                (m_name,),
-            )
-            saved_tags = [
-                {"category": r[0], "tag_value": r[1], "include_in_name": bool(r[2])}
-                for r in cur.fetchall()
-            ]
+            core = _load_moment_detail_core(cur, m_name, limit_assets=100)
+            conn.commit()
             return {
                 "ok": True,
                 "moment_name": m_name,
-                "historical_min": round(hist_min_raw, 4),
-                "assets": assets_out,
-                "saved_tags": saved_tags,
+                "historical_min": round(core["historical_min"], 4),
+                "assets": core["assets_out"],
+                "albums_present": core["albums_present"],
+                "name_suggestion": core["name_suggestion"],
+                "saved_tags": core["saved_tags"],
+                "last_tag_session": core["last_tag_session"],
+                "tag_db_counts": core["tag_db_counts"],
             }
         finally:
             conn.close()
@@ -6428,22 +6387,40 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (sm,))
                 _delete_source_albums_from_db(cur, sm)
 
-        # Apply active DB tags across all consolidated assets + target Moment if provided
+        # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
         valid_cats = {"activity", "location", "people", "when", "family_member"}
-        clean_apply_tags: list[dict] = []
-        seen_tag_pairs: set[tuple[str, str]] = set()
-        for t in req.apply_tags or []:
-            cat = (t.category or "").strip().lower()
-            val = re.sub(r"\s+", " ", (t.tag_value or "").strip())
-            if cat not in valid_cats or not val:
-                continue
-            tk = (cat, val.lower())
-            if tk in seen_tag_pairs:
-                continue
-            seen_tag_pairs.add(tk)
-            clean_apply_tags.append({"category": cat, "tag_value": val, "include_in_name": bool(t.include_in_name)})
 
-        if clean_apply_tags:
+        def _clean_tag_list(items: list[SaveMomentTagItem]) -> list[dict]:
+            cleaned: list[dict] = []
+            seen_pairs: set[tuple[str, str]] = set()
+            for t in items or []:
+                cat = (t.category or "").strip().lower()
+                val = re.sub(r"\s+", " ", (t.tag_value or "").strip())
+                if cat not in valid_cats or not val:
+                    continue
+                tk = (cat, val.lower())
+                if tk in seen_pairs:
+                    continue
+                seen_pairs.add(tk)
+                cleaned.append({"category": cat, "tag_value": val, "include_in_name": bool(t.include_in_name)})
+            return cleaned
+
+        clean_apply_tags = _clean_tag_list(req.apply_tags)
+        clean_groups: list[tuple[list[str], list[dict]]] = []
+        union_tags: list[dict] = list(clean_apply_tags)
+        seen_union = {(t["category"], t["tag_value"].lower()) for t in union_tags}
+        for grp in req.moment_tag_groups or []:
+            g_tags = _clean_tag_list(grp.tags)
+            g_aids = [s.strip() for s in (grp.asset_ids or []) if s and s.strip()]
+            if g_tags and g_aids:
+                clean_groups.append((g_aids, g_tags))
+                for t in g_tags:
+                    tk = (t["category"], t["tag_value"].lower())
+                    if tk not in seen_union:
+                        seen_union.add(tk)
+                        union_tags.append(t)
+
+        if clean_apply_tags or clean_groups:
             cur.execute(
                 """
                 INSERT INTO moment_tag_sessions
@@ -6453,32 +6430,40 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 (
                     target_moment,
                     target_moment,
-                    json.dumps(clean_apply_tags),
+                    json.dumps(union_tags),
                     len(merge_db_ids),
                     f"Consolidated from: {', '.join(combined_src_moments)}",
                 ),
             )
             tag_session_id = int(cur.lastrowid)
-            target_tag_ids = ["", *merge_db_ids]
-            for aid in target_tag_ids:
-                for t in clean_apply_tags:
-                    cur.execute(
-                        """
-                        INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
-                        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                        ON CONFLICT(LOWER(moment_name), asset_id, LOWER(category), LOWER(tag_value))
-                        DO UPDATE SET include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
-                        """,
-                        (
-                            target_moment,
-                            aid,
-                            t["category"],
-                            t["tag_value"],
-                            1 if t["include_in_name"] else 0,
-                            tag_session_id,
-                        ),
-                    )
-            tags_applied_count = len(clean_apply_tags)
+
+            def _upsert_tag_rows(aid_list: list[str], tag_list: list[dict]) -> None:
+                for aid in aid_list:
+                    for t in tag_list:
+                        cur.execute(
+                            """
+                            INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
+                            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                            ON CONFLICT(LOWER(moment_name), asset_id, LOWER(category), LOWER(tag_value))
+                            DO UPDATE SET include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
+                            """,
+                            (
+                                target_moment,
+                                aid,
+                                t["category"],
+                                t["tag_value"],
+                                1 if t["include_in_name"] else 0,
+                                tag_session_id,
+                            ),
+                        )
+
+            if union_tags:
+                _upsert_tag_rows([""], union_tags)
+            for g_aids, g_tags in clean_groups:
+                _upsert_tag_rows(g_aids, g_tags)
+            if clean_apply_tags and merge_db_ids:
+                _upsert_tag_rows(merge_db_ids, clean_apply_tags)
+            tags_applied_count = len(union_tags)
 
         conn.commit()
     finally:
