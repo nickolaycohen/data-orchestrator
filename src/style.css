@@ -381,6 +381,109 @@ body {
   display: none;
 }
 
+.cli-sim-panel {
+  margin-top: 1rem;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: var(--radius-md);
+  background: rgba(10, 15, 28, 0.55);
+  padding: 0.75rem 0.9rem;
+}
+
+.cli-sim-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.cli-sim-title-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+
+.cli-sim-icon {
+  font-size: 1.05rem;
+  line-height: 1.2;
+  margin-top: 0.05rem;
+}
+
+.cli-sim-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.cli-sim-desc {
+  font-size: 0.71rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+
+.cli-sim-gate-banner {
+  margin-top: 0.65rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.cli-sim-gate-banner.gate-unlocked {
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.cli-sim-gate-banner.gate-curation {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.cli-sim-gate-banner.gate-auto-export {
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.cli-sim-section-block {
+  margin-top: 0.75rem;
+}
+
+.cli-sim-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cli-sim-divider-row td {
+  background: rgba(56, 189, 248, 0.07);
+  color: var(--accent-cyan, #38bdf8);
+  font-size: 0.69rem;
+  font-weight: 600;
+  padding: 0.32rem 0.55rem !important;
+  letter-spacing: 0.01em;
+}
+
+.cli-sim-subdivider-row td {
+  background: rgba(168, 85, 247, 0.08);
+  color: var(--text-secondary);
+  font-size: 0.69rem;
+  font-weight: 600;
+  padding: 0.34rem 0.55rem !important;
+}
+
 .stat-tiles-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

@@ -5,6 +5,9 @@
 import type {
   AppleMonthSelectionDetailResponse,
   BatchDeviceSummary,
+  CliStep2ConsoleMomentRow,
+  CliStep2PendingPublishingRow,
+  CliStep2Simulation,
   CreateMomentResponse,
   DisjointDetailAsset,
   DisjointDetailResponse,
@@ -758,6 +761,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   };
   wireStepToggle('btn-toggle-mode-m-step-1', 'mode-m-step-1-body');
   wireStepToggle('btn-toggle-mode-m-step-2', 'mode-m-step-2-body');
+  wireStepToggle('btn-toggle-mode-m-cli-sim', 'mode-m-cli-sim-body');
 
   const btnToggleFolders = document.getElementById('btn-toggle-memories-folders');
   if (btnToggleFolders) {
@@ -1812,6 +1816,271 @@ export function renderMomentTaggedBadge(
   return `<span class="badge badge-xs ${cls} font-mono" style="margin-left: 0.35rem;" title="${escapeHtml(titleParts.join(' — '))}">${escapeHtml(label)}</span>`;
 }
 
+function cliStageBadgeClass(stage: string): string {
+  switch (stage) {
+    case 'M500':
+      return 'badge-green';
+    case 'M450':
+    case 'M400':
+      return 'badge-blue';
+    case 'M300':
+      return 'badge-purple';
+    case 'M200':
+      return 'badge-amber';
+    default:
+      return 'badge-muted';
+  }
+}
+
+function renderCliSimPendingSection(
+  sim: CliStep2Simulation,
+  startIdx: number
+): string {
+  const pp = sim.pending_publishing || {
+    publishable_tbc: [],
+    publishable_clean: [],
+    pending_curation: [],
+    pending_cooldown: [],
+    disjoint: []
+  };
+  const subsections: Array<{ title: string; rows: CliStep2PendingPublishingRow[]; showTbc: boolean }> = [
+    {
+      title: '⚠️ 🚀 Ready for Publishing (Action Required: Assets in ToBeCurated Need Review & Move to Curated)',
+      rows: pp.publishable_tbc || [],
+      showTbc: true
+    },
+    {
+      title: '🚀 Ready for Publishing (Fully Curated — No Assets in ToBeCurated, Ready to Export)',
+      rows: pp.publishable_clean || [],
+      showTbc: false
+    },
+    {
+      title: '⏳ Pending Curation (New Assets in ToBeCurated)',
+      rows: pp.pending_curation || [],
+      showTbc: true
+    },
+    {
+      title: '⏱️ Pending Time Restriction (Cooldown Delay < 30d)',
+      rows: pp.pending_cooldown || [],
+      showTbc: false
+    },
+    {
+      title: '🔀 Disjoint Moments (< 2 Qualified Assets)',
+      rows: pp.disjoint || [],
+      showTbc: false
+    }
+  ];
+
+  const totalPendingRows = subsections.reduce((acc, s) => acc + s.rows.length, 0);
+  const headingTitle = sim.has_pending_curation
+    ? '🔒 Step 2B Preview: Curated Moments Pending Publishing (Unlocks After M200/M300 Queue Clears)'
+    : '🌟 Curated Moments Pending Publishing (Active CLI Step 2B Output)';
+
+  if (totalPendingRows === 0) {
+    return `
+      <div class="cli-sim-section-block">
+        <div class="cli-sim-section-heading">
+          <span>${escapeHtml(headingTitle)}</span>
+          <span class="badge badge-xs badge-muted font-mono">0 pending</span>
+        </div>
+        <div class="text-muted" style="font-size: 0.72rem; padding: 0.35rem 0;">
+          No M400/M450 moments currently have pending unpublished curated assets.
+        </div>
+      </div>
+    `;
+  }
+
+  let seq = startIdx;
+  const bodyRows = subsections
+    .filter(sub => sub.rows.length > 0)
+    .map(sub => {
+      const divider = `
+        <tr class="cli-sim-subdivider-row">
+          <td colspan="10">${escapeHtml(sub.title)} · <strong>${sub.rows.length}</strong></td>
+        </tr>
+      `;
+      const rowsHtml = sub.rows
+        .map(entry => {
+          const rowNo = seq++;
+          const scoresStr = (entry.proposed_scores || []).map(s => s.toFixed(4)).join(', ') || '—';
+          const tbcPrefix =
+            sub.showTbc && entry.to_be_curated_count > 0
+              ? `ToBeCurated: ${entry.to_be_curated_count} ${entry.to_be_curated_count === 1 ? 'asset' : 'assets'} | `
+              : '';
+          return `
+            <tr>
+              <td class="font-mono text-muted">${rowNo}</td>
+              <td><strong class="text-primary">${escapeHtml(entry.moment_name)}</strong></td>
+              <td><span class="badge badge-xs ${cliStageBadgeClass(entry.display_stage)} font-mono">${escapeHtml(entry.display_stage)}</span></td>
+              <td style="text-align: right;" class="font-mono text-amber">${entry.avg_proposed.toFixed(4)}</td>
+              <td style="text-align: right;" class="font-mono">${entry.curated}</td>
+              <td style="text-align: right;" class="font-mono">${entry.published}</td>
+              <td style="text-align: right;" class="font-mono">${entry.pending}</td>
+              <td class="font-mono" style="white-space: nowrap;">${escapeHtml(entry.can_publish_str)}</td>
+              <td class="font-mono" style="white-space: nowrap;">${escapeHtml(entry.propose_str)}</td>
+              <td class="font-mono text-muted" style="font-size: 0.68rem; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(tbcPrefix + scoresStr)}">
+                ${escapeHtml(tbcPrefix + scoresStr)}
+              </td>
+            </tr>
+          `;
+        })
+        .join('');
+      return divider + rowsHtml;
+    })
+    .join('');
+
+  return `
+    <div class="cli-sim-section-block">
+      <div class="cli-sim-section-heading">
+        <span>${escapeHtml(headingTitle)}</span>
+        <span class="badge badge-xs badge-purple font-mono">${totalPendingRows} shown</span>
+      </div>
+      <div class="planner-table-wrap">
+        <table class="cleanup-table planner-compact-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>Moment Name</th>
+              <th>Status</th>
+              <th style="text-align: right;">Avg Score</th>
+              <th style="text-align: right;">Curated</th>
+              <th style="text-align: right;">Pub.</th>
+              <th style="text-align: right;">Pending</th>
+              <th>Can Publish?</th>
+              <th>Propose Next</th>
+              <th>Proposed Scores / ToBeCurated</th>
+            </tr>
+          </thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
+  const badgeEl = document.getElementById('mode-m-cli-sim-gate-badge');
+  const bannerEl = document.getElementById('mode-m-cli-sim-gate-banner');
+  const contentEl = document.getElementById('mode-m-cli-sim-content');
+  if (!badgeEl || !bannerEl || !contentEl) return;
+
+  if (!sim) {
+    badgeEl.className = 'badge badge-xs badge-muted font-mono';
+    badgeEl.textContent = 'Unavailable';
+    bannerEl.className = 'cli-sim-gate-banner';
+    bannerEl.textContent = 'CLI Step 2 simulation telemetry not available.';
+    contentEl.innerHTML = '';
+    return;
+  }
+
+  let badgeClass = 'badge-amber';
+  let bannerClass = 'gate-curation';
+  if (sim.gate === 'unlocked_publishing_candidates') {
+    badgeClass = 'badge-green';
+    bannerClass = 'gate-unlocked';
+  } else if (sim.gate === 'auto_option_2_export') {
+    badgeClass = 'badge-blue';
+    bannerClass = 'gate-auto-export';
+  }
+  badgeEl.className = `badge badge-xs ${badgeClass} font-mono`;
+  badgeEl.textContent = sim.gate_label;
+
+  const c = sim.counts;
+  const lacieChip = sim.lacie_mounted
+    ? '<span class="badge badge-xs badge-green font-mono">LaCie: Mounted</span>'
+    : '<span class="badge badge-xs badge-amber font-mono">LaCie: Offline (DB Estimate)</span>';
+  bannerEl.className = `cli-sim-gate-banner ${bannerClass}`;
+  bannerEl.innerHTML = `
+    <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.3rem;">
+      <strong>Simulated CLI Gate:</strong>
+      <span class="badge badge-xs ${badgeClass} font-mono">${escapeHtml(sim.gate_label)}</span>
+      <span class="badge badge-xs badge-muted font-mono">Ranked Moments: ${c.ranked_total}</span>
+      <span class="badge badge-xs badge-muted font-mono">M200: ${c.m200} · M300: ${c.m300} · M100: ${c.m100}</span>
+      <span class="badge badge-xs badge-muted font-mono">Option [1] Sync Needed: ${c.needs_sync_option1}</span>
+      ${lacieChip}
+    </div>
+    <div>👉 <strong>CLI Next Behavior:</strong> ${escapeHtml(sim.next_prompt)}</div>
+  `;
+
+  const consoleRows = sim.console_moments || [];
+  let needsUpdateHeaderPrinted = false;
+  let upToDateHeaderPrinted = false;
+
+  const consoleBodyHtml = !consoleRows.length
+    ? '<tr><td colspan="12" class="text-center text-muted">No ranked moments in CLI Step 2 console table.</td></tr>'
+    : consoleRows
+        .map((m: CliStep2ConsoleMomentRow) => {
+          let divider = '';
+          if (m.needs_update && !needsUpdateHeaderPrinted) {
+            needsUpdateHeaderPrinted = true;
+            divider = `
+              <tr class="cli-sim-divider-row">
+                <td colspan="12">--- Moments Requiring Curation Updates (Run Option [1] to sync proposed assets to ToBeCurated) ---</td>
+              </tr>
+            `;
+          } else if (!m.needs_update && !upToDateHeaderPrinted) {
+            upToDateHeaderPrinted = true;
+            divider = `
+              <tr class="cli-sim-divider-row">
+                <td colspan="12">--- Up-To-Date Moments (All qualified assets are already curated or in ToBeCurated) ---</td>
+              </tr>
+            `;
+          }
+          const scoreRange = `${m.avg_score.toFixed(4)} (${m.min_score.toFixed(3)}..${m.max_score.toFixed(3)})`;
+          const pubAvgDisplay = m.pub_count > 0 ? `${m.pub_avg_str} (${m.pub_range_str})` : '—';
+          return `${divider}
+            <tr>
+              <td class="font-mono text-muted">${m.no}</td>
+              <td><strong class="text-primary">${escapeHtml(m.moment_name)}</strong></td>
+              <td><span class="badge badge-xs ${cliStageBadgeClass(m.display_stage)} font-mono">${escapeHtml(m.display_stage)}</span></td>
+              <td style="text-align: right;" class="font-mono text-amber">${m.rank_score.toFixed(4)}</td>
+              <td style="text-align: right;" class="font-mono" title="Avg (Min..Max unpublished)">${escapeHtml(scoreRange)}</td>
+              <td style="text-align: right;" class="font-mono">${m.assets_display}</td>
+              <td style="text-align: right;" class="font-mono">${m.pub_count > 0 ? m.pub_count : '—'}</td>
+              <td class="font-mono text-muted" style="font-size: 0.68rem;">${escapeHtml(pubAvgDisplay)}</td>
+              <td class="font-mono" style="white-space: nowrap;">${escapeHtml(m.to_be_curated_str)}</td>
+              <td class="font-mono" style="white-space: nowrap;">${escapeHtml(m.curated_str)}</td>
+              <td class="font-mono" style="white-space: nowrap;">${escapeHtml(m.published_str)}</td>
+              <td class="font-mono" style="white-space: nowrap;" title="Last Published: ${escapeHtml(m.last_pub_str)}">${escapeHtml(m.can_publish_str)}</td>
+            </tr>
+          `;
+        })
+        .join('');
+
+  const consoleSectionHtml = `
+    <div class="cli-sim-section-block">
+      <div class="cli-sim-section-heading">
+        <span>${escapeHtml(sim.table_title)}</span>
+        <span class="badge badge-xs badge-blue font-mono">${c.console_total} moments (${c.needs_update} Option [1] · ${c.up_to_date} up-to-date)</span>
+      </div>
+      <div class="planner-table-wrap">
+        <table class="cleanup-table planner-compact-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>Moment Name</th>
+              <th>Status</th>
+              <th style="text-align: right;">Rank Score</th>
+              <th style="text-align: right;">Avg (Range)</th>
+              <th style="text-align: right;">Assets</th>
+              <th style="text-align: right;">Pub.</th>
+              <th>Pub. Avg (Range)</th>
+              <th>ToBeCurated?</th>
+              <th>Curated?</th>
+              <th>Published?</th>
+              <th>Can Publish?</th>
+            </tr>
+          </thead>
+          <tbody>${consoleBodyHtml}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const pendingStartIdx = Math.max(1, c.console_total + 1);
+  contentEl.innerHTML = consoleSectionHtml + renderCliSimPendingSection(sim, pendingStartIdx);
+}
+
 function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   const th: any = modeM.threshold || {};
   const sc: any = modeM.stage_counts || {};
@@ -2086,6 +2355,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       });
     }
   }
+  renderModeMCliStep2Sim(modeM.cli_step2_sim);
 
   // Step 3: Disjoint Moments Table
   const disjBadge = document.getElementById('mode-m-disjoint-badge');

@@ -320,6 +320,84 @@ export interface PlannerModeM {
   unassigned_total_clusters: number;
   unassigned_clusters: PlannerUnassignedCluster[];
   grouping_rules?: GroupingRulesState;
+  cli_step2_sim?: CliStep2Simulation | null;
+}
+
+export interface CliStep2ConsoleMomentRow {
+  no: number;
+  moment_name: string;
+  display_stage: string;
+  rank_score: number;
+  avg_score: number;
+  min_score: number;
+  max_score: number;
+  total_qualified: number;
+  proposed_count: number;
+  curated_count: number;
+  assets_display: number;
+  pub_count: number;
+  pub_avg_str: string;
+  pub_range_str: string;
+  to_be_curated_exists: boolean;
+  to_be_curated_count: number;
+  to_be_curated_str: string;
+  curated_str: string;
+  published_str: string;
+  can_publish_str: string;
+  last_pub_str: string;
+  needs_update: boolean;
+}
+
+export interface CliStep2PendingPublishingRow {
+  moment_name: string;
+  display_stage: string;
+  avg_proposed: number;
+  curated: number;
+  published: number;
+  pending: number;
+  propose: number;
+  propose_str: string;
+  can_publish_str: string;
+  can_publish_ok: boolean;
+  to_be_curated_exists: boolean;
+  to_be_curated_count: number;
+  total_qualified: number;
+  proposed_scores: number[];
+  proposed_filenames: string[];
+}
+
+export interface CliStep2Simulation {
+  gate: 'threshold_unaligned' | 'auto_option_2_export' | 'pending_curation_m200_m300' | 'unlocked_publishing_candidates';
+  gate_label: string;
+  has_pending_curation: boolean;
+  all_needs_folder: boolean;
+  threshold_aligned: boolean;
+  lacie_mounted: boolean;
+  table_title: string;
+  next_prompt: string;
+  counts: {
+    ranked_total: number;
+    console_total: number;
+    needs_update: number;
+    up_to_date: number;
+    needs_sync_option1: number;
+    m100: number;
+    m200: number;
+    m300: number;
+    publishable_tbc: number;
+    publishable_clean: number;
+    pending_curation: number;
+    pending_cooldown: number;
+    disjoint_pending: number;
+  };
+  console_moments: CliStep2ConsoleMomentRow[];
+  pending_publishing: {
+    publishable_tbc: CliStep2PendingPublishingRow[];
+    publishable_clean: CliStep2PendingPublishingRow[];
+    pending_curation: CliStep2PendingPublishingRow[];
+    pending_cooldown: CliStep2PendingPublishingRow[];
+    disjoint: CliStep2PendingPublishingRow[];
+  };
 }
 
 export interface PlannerOverviewResponse {

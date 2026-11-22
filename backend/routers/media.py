@@ -2368,6 +2368,148 @@ def _detect_misdated_duplicate_assets(
     return quarantined_reason, triage_stats
 
 
+def _build_cli_step2_simulation(
+    ranked_moments: list[dict],
+    pending_publishing_entries: list[dict],
+    *,
+    threshold_aligned: bool,
+    needs_sync_count: int,
+    unassigned_count: int,
+    lacie_mounted: bool,
+) -> dict:
+    """Build a read-only simulation of CLI Mode [M] Step 2 (`pipeline_planner.py`)."""
+    has_pending_curation = any(m["display_stage"] in ("M200", "M300") for m in ranked_moments)
+    if has_pending_curation:
+        table_title = "🌟 M200: Proposed Moments in ToBeCurated (Require Curation & Move to Curated)"
+        console_moments = [m for m in ranked_moments if m["display_stage"] in ("M200", "M300")]
+    else:
+        table_title = "🌟 Publishing Candidates (Mode [M])"
+        console_moments = list(ranked_moments)
+
+    console_moments.sort(
+        key=lambda x: (
+            x["display_stage"] == "M300",
+            x["needs_update"],
+            x["rank_score"] if x["needs_update"] else x["avg_score"],
+        ),
+        reverse=True,
+    )
+
+    all_needs_folder = bool(
+        has_pending_curation
+        and console_moments
+        and all(m["curated_str"] == "📁 Needs Folder" for m in console_moments)
+    )
+
+    needs_update_cnt = sum(1 for m in console_moments if m["needs_update"])
+    up_to_date_cnt = len(console_moments) - needs_update_cnt
+    m200_cnt = sum(1 for m in ranked_moments if m["display_stage"] == "M200")
+    m300_cnt = sum(1 for m in ranked_moments if m["display_stage"] == "M300")
+    m100_cnt = sum(1 for m in ranked_moments if m["display_stage"] == "M100")
+
+    console_rows = []
+    for idx, m in enumerate(console_moments[:60], 1):
+        row_copy = dict(m)
+        row_copy["no"] = idx
+        console_rows.append(row_copy)
+
+    # Classify Curated Moments Pending Publishing (CLI 5 subsections)
+    pub_tbc = sorted(
+        [e for e in pending_publishing_entries if e["total_qualified"] >= 2 and e["can_publish_ok"] and e["to_be_curated_exists"]],
+        key=lambda e: -e["avg_proposed"],
+    )[:20]
+    pub_clean = sorted(
+        [e for e in pending_publishing_entries if e["total_qualified"] >= 2 and e["can_publish_ok"] and not e["to_be_curated_exists"]],
+        key=lambda e: -e["avg_proposed"],
+    )[:20]
+    pend_cur = sorted(
+        [e for e in pending_publishing_entries if e["total_qualified"] >= 2 and not e["can_publish_ok"] and e["to_be_curated_exists"]],
+        key=lambda e: -e["avg_proposed"],
+    )[:20]
+    pend_cool = sorted(
+        [e for e in pending_publishing_entries if e["total_qualified"] >= 2 and not e["can_publish_ok"] and not e["to_be_curated_exists"]],
+        key=lambda e: -e["avg_proposed"],
+    )[:20]
+    disjoint_pend = sorted(
+        [e for e in pending_publishing_entries if e["total_qualified"] < 2],
+        key=lambda e: -e["avg_proposed"],
+    )[:20]
+
+    if not threshold_aligned:
+        gate = "threshold_unaligned"
+        gate_label = f"Step 1 Threshold Unaligned ({unassigned_count} unassigned above min)"
+        next_prompt = (
+            f"CLI Step 1 remains active until {unassigned_count} unassigned high-rank asset(s) are grouped/assigned to Moments; "
+            "once aligned, CLI enters Step 2 below."
+        )
+    elif all_needs_folder:
+        gate = "auto_option_2_export"
+        gate_label = f"Auto Option [2] Export Ready ({len(console_moments)} M300 folders)"
+        next_prompt = (
+            f"All {len(console_moments)} M200/M300 Moment(s) are '📁 Needs Folder' — CLI automatically runs "
+            "Option [2] (Export Curated Album -> LaCie) and re-evaluates into Publishing Candidates."
+        )
+    elif has_pending_curation:
+        gate = "pending_curation_m200_m300"
+        gate_label = f"Gated at M200/M300 Curation ({m200_cnt} M200 · {m300_cnt} M300)"
+        parts = []
+        if needs_update_cnt > 0:
+            parts.append(f"Option [1] sync needed on {needs_update_cnt} Moment(s)")
+        parts.append(
+            f"inspect ToBeCurated/[Moment] and move selection to Curated/[Moment] ({up_to_date_cnt} up-to-date)"
+        )
+        next_prompt = "CLI stays on M200/M300 Curation Table: " + "; ".join(parts) + " before unlocking Publishing Candidates."
+    else:
+        gate = "unlocked_publishing_candidates"
+        gate_label = "Unlocked: Publishing Candidates & Pending Publishing"
+        parts = []
+        if pub_clean:
+            parts.append(f"{len(pub_clean)} Ready (Clean)")
+        if pub_tbc:
+            parts.append(f"{len(pub_tbc)} Ready (w/ ToBeCurated review)")
+        if m100_cnt > 0:
+            parts.append(f"{m100_cnt} M100 eligible for Option [1]")
+        next_prompt = (
+            "All M200/M300 curation finished — CLI outputs Publishing Recommendations & Curated Moments Pending Publishing"
+            + (f" ({', '.join(parts)})" if parts else "")
+            + "."
+        )
+
+    return {
+        "gate": gate,
+        "gate_label": gate_label,
+        "has_pending_curation": has_pending_curation,
+        "all_needs_folder": all_needs_folder,
+        "threshold_aligned": threshold_aligned,
+        "lacie_mounted": lacie_mounted,
+        "table_title": table_title,
+        "next_prompt": next_prompt,
+        "counts": {
+            "ranked_total": len(ranked_moments),
+            "console_total": len(console_moments),
+            "needs_update": needs_update_cnt,
+            "up_to_date": up_to_date_cnt,
+            "needs_sync_option1": needs_sync_count,
+            "m100": m100_cnt,
+            "m200": m200_cnt,
+            "m300": m300_cnt,
+            "publishable_tbc": len(pub_tbc),
+            "publishable_clean": len(pub_clean),
+            "pending_curation": len(pend_cur),
+            "pending_cooldown": len(pend_cool),
+            "disjoint_pending": len(disjoint_pend),
+        },
+        "console_moments": console_rows,
+        "pending_publishing": {
+            "publishable_tbc": pub_tbc,
+            "publishable_clean": pub_clean,
+            "pending_curation": pend_cur,
+            "pending_cooldown": pend_cool,
+            "disjoint": disjoint_pend,
+        },
+    }
+
+
 def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str]) -> dict:
     """Computes live Mode [M] thresholds, unassigned high-rank clusters, sync needs, and recommendations from SQLite."""
     # Excluded assets in Ignore / SkipPublishing / TopScore Excluded albums
@@ -3023,13 +3165,19 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     # 3. Qualified Moment Stats -> needs_sync_moments + actionable/disjoint recommendations
     cur.execute(
         """
-        SELECT asset_id FROM media_organizer_album_assets moaa
+        SELECT moa.album_name, moaa.asset_id
+        FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
         WHERE moa.full_path LIKE 'Media Organizer on LaCie/ToBeCurated/%'
           AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore')
         """
     )
-    tbc_aids = {r[0] for r in cur.fetchall()}
+    tbc_aids_by_album: dict[str, set[str]] = {}
+    tbc_aids = set()
+    for alb_name, aid in cur.fetchall():
+        tbc_aids.add(aid)
+        if alb_name:
+            tbc_aids_by_album.setdefault(alb_name.strip(), set()).add(aid)
 
     cur.execute(
         """
@@ -3084,12 +3232,28 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         SELECT
             p.moment_name,
             MAX(p.published_at_utc),
-            COUNT(DISTINCT p.asset_uuid)
+            COUNT(DISTINCT p.asset_uuid),
+            AVG(v.score_normalized),
+            MIN(v.score_normalized),
+            MAX(v.score_normalized)
         FROM publications p
+        LEFT JOIN curated_moments cm
+          ON TRIM(LOWER(cm.moment_name)) = TRIM(LOWER(p.moment_name))
+        LEFT JOIN ranked_assets_view v ON v.asset_id = p.asset_uuid
+        WHERE LOWER(COALESCE(cm.memory_stage, '')) != 'deleted'
         GROUP BY p.moment_name
         """
     )
-    pub_info = {r[0]: {"last_pub_utc": r[1], "pub_count": r[2]} for r in cur.fetchall()}
+    pub_info = {
+        r[0]: {
+            "last_pub_utc": r[1],
+            "pub_count": r[2] or 0,
+            "pub_avg": r[3],
+            "pub_min": r[4],
+            "pub_max": r[5],
+        }
+        for r in cur.fetchall()
+    }
 
     cur.execute(
         """
@@ -3143,9 +3307,13 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         if dt_val:
             md["all_dates"].append(dt_val)
 
-    # Compute needs_sync_moments, recommendations, and disjoint moments
+    # Compute needs_sync_moments, ranked_moments (CLI Step 2 simulation), recommendations, and disjoint moments
     needs_sync_moments = []
+    ranked_moments_sim = []
+    pending_publishing_entries = []
     moment_midpoints = {}
+    lacie_mounted = CURATED_LACIE_DIR.exists()
+    now_local = datetime.now()
     for name, md in moments_data.items():
         if md["all_dates"]:
             timestamps = sorted(d.timestamp() for d in md["all_dates"])
@@ -3161,24 +3329,174 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             continue
         p_info = pub_info.get(name, {})
         pub_count = p_info.get("pub_count", 0)
+        last_pub_raw = p_info.get("last_pub_utc")
         unpub = md["unpublished_scores"]
         avg_score = sum(unpub) / len(unpub) if unpub else 0.0
+        min_score = min(unpub) if unpub else 0.0
+        max_score = max(unpub) if unpub else 0.0
         rank_score = avg_score * math.log(md["total_qualified"] + 1)
+
+        name_stripped = name.strip()
+        tbc_album_aids = tbc_aids_by_album.get(name_stripped, set())
+        tbc_count = len(tbc_album_aids) if tbc_album_aids else md["proposed_count"]
+        to_be_curated_exists = bool((tbc_count > 0) or (cm.get("tbc_exists") and not tbc_aids_by_album))
+        curated_album_aids = curated_aids_by_album.get(name_stripped, set())
+        curated_exists = bool(cm.get("curated_exists") or md["curated_count"] > 0 or curated_album_aids)
+
+        fs_bases: set[str] = set()
+        fs_curated_exists = False
+        if lacie_mounted:
+            for cand_dir in (CURATED_LACIE_DIR / name, CURATED_LACIE_DIR / name_stripped):
+                if cand_dir.is_dir():
+                    fs_curated_exists = True
+                    try:
+                        with os.scandir(cand_dir) as it_dir:
+                            for entry in it_dir:
+                                if entry.is_file() and not entry.name.startswith("."):
+                                    fs_bases.add(os.path.splitext(entry.name)[0].lower())
+                    except OSError:
+                        pass
+                    break
+        fs_count = len(fs_bases)
 
         if stage == "M500" or (pub_count >= md["total_qualified"] and md["total_qualified"] > 0):
             display_stage = "M500"
         elif stage == "M450" or pub_count > 0:
             display_stage = "M450"
-        elif stage == "M400":
+        elif stage == "M400" or fs_curated_exists:
             display_stage = "M400"
-        elif cm.get("curated_exists") or md["curated_count"] > 0:
+        elif curated_exists:
             display_stage = "M300"
-        elif cm.get("tbc_exists") or md["proposed_count"] > 0:
+        elif to_be_curated_exists:
             display_stage = "M200"
         else:
             display_stage = "M100"
 
-        if (md["proposed_count"] + md["curated_count"]) < md["total_qualified"]:
+        if curated_exists and fs_curated_exists:
+            if curated_album_aids and fs_count > 0 and len(curated_album_aids) != fs_count:
+                curated_str = f"🔄 Export ({fs_count}/{len(curated_album_aids)})"
+            else:
+                curated_str = "✅ Yes"
+        elif curated_exists and not fs_curated_exists:
+            curated_str = "📁 Needs Folder" if lacie_mounted else "📁 Curated (LaCie offline)"
+        elif not curated_exists and fs_curated_exists:
+            curated_str = "📁 Local Only"
+        else:
+            curated_str = "❌ No"
+
+        if fs_count > 0:
+            assets_display = fs_count
+        elif curated_album_aids:
+            assets_display = len(curated_album_aids)
+        elif cm.get("curated_count", 0) > 0:
+            assets_display = cm["curated_count"]
+        elif md["curated_count"] > 0:
+            assets_display = md["curated_count"]
+        else:
+            assets_display = md["total_qualified"]
+
+        too_recent = False
+        days_remaining = 0
+        last_pub_str = "—"
+        if last_pub_raw:
+            pub_dt = _parse_utc_dt(last_pub_raw)
+            if pub_dt:
+                diff = now_local - pub_dt
+                if diff.days < 30:
+                    too_recent = True
+                    days_remaining = max(1, 30 - diff.days)
+                last_pub_str = pub_dt.strftime("%Y-%m-%d %H:%M")
+            else:
+                last_pub_str = str(last_pub_raw)[:16]
+
+        effective_curated_cnt = max(md["curated_count"], fs_count if fs_curated_exists else 0)
+        has_unpublished = bool((fs_curated_exists or not lacie_mounted) and effective_curated_cnt > 0 and effective_curated_cnt > pub_count)
+        if not has_unpublished:
+            can_publish_str = "❌ No"
+            can_publish_ok = False
+        elif too_recent:
+            can_publish_str = f"❌ (in {days_remaining}d)"
+            can_publish_ok = False
+        else:
+            can_publish_str = "✅ Yes"
+            can_publish_ok = True
+
+        needs_update = (md["proposed_count"] + md["curated_count"]) < md["total_qualified"]
+        if needs_update and to_be_curated_exists:
+            to_be_curated_str = "🔄 Update needed"
+        elif to_be_curated_exists:
+            to_be_curated_str = "✅ Yes"
+        else:
+            to_be_curated_str = "❌ No"
+
+        if pub_count == 0:
+            published_str = "❌ No"
+        elif pub_count >= md["total_qualified"] or (stage == "M500" and pub_count >= md["curated_count"]):
+            published_str = "✅ Yes"
+        else:
+            published_str = f"🔄 Part ({pub_count})"
+
+        pub_avg = p_info.get("pub_avg")
+        pub_min = p_info.get("pub_min")
+        pub_max = p_info.get("pub_max")
+
+        ranked_moments_sim.append({
+            "no": 0,
+            "moment_name": name,
+            "display_stage": display_stage,
+            "rank_score": round(rank_score, 4),
+            "avg_score": round(avg_score, 4),
+            "min_score": round(min_score, 4),
+            "max_score": round(max_score, 4),
+            "total_qualified": md["total_qualified"],
+            "proposed_count": md["proposed_count"],
+            "curated_count": md["curated_count"],
+            "assets_display": assets_display,
+            "pub_count": pub_count,
+            "pub_avg_str": f"{pub_avg:.4f}" if pub_avg is not None else "—",
+            "pub_range_str": f"{pub_min:.4f} - {pub_max:.4f}" if pub_min is not None and pub_max is not None else "—",
+            "to_be_curated_exists": to_be_curated_exists,
+            "to_be_curated_count": tbc_count,
+            "to_be_curated_str": to_be_curated_str,
+            "curated_str": curated_str,
+            "published_str": published_str,
+            "can_publish_str": can_publish_str,
+            "last_pub_str": last_pub_str,
+            "needs_update": needs_update,
+        })
+
+        if display_stage in ("M400", "M450"):
+            cur_unpub_rows = sorted(md["curated_unpublished"], key=lambda r: (-r[2], r[1]))
+            if fs_curated_exists and fs_bases:
+                valid_pending = [r for r in cur_unpub_rows if r[1].lower() in fs_bases]
+            else:
+                valid_pending = cur_unpub_rows
+            pending_cnt = len(valid_pending)
+            if pending_cnt > 0:
+                propose_cnt = pending_cnt if pending_cnt < 9 else min(9, math.ceil(pending_cnt / 4))
+                top_prop = valid_pending[:propose_cnt]
+                prop_scores = [round(r[2], 4) for r in top_prop]
+                avg_prop = sum(prop_scores) / len(prop_scores) if prop_scores else 0.0
+                propose_str = f"All ({pending_cnt})" if pending_cnt < 9 else f"{propose_cnt} (1/4 of {pending_cnt})"
+                pending_publishing_entries.append({
+                    "moment_name": name,
+                    "display_stage": display_stage,
+                    "avg_proposed": round(avg_prop, 4),
+                    "curated": fs_count if fs_count > 0 else (pending_cnt + pub_count),
+                    "published": pub_count,
+                    "pending": pending_cnt,
+                    "propose": propose_cnt,
+                    "propose_str": propose_str,
+                    "can_publish_str": can_publish_str,
+                    "can_publish_ok": can_publish_ok,
+                    "to_be_curated_exists": to_be_curated_exists,
+                    "to_be_curated_count": tbc_count,
+                    "total_qualified": md["total_qualified"],
+                    "proposed_scores": prop_scores,
+                    "proposed_filenames": [r[1] for r in top_prop if r[1]],
+                })
+
+        if needs_update:
             needs_sync_moments.append({
                 "idx": 0,
                 "moment_name": name,
@@ -3298,6 +3616,15 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         rec["idx"] = idx
     disjoint_recs.sort(key=lambda x: (1 if x.get("is_tagged") else 0, -x["avg_score"]))
 
+    cli_step2_sim = _build_cli_step2_simulation(
+        ranked_moments_sim,
+        pending_publishing_entries,
+        threshold_aligned=threshold_aligned,
+        needs_sync_count=len(needs_sync_moments),
+        unassigned_count=sum(len(c["assets"]) for c in unassigned_clusters),
+        lacie_mounted=lacie_mounted,
+    )
+
     return {
         "threshold_aligned": threshold_aligned,
         "current_threshold": curr_thresh,
@@ -3309,6 +3636,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         "needs_sync_moments": needs_sync_moments,
         "unassigned_clusters": unassigned_clusters,
         "grouping_rules": grouping_rules_payload,
+        "cli_step2_sim": cli_step2_sim,
     }
 
 
@@ -4098,7 +4426,8 @@ def get_planner_overview(mode: str = "all"):
                     "unassigned_clusters": unassigned_clusters,
                     "grouping_rules": mode_m_live["grouping_rules"],
                     "actionable_recommendations": mode_m_live["actionable_recs"][:12],
-                    "disjoint_recommendations": mode_m_live["disjoint_recs"][:25]
+                    "disjoint_recommendations": mode_m_live["disjoint_recs"][:25],
+                    "cli_step2_sim": mode_m_live.get("cli_step2_sim"),
                 }
 
             return {

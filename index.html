@@ -817,6 +817,37 @@
                       </tbody>
                     </table>
                   </div>
+
+                  <!-- Simulated CLI Mode [M] Step 2 Output (Read-Only Report) -->
+                  <div class="cli-sim-panel" id="mode-m-cli-sim-panel">
+                    <div class="cli-sim-header">
+                      <div class="cli-sim-title-wrap">
+                        <span class="cli-sim-icon" aria-hidden="true">🖥️</span>
+                        <div>
+                          <div class="cli-sim-title">
+                            Simulated CLI Step 2 Output (Read-Only Report)
+                            <span class="badge badge-xs badge-blue font-mono" id="mode-m-cli-sim-gate-badge">Loading…</span>
+                          </div>
+                          <div class="cli-sim-desc">
+                            Mirrors <code>pipeline_planner.py</code> Mode <code>[M]</code> Step 2 gating,
+                            <code>M200</code>/<code>M300</code> curation queue, and Pending Publishing breakdown without modifying Apple Photos or LaCie.
+                          </div>
+                        </div>
+                      </div>
+                      <button type="button" class="btn btn-xs btn-outline" id="btn-toggle-mode-m-cli-sim"
+                        aria-expanded="true" title="Expand or collapse Simulated CLI Step 2 Report">
+                        ▴ Collapse
+                      </button>
+                    </div>
+                    <div id="mode-m-cli-sim-body" class="mode-m-step-body">
+                      <div id="mode-m-cli-sim-gate-banner" class="cli-sim-gate-banner">
+                        Evaluating CLI Mode [M] Step 2 gate…
+                      </div>
+                      <div id="mode-m-cli-sim-content" class="cli-sim-content">
+                        <!-- Rendered dynamically from modeM.cli_step2_sim -->
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
