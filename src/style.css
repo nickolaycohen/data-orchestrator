@@ -376,7 +376,8 @@ body {
   flex-wrap: wrap;
 }
 
-.media-stats-body.collapsed {
+.media-stats-body.collapsed,
+.mode-m-step-body.collapsed {
   display: none;
 }
 

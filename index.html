@@ -607,13 +607,19 @@
                         <div class="planner-subblock-desc">Path 1: Sync qualified assets to <code>ToBeCurated</code> and assign or ignore top unassigned groups until threshold aligns.</div>
                       </div>
                     </div>
-                    <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_create_moments')" title="Run Option [1]: Sync proposed assets to ToBeCurated in Apple Photos">
-                      ▶ Run [1] Sync ToBeCurated
-                    </button>
+                    <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                      <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_create_moments')" title="Run Option [1]: Sync proposed assets to ToBeCurated in Apple Photos">
+                        ▶ Run [1] Sync ToBeCurated
+                      </button>
+                      <button type="button" class="btn btn-xs btn-outline" id="btn-toggle-mode-m-step-1" aria-expanded="false" title="Expand or collapse Curation Threshold &amp; Unassigned Groups">
+                        ▾ Expand
+                      </button>
+                    </div>
                   </div>
-                  <div id="mode-m-sync-box" class="planner-sync-box">
-                    Checking moments requiring curation sync...
-                  </div>
+                  <div id="mode-m-step-1-body" class="mode-m-step-body collapsed">
+                    <div id="mode-m-sync-box" class="planner-sync-box">
+                      Checking moments requiring curation sync...
+                    </div>
 
                   <!-- Expanded Unassigned High-Rank Assets Above Threshold (Clustered by Proposed Moment & Sorted by Cluster Size) -->
                   <div id="mode-m-unassigned-section" class="unassigned-clusters-section" style="display: none;">
@@ -693,6 +699,7 @@
                     <div class="unassigned-clusters-wrap" id="mode-m-unassigned-list">
                       <!-- Populated dynamically with proposed Moment clusters sorted by cluster size & asset previews -->
                     </div>
+                  </div>
                   </div>
                 </div>
 

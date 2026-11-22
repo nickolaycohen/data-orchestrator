@@ -577,6 +577,17 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     void fetchMemoriesFolders();
   });
 
+  const btnToggleStep1 = document.getElementById('btn-toggle-mode-m-step-1');
+  if (btnToggleStep1) {
+    btnToggleStep1.addEventListener('click', () => {
+      const bodyEl = document.getElementById('mode-m-step-1-body');
+      if (!bodyEl) return;
+      const collapsed = bodyEl.classList.toggle('collapsed');
+      btnToggleStep1.textContent = collapsed ? '▾ Expand' : '▴ Collapse';
+      btnToggleStep1.setAttribute('aria-expanded', String(!collapsed));
+    });
+  }
+
   const btnToggleFolders = document.getElementById('btn-toggle-memories-folders');
   if (btnToggleFolders) {
     btnToggleFolders.addEventListener('click', () => {
@@ -912,6 +923,17 @@ interface PlannerPathCard {
 function jumpToPlannerStep(targetId: string): void {
   const el = document.getElementById(targetId);
   if (!el) return;
+  if (targetId === 'mode-m-step-1') {
+    const bodyEl = document.getElementById('mode-m-step-1-body');
+    const toggleBtn = document.getElementById('btn-toggle-mode-m-step-1');
+    if (bodyEl?.classList.contains('collapsed')) {
+      bodyEl.classList.remove('collapsed');
+      if (toggleBtn) {
+        toggleBtn.textContent = '▴ Collapse';
+        toggleBtn.setAttribute('aria-expanded', 'true');
+      }
+    }
+  }
   el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   el.classList.add('subblock-highlight');
   window.setTimeout(() => el.classList.remove('subblock-highlight'), 2000);
