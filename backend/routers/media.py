@@ -41,8 +41,9 @@ class MarkRemovedRequest(BaseModel):
     action: Optional[str] = "remove"  # "remove" or "restore"
 
 class PlannerBatchActionRequest(BaseModel):
-    month: str
-    action: str  # "queue" | "remove_queue" | "confirm_500" | "bypass_500" | "reset_000"
+    month: str = ""
+    months: Optional[list[str]] = None
+    action: str  # "queue" | "remove_queue" | "confirm_500" | "bypass_500" | "demote_400" | "reset_000"
     confirm_missing_month_selection: bool = False
 
 class ModeMDedupApplyRequest(BaseModel):
@@ -5058,6 +5059,24 @@ def execute_planner_batch_action(req: PlannerBatchActionRequest):
                     WHERE month = ?
                 """, (month,))
                 msg = f"Marked {month} as Direct-Rank Bypassed (status 400 ➜ 500)"
+            elif action == "demote_400":
+                target_months = [m.strip() for m in (req.months or ([month] if month else [])) if m and m.strip()]
+                if not target_months:
+                    return {"ok": False, "error": "At least one month is required for demote_400"}
+                placeholders = ",".join("?" for _ in target_months)
+                cur.execute(
+                    f"""
+                    UPDATE month_batches
+                    SET status_code = '400', is_bypassed = 0, bypass_timestamp = NULL, updated_at_utc = datetime('now')
+                    WHERE month IN ({placeholders})
+                    """,
+                    target_months,
+                )
+                cur.execute(
+                    f"UPDATE planned_execution SET active = 0 WHERE planned_month IN ({placeholders}) AND active = 1",
+                    target_months,
+                )
+                msg = f"Returned {', '.join(target_months)} back to Google curation (status ➜ 400) and dequeued if active"
             elif action == "reset_000":
                 cur.execute("""
                     UPDATE month_batches

@@ -1233,6 +1233,41 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     }
   };
 
+  document.getElementById('btn-mode-b-return-all-400')?.addEventListener('click', async e => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    const months = (btn.dataset.months || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (!months.length) return;
+    if (
+      !window.confirm(
+        `Return all ${months.length} Step 3 batch(es) (${months.join(', ')}) back to Step 2 (status 400 · Google curation incomplete) and remove from active queue if queued?`
+      )
+    ) {
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/media/planner/batch-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month: months[0], months, action: 'demote_400' })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(`Action failed: ${data.error || 'Unknown error'}`);
+        return;
+      }
+      await fetchPlannerOverview(true, 'b');
+      if (onRefreshExecutor) onRefreshExecutor();
+    } catch (err: any) {
+      alert(`Network error: ${err.message || 'Unknown error'}`);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   // Load initial Mode [B] Batch Management overview only (Mode [M] & Intake Dedup load when [M] is opened)
   void fetchPlannerOverview(false, 'b');
 }
@@ -1663,7 +1698,18 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
   // 2. Pipeline 500 -> 550 -> 600 -> 650 Table
   const b500Badge = document.getElementById('mode-b-500-badge');
   const b500Tbody = document.getElementById('mode-b-500-tbody');
+  const btnReturnAll400 = document.getElementById('btn-mode-b-return-all-400') as HTMLButtonElement | null;
   if (b500Badge) b500Badge.textContent = `${c500.length} batch${c500.length === 1 ? '' : 'es'}`;
+  if (btnReturnAll400) {
+    if (c500.length > 0) {
+      btnReturnAll400.style.display = 'inline-flex';
+      btnReturnAll400.dataset.months = c500.map(item => item.month).join(',');
+      btnReturnAll400.textContent = c500.length > 1 ? `↩ Return All to 400 (${c500.length})` : '↩ Return to 400';
+    } else {
+      btnReturnAll400.style.display = 'none';
+      btnReturnAll400.dataset.months = '';
+    }
+  }
 
   if (b500Tbody) {
     if (!c500.length) {
@@ -1680,8 +1726,9 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
               : `<span class="text-muted font-mono">0</span>`;
           const msBadge = renderAppleMonthSelectionCell(item, 'step3');
           const actionBtn = item.in_queue
-            ? `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'remove_queue')" title="Remove from planned_execution queue">✓ Queued (Remove)</button>`
+            ? `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'remove_queue')" title="Remove from planned_execution queue">✓ Queued (Dequeue)</button>`
             : `<button class="btn btn-xs btn-purple" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'queue')" title="Add ${escapeHtml(item.month)} to planned_execution queue">➕ Queue (500➜650)</button>`;
+          const demoteBtn = `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'demote_400')" style="border-color: rgba(245, 158, 11, 0.4); color: #fbbf24; margin-left: 0.35rem;" title="Curating incomplete at Google: dequeue if needed and move ${escapeHtml(item.month)} back to Step 2 (status 400)">↩ Back to 400</button>`;
 
           return `
           <tr>
@@ -1691,7 +1738,7 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
             <td style="text-align: right;">${favBadge}</td>
             <td>${msBadge}</td>
             <td class="font-mono" style="font-size: 0.7rem; color: var(--text-secondary);">500 ➜ 550 (Pull Favs) ➜ 600 (Rank) ➜ 650</td>
-            <td style="text-align: right; white-space: nowrap;">${actionBtn}</td>
+            <td style="text-align: right; white-space: nowrap;">${actionBtn}${demoteBtn}</td>
           </tr>
         `;
         })
