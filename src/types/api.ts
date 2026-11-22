@@ -256,6 +256,7 @@ export interface PlannerModeM {
     M500: number;
     total_moments: number;
     published_moments_total?: number;
+    published_untagged_total?: number;
     published_assets_total: number;
     top_published?: { moment_name: string; avg_score: number } | null;
   };

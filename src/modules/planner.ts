@@ -1393,6 +1393,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
   const topDisjoint = disjoint[0];
   const topPublished = sc.top_published || null;
   const pubMomentsTotal = Number(sc.published_moments_total || 0);
+  const pubUntaggedTotal = Number(sc.published_untagged_total ?? pubMomentsTotal);
   const pubAssetsTotal = Number(sc.published_assets_total || 0);
   const m450Count = Number(sc.M450 || 0);
   const m500Count = Number(sc.M500 || 0);
@@ -1450,16 +1451,20 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       title: 'Published History',
       badgeText: topPublished
         ? formatMomentScoreBadge(topPublished.moment_name, Number(topPublished.avg_score || 0))
-        : '0 published',
-      badgeClass: topPublished || pubMomentsTotal > 0 ? 'badge-blue' : 'badge-outline',
+        : pubMomentsTotal > 0
+          ? '✓ All tagged'
+          : '0 published',
+      badgeClass: topPublished ? 'badge-blue' : pubMomentsTotal > 0 ? 'badge-green' : 'badge-outline',
       badgeTitle: topPublished
-        ? `Click to jump to top published Moment: ${topPublished.moment_name} (${Number(topPublished.avg_score || 0).toFixed(4)}) · ${pubMomentsTotal} Moments (${pubAssetsTotal} pub.)`
-        : undefined,
+        ? `Click to jump to top untagged published Moment: ${topPublished.moment_name} (${Number(topPublished.avg_score || 0).toFixed(4)}) · ${pubUntaggedTotal} untagged / ${pubMomentsTotal} Moments (${pubAssetsTotal} pub.)`
+        : pubMomentsTotal > 0
+          ? `All ${pubMomentsTotal} published Moments (${pubAssetsTotal} pub.) have been tagged`
+          : undefined,
       description: 'Review Shutterfly & YouTube published albums, search history, or open live platform links.',
-      footerMeta: `${pubMomentsTotal} Moments · ${m500Count} M500 · ${m450Count} M450`,
+      footerMeta: `${pubUntaggedTotal} untagged · ${m500Count} M500 · ${m450Count} M450`,
       targetId: 'published-memories-card',
       linkLabel: 'Go to 4️⃣ Published History ↓',
-      active: pubMomentsTotal > 0,
+      active: pubUntaggedTotal > 0,
       focusItem: topPublished ? { containerId: 'featured-moments-list', itemName: topPublished.moment_name } : undefined
     }
   ]);

@@ -3868,7 +3868,8 @@ def get_planner_overview(mode: str = "all"):
                 published_moments_total = pub_totals[0] if pub_totals else 0
                 published_assets_total = pub_totals[1] if pub_totals else 0
 
-                top_pub_row = cur.execute(
+                pub_tag_status_by_lc, _ = _load_moment_tagging_status_map(cur)
+                pub_ranked_rows = cur.execute(
                     """
                     SELECT
                         p.moment_name,
@@ -3882,14 +3883,21 @@ def get_planner_overview(mode: str = "all"):
                     LEFT JOIN assets a ON p.asset_uuid = a.asset_id
                     GROUP BY p.moment_name
                     ORDER BY avg_score DESC NULLS LAST, MAX(p.published_at_utc) DESC
-                    LIMIT 1
                     """
-                ).fetchone()
-                top_published_moment = (
-                    {"moment_name": top_pub_row[0], "avg_score": round(float(top_pub_row[1] or 0.0), 4)}
-                    if top_pub_row and top_pub_row[0]
-                    else None
-                )
+                ).fetchall()
+                top_published_moment = None
+                untagged_published_moments = 0
+                for m_name_pub, avg_s_pub in pub_ranked_rows:
+                    if not m_name_pub:
+                        continue
+                    if m_name_pub.strip().lower() in pub_tag_status_by_lc:
+                        continue
+                    untagged_published_moments += 1
+                    if top_published_moment is None:
+                        top_published_moment = {
+                            "moment_name": m_name_pub,
+                            "avg_score": round(float(avg_s_pub or 0.0), 4),
+                        }
 
                 mode_m_live = _compute_mode_m_from_db(cur, db_hist_min, last_th_utc)
 
@@ -3914,6 +3922,7 @@ def get_planner_overview(mode: str = "all"):
                         "needs_sync": len(mode_m_live["needs_sync_moments"]),
                         "total_moments": sum(moment_stage_counts.values()),
                         "published_moments_total": published_moments_total,
+                        "published_untagged_total": untagged_published_moments,
                         "published_assets_total": published_assets_total,
                         "top_published": top_published_moment,
                     },
