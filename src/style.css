@@ -382,47 +382,8 @@ body {
 }
 
 .cli-sim-panel {
-  margin-top: 1rem;
-  border: 1px solid rgba(56, 189, 248, 0.25);
-  border-radius: var(--radius-md);
-  background: rgba(10, 15, 28, 0.55);
-  padding: 0.75rem 0.9rem;
-}
-
-.cli-sim-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-}
-
-.cli-sim-title-wrap {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.55rem;
-}
-
-.cli-sim-icon {
-  font-size: 1.05rem;
-  line-height: 1.2;
-  margin-top: 0.05rem;
-}
-
-.cli-sim-title {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  flex-wrap: wrap;
-  font-size: 0.82rem;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.cli-sim-desc {
-  font-size: 0.71rem;
-  color: var(--text-muted);
-  margin-top: 0.15rem;
+  border-color: rgba(56, 189, 248, 0.28) !important;
+  background: rgba(10, 15, 28, 0.55) !important;
 }
 
 .cli-sim-gate-banner {
