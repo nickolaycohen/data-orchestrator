@@ -1167,6 +1167,45 @@ def control_executor(req: ExecutorControlRequest):
         _clear_sentinels(paused_paths)
         return {"ok": True, "status": "ACTIVE" if active_pid else "IDLE", "paused": False, "message": "Auto-cron pause cleared."}
 
+    if action == "dequeue_pending":
+        if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+            return {"ok": False, "status": "ERROR", "message": "Media database unavailable."}
+        conn = get_db_connection(MEDIA_DB_PATH)
+        if not conn:
+            return {"ok": False, "status": "ERROR", "message": "Could not open Media database."}
+        try:
+            cur = conn.cursor()
+            rows = cur.execute("SELECT id, planned_month FROM planned_execution WHERE active = 1 ORDER BY id ASC").fetchall()
+            if not rows:
+                return {"ok": True, "removed_count": 0, "removed_months": [], "message": "Execution queue is already empty."}
+            kept_month = None
+            if active_pid:
+                in_prog_id, kept_month = rows[0][0], rows[0][1]
+                to_remove = rows[1:]
+                cur.execute("UPDATE planned_execution SET active = 0 WHERE active = 1 AND id != ?", (in_prog_id,))
+            else:
+                to_remove = rows
+                cur.execute("UPDATE planned_execution SET active = 0 WHERE active = 1")
+            conn.commit()
+            removed_months = [r[1] for r in to_remove]
+            if not removed_months:
+                msg = f"No pending queued batches to remove (kept active in-progress batch {kept_month})."
+            else:
+                msg = f"Dequeued {len(removed_months)} pending batch(es): {', '.join(removed_months)}"
+                if kept_month:
+                    msg += f" (kept active {kept_month})"
+            return {
+                "ok": True,
+                "removed_count": len(removed_months),
+                "removed_months": removed_months,
+                "kept_in_progress": kept_month,
+                "message": msg,
+            }
+        except Exception as e:
+            return {"ok": False, "status": "ERROR", "message": f"Dequeue failed: {e}"}
+        finally:
+            conn.close()
+
     return {"ok": False, "status": "INVALID", "message": f"Unsupported action: {action}"}
 
 

@@ -1400,7 +1400,13 @@
             <div class="monitor-subpanel">
               <div class="monitor-subpanel-header">
                 <strong>📋 Active Execution Queue</strong>
-                <span class="badge badge-sm badge-purple" id="monitor-queue-badge">0 queued</span>
+                <div style="display: flex; align-items: center; gap: 0.45rem;">
+                  <span class="badge badge-sm badge-purple" id="monitor-queue-badge">0 queued</span>
+                  <button type="button" class="btn btn-xs btn-outline" id="btn-dequeue-pending" style="display: none; border-color: rgba(239, 68, 68, 0.35); color: #fca5a5;"
+                    title="Remove all pending (not in-progress) batches from planned_execution">
+                    ✕ Dequeue Pending
+                  </button>
+                </div>
               </div>
               <div class="monitor-queue-list" id="monitor-queue-list">
                 <div class="text-muted" style="font-size: 0.8rem; padding: 0.5rem 0;">(Queue is currently empty)</div>

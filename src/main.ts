@@ -3,7 +3,7 @@
 // ==========================================================================
 
 import type { SystemStatusResponse } from './types/api.ts';
-import { attachPathSanitizer, cleanPath } from './utils/formatters.ts';
+import { attachPathSanitizer, cleanPath, escapeHtml } from './utils/formatters.ts';
 import {
   closeCleanupPreviewModal,
   fetchCleanupDevices,
@@ -134,7 +134,7 @@ function setupTabs(): void {
 }
 
 async function sendExecutorControl(
-  action: 'start' | 'stop' | 'restart' | 'stop_after_step' | 'cancel_stop_after_step' | 'resume_cron',
+  action: 'start' | 'stop' | 'restart' | 'stop_after_step' | 'cancel_stop_after_step' | 'resume_cron' | 'dequeue_pending',
   confirmText?: string
 ): Promise<void> {
   if (confirmText && !window.confirm(confirmText)) return;
@@ -144,7 +144,8 @@ async function sendExecutorControl(
     'btn-executor-restart',
     'btn-executor-stop',
     'btn-executor-stop-after',
-    'btn-executor-unpause'
+    'btn-executor-unpause',
+    'btn-dequeue-pending'
   ];
   controlBtnIds.forEach(id => {
     const b = document.getElementById(id) as HTMLButtonElement | null;
@@ -215,6 +216,15 @@ function setupRefresh(): void {
     const btn = e.currentTarget as HTMLButtonElement;
     const action = btn.dataset.armed === 'true' ? 'cancel_stop_after_step' : 'stop_after_step';
     void sendExecutorControl(action);
+  });
+  document.getElementById('btn-dequeue-pending')?.addEventListener('click', e => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    const pendingCnt = Number(btn.dataset.pendingCount || '0');
+    const isClearAll = btn.dataset.clearAll === 'true';
+    const promptMsg = isClearAll
+      ? `Dequeue all ${pendingCnt} queued batch(es) from the active execution queue?`
+      : `Dequeue all ${pendingCnt} pending batch(es) behind the currently running batch?`;
+    void sendExecutorControl('dequeue_pending', promptMsg);
   });
   document.getElementById('btn-toggle-bg-service')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget as HTMLButtonElement;
@@ -1213,16 +1223,32 @@ async function fetchExecutorMonitor(): Promise<void> {
 
     const queueListEl = document.getElementById('monitor-queue-list');
     const queueBadgeEl = document.getElementById('monitor-queue-badge');
+    const btnDequeuePending = document.getElementById('btn-dequeue-pending') as HTMLButtonElement | null;
+    const queueRows = Array.isArray(data.queue) ? data.queue : [];
+    const pendingRows = queueRows.filter((b: any) => !b.is_in_progress);
     if (queueBadgeEl) {
       queueBadgeEl.textContent = `${data.queue_count || 0} batches`;
     }
+    if (btnDequeuePending) {
+      if (pendingRows.length > 0) {
+        const hasInProgress = queueRows.some((b: any) => b.is_in_progress);
+        btnDequeuePending.style.display = 'inline-flex';
+        btnDequeuePending.dataset.pendingCount = String(pendingRows.length);
+        btnDequeuePending.dataset.clearAll = String(!hasInProgress);
+        btnDequeuePending.textContent = hasInProgress
+          ? `✕ Dequeue Pending (${pendingRows.length})`
+          : `✕ Clear Queue (${pendingRows.length})`;
+      } else {
+        btnDequeuePending.style.display = 'none';
+      }
+    }
 
     if (queueListEl) {
-      if (!data.queue || data.queue.length === 0) {
+      if (!queueRows.length) {
         queueListEl.innerHTML =
           '<div class="text-muted" style="font-size: 0.8rem; padding: 0.5rem 0;">(Queue is currently empty)</div>';
       } else {
-        queueListEl.innerHTML = data.queue
+        queueListEl.innerHTML = queueRows
           .map((b: any) => {
             const markerBadge = b.is_in_progress
               ? '<span class="badge badge-xs badge-green pulse">▶ IN PROGRESS</span>'
@@ -1233,25 +1259,79 @@ async function fetchExecutorMonitor(): Promise<void> {
             else if (b.status_code && b.status_code.includes('E')) statusBadgeClass = 'badge-red';
             else if (b.status_code === '000') statusBadgeClass = 'badge-outline';
 
+            const updatedHtml = b.updated_at_utc
+              ? `<span class="font-mono text-muted" style="font-size: 0.72rem;">Updated: ${escapeHtml(b.updated_at_utc.split(' ')[1] || b.updated_at_utc)}</span>`
+              : '';
+            const dequeueTitle = b.is_in_progress
+              ? `Mark in-progress batch ${b.month} inactive in planned_execution (executor step continues until stopped)`
+              : `Remove ${b.month} from active execution queue`;
+
             return `
             <div class="queue-item ${b.is_in_progress ? 'in-progress' : ''}">
               <div class="queue-main">
                 ${markerBadge}
                 <div class="queue-details">
                   <div style="display: flex; align-items: center; gap: 0.4rem;">
-                    <strong>${b.month}</strong>
-                    <span class="badge badge-xs ${statusBadgeClass}">${b.status_code} (${b.status_label || 'Status'})</span>
+                    <strong>${escapeHtml(b.month)}</strong>
+                    <span class="badge badge-xs ${statusBadgeClass}">${escapeHtml(b.status_code)} (${escapeHtml(b.status_label || 'Status')})</span>
                   </div>
-                  <span class="font-mono text-muted" style="font-size: 0.7rem;">Q-ID: #${b.id} · Scheduled: ${b.set_at_utc || '-'}</span>
+                  <span class="font-mono text-muted" style="font-size: 0.7rem;">Q-ID: #${b.id} · Scheduled: ${escapeHtml(b.set_at_utc || '-')}</span>
                 </div>
               </div>
-              <span class="font-mono text-muted" style="font-size: 0.72rem;">${
-                b.updated_at_utc ? 'Updated: ' + (b.updated_at_utc.split(' ')[1] || b.updated_at_utc) : ''
-              }</span>
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0;">
+                ${updatedHtml}
+                <button type="button" class="btn btn-xs btn-outline btn-dequeue-batch"
+                  data-month="${escapeHtml(b.month)}" data-in-progress="${b.is_in_progress ? 'true' : 'false'}"
+                  style="border-color: rgba(239, 68, 68, 0.35); color: #fca5a5;"
+                  title="${escapeHtml(dequeueTitle)}">
+                  ✕ Dequeue
+                </button>
+              </div>
             </div>
           `;
           })
           .join('');
+
+        queueListEl.querySelectorAll<HTMLButtonElement>('.btn-dequeue-batch').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const month = btn.dataset.month || '';
+            const inProg = btn.dataset.inProgress === 'true';
+            if (!month) return;
+            if (
+              inProg &&
+              !window.confirm(
+                `Batch ${month} is currently IN PROGRESS on the executor.\nDequeueing removes it from planned_execution so it will NOT stay queued after stopping/restarting (use Stop or Stop After Step to halt execution).\n\nDequeue ${month}?`
+              )
+            ) {
+              return;
+            }
+            btn.disabled = true;
+            btn.textContent = 'Removing…';
+            const feedbackEl = document.getElementById('executor-control-feedback');
+            try {
+              const res = await fetch('/api/media/planner/batch-action', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ month, action: 'remove_queue' })
+              });
+              const result = await res.json();
+              if (feedbackEl) {
+                feedbackEl.style.display = 'block';
+                feedbackEl.textContent = result.ok
+                  ? `✅ ${result.message || `Removed ${month} from execution queue`}`
+                  : `❌ ${result.error || 'Failed to dequeue batch'}`;
+              }
+              await Promise.all([fetchExecutorMonitor(), fetchPlannerOverview(true, 'b')]);
+            } catch (err) {
+              if (feedbackEl) {
+                feedbackEl.style.display = 'block';
+                feedbackEl.textContent = `❌ Dequeue error: ${err instanceof Error ? err.message : String(err)}`;
+              }
+              btn.disabled = false;
+              btn.textContent = '✕ Dequeue';
+            }
+          });
+        });
       }
     }
 
