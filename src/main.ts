@@ -739,6 +739,9 @@ function renderPublishedMomentsHistory(): void {
         m.tag_summary
       );
 
+      const stageVal = m.memory_stage || 'M500';
+      const stageBadgeCls = stageVal.toLowerCase() === 'deleted' ? 'badge-red' : 'badge-outline';
+
       return `
       <div class="moment-card" data-moment-name="${escapedMoment}" style="flex-direction: column; align-items: stretch;" title="${acctTitle}">
         <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;">
@@ -746,7 +749,7 @@ function renderPublishedMomentsHistory(): void {
             <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
               <span class="pub-rank-num">#${idx + 1}</span>
               <span class="moment-name">${m.moment_name}</span>
-              <span class="badge badge-xs badge-outline font-mono">${m.memory_stage || 'M500'}</span>
+              <span class="badge badge-xs ${stageBadgeCls} font-mono">${stageVal}</span>
               ${taggedBadgeHtml}
             </div>
             <div class="pub-meta-line">

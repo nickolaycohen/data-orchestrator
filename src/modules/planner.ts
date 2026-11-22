@@ -3406,12 +3406,15 @@ function renderMemoriesFolders(items: MemoriesFolderItem[]): void {
       const icon = item.is_folder ? '📁' : '📚';
       let stageHtml = '<span class="text-muted font-mono" style="font-size: 0.68rem;">—</span>';
       if (item.memory_stage) {
+        const stLower = item.memory_stage.toLowerCase();
         const cls =
-          item.memory_stage === 'M500'
-            ? 'badge-green'
-            : item.memory_stage === 'M450'
-              ? 'badge-purple'
-              : 'badge-blue';
+          stLower === 'deleted'
+            ? 'badge-red'
+            : item.memory_stage === 'M500'
+              ? 'badge-green'
+              : item.memory_stage === 'M450'
+                ? 'badge-purple'
+                : 'badge-blue';
         const pubNote = item.published_count > 0 ? ` · ${item.published_count} pub` : '';
         stageHtml = `<span class="badge badge-xs ${cls} font-mono">${escapeHtml(item.memory_stage)}${escapeHtml(pubNote)}</span>`;
       } else if (item.is_folder) {

@@ -3046,7 +3046,15 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         if alb_name:
             curated_aids_by_album.setdefault(alb_name.strip(), set()).add(aid)
 
-    cur.execute("SELECT asset_uuid, moment_name FROM publications")
+    cur.execute(
+        """
+        SELECT p.asset_uuid, p.moment_name
+        FROM publications p
+        LEFT JOIN curated_moments cm
+          ON TRIM(LOWER(cm.moment_name)) = TRIM(LOWER(p.moment_name))
+        WHERE LOWER(COALESCE(cm.memory_stage, '')) != 'deleted'
+        """
+    )
     published_assets_by_moment = {}
     published_aids_all = set()
     for aid, mom_name in cur.fetchall():
@@ -3149,6 +3157,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
 
         cm = cm_meta.get(name, {})
         stage = cm.get("stage", "M100")
+        if str(stage).strip().lower() == "deleted":
+            continue
         p_info = pub_info.get(name, {})
         pub_count = p_info.get("pub_count", 0)
         unpub = md["unpublished_scores"]
@@ -5340,6 +5350,15 @@ def create_moment_via_applescript(req: CreateMomentRequest):
                 )
                 db_updated_moments_col = cur.rowcount or 0
 
+            if action_state == "created":
+                _reset_new_folder_curated_moment_stage(
+                    cur,
+                    moment_name,
+                    parent_folder,
+                    asset_count=len(clean_ids),
+                    force=True,
+                )
+
             conn.commit()
         finally:
             conn.close()
@@ -5443,9 +5462,17 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
     )
     all_curated_album_aids = {r[0] for r in cur.fetchall()}
 
-    cur.execute("SELECT DISTINCT asset_uuid FROM publications WHERE moment_name = ?", (moment_name,))
+    cur.execute("SELECT DISTINCT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (moment_name,))
     moment_pub_aids = {r[0] for r in cur.fetchall()}
-    cur.execute("SELECT DISTINCT asset_uuid FROM publications")
+    cur.execute(
+        """
+        SELECT DISTINCT p.asset_uuid
+        FROM publications p
+        LEFT JOIN curated_moments cm
+          ON TRIM(LOWER(cm.moment_name)) = TRIM(LOWER(p.moment_name))
+        WHERE LOWER(COALESCE(cm.memory_stage, '')) != 'deleted'
+        """
+    )
     all_pub_aids = {r[0] for r in cur.fetchall()}
 
     cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
@@ -6077,8 +6104,61 @@ end run
 '''
 
 
+def _reset_new_folder_curated_moment_stage(
+    cur: sqlite3.Cursor,
+    target_moment: str,
+    target_parent: str,
+    asset_count: int = 0,
+    force: bool = False,
+) -> str:
+    """Set or reset curated_moments.memory_stage so a newly created folder starts cleanly in Mode [M]."""
+    parent_lc = (target_parent or "Moments").strip().lower()
+    if parent_lc == "tobecurated":
+        new_stage = "M200"
+        tbc_cnt, cur_cnt, tbc_ex, cur_ex = int(asset_count or 0), 0, 1, 0
+    elif parent_lc == "curated":
+        new_stage = "M300"
+        tbc_cnt, cur_cnt, tbc_ex, cur_ex = 0, int(asset_count or 0), 0, 1
+    else:
+        new_stage = "M100"
+        tbc_cnt, cur_cnt, tbc_ex, cur_ex = 0, 0, 0, 0
+
+    existing_rows = cur.execute(
+        "SELECT moment_name, COALESCE(memory_stage, '') FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+        (target_moment,),
+    ).fetchall()
+    if existing_rows:
+        if force or all((st or "").strip().lower() in ("", "deleted") for _, st in existing_rows):
+            cur.execute(
+                """
+                UPDATE curated_moments
+                SET memory_stage = ?,
+                    to_be_curated_count = ?,
+                    curated_count = ?,
+                    photos_to_be_curated_exists = ?,
+                    photos_curated_exists = ?,
+                    last_pipeline_sync = datetime('now')
+                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                """,
+                (new_stage, tbc_cnt, cur_cnt, tbc_ex, cur_ex, target_moment),
+            )
+            return new_stage
+        return (existing_rows[0][1] or new_stage)
+
+    cur.execute(
+        """
+        INSERT INTO curated_moments (
+            moment_name, to_be_curated_count, curated_count, memory_stage,
+            last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists
+        ) VALUES (?, ?, ?, ?, datetime('now'), ?, ?)
+        """,
+        (target_moment, tbc_cnt, cur_cnt, new_stage, tbc_ex, cur_ex),
+    )
+    return new_stage
+
+
 def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> None:
-    """Remove obsolete album & folder entries for a merged/deleted disjoint Moment from local DB."""
+    """Remove obsolete album & folder entries for a deleted/consolidated Moment and mark curated_moments as 'Deleted'."""
     alb_rows = cur.execute(
         """
         SELECT album_pk FROM media_organizer_albums
@@ -6097,7 +6177,42 @@ def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> No
         cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph})", pks)
         cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph})", pks)
     cur.execute("DELETE FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))", (source_moment,))
-    cur.execute("DELETE FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (source_moment,))
+    cur.execute("DELETE FROM moment_exports WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))", (source_moment,))
+
+    # Soft-mark old folder as 'Deleted' in curated_moments (Option A: preserve publications audit trail & URLs)
+    cm_exists = cur.execute(
+        "SELECT 1 FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+        (source_moment,),
+    ).fetchone()
+    if cm_exists:
+        cur.execute(
+            """
+            UPDATE curated_moments
+            SET memory_stage = 'Deleted',
+                to_be_curated_count = 0,
+                curated_count = 0,
+                photos_to_be_curated_exists = 0,
+                photos_curated_exists = 0,
+                last_pipeline_sync = datetime('now')
+            WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+            """,
+            (source_moment,),
+        )
+    else:
+        pub_exists = cur.execute(
+            "SELECT 1 FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+            (source_moment,),
+        ).fetchone()
+        if pub_exists:
+            cur.execute(
+                """
+                INSERT INTO curated_moments (
+                    moment_name, to_be_curated_count, curated_count, memory_stage,
+                    last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists
+                ) VALUES (?, 0, 0, 'Deleted', datetime('now'), 0, 0)
+                """,
+                (source_moment,),
+            )
 
     for folder in (PUBLISHING_RECOMMENDATION_DIR / source_moment, CURATED_LACIE_DIR / source_moment):
         if folder.exists() and folder.is_dir():
@@ -8198,6 +8313,15 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     (target_moment, src_moment),
                 )
                 cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (src_moment,))
+
+            # Reset M status on the destination folder when a new folder is created (treat as new folder in Mode [M])
+            _reset_new_folder_curated_moment_stage(
+                cur,
+                target_moment,
+                target_parent,
+                asset_count=len(combined_asset_ids),
+                force=(target_action == "created"),
+            )
 
             # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
             clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
