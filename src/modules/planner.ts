@@ -906,6 +906,12 @@ export async function fetchPlannerOverview(force = false, targetMode?: PlannerMo
   return runPromise;
 }
 
+interface PlannerPathFocusItem {
+  containerId: string;
+  itemName: string;
+  isCluster?: boolean;
+}
+
 interface PlannerPathCard {
   num: string;
   numTone: 'blue' | 'amber' | 'purple' | 'green';
@@ -918,35 +924,65 @@ interface PlannerPathCard {
   targetId: string;
   linkLabel: string;
   active: boolean;
+  focusItem?: PlannerPathFocusItem;
+}
+
+function ensureModeMStep1Expanded(): void {
+  const bodyEl = document.getElementById('mode-m-step-1-body');
+  const toggleBtn = document.getElementById('btn-toggle-mode-m-step-1');
+  if (bodyEl?.classList.contains('collapsed')) {
+    bodyEl.classList.remove('collapsed');
+    if (toggleBtn) {
+      toggleBtn.textContent = '▴ Collapse';
+      toggleBtn.setAttribute('aria-expanded', 'true');
+    }
+  }
 }
 
 function jumpToPlannerStep(targetId: string): void {
   const el = document.getElementById(targetId);
   if (!el) return;
   if (targetId === 'mode-m-step-1') {
-    const bodyEl = document.getElementById('mode-m-step-1-body');
-    const toggleBtn = document.getElementById('btn-toggle-mode-m-step-1');
-    if (bodyEl?.classList.contains('collapsed')) {
-      bodyEl.classList.remove('collapsed');
-      if (toggleBtn) {
-        toggleBtn.textContent = '▴ Collapse';
-        toggleBtn.setAttribute('aria-expanded', 'true');
-      }
-    }
+    ensureModeMStep1Expanded();
   }
   el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   el.classList.add('subblock-highlight');
   window.setTimeout(() => el.classList.remove('subblock-highlight'), 2000);
 }
 
+function focusPlannerPathItem(focus: PlannerPathFocusItem | undefined, fallbackTargetId: string): void {
+  if (focus?.isCluster && focus.itemName) {
+    jumpToUnassignedCluster(focus.itemName);
+    return;
+  }
+  if (focus?.containerId && focus.itemName) {
+    const container = document.getElementById(focus.containerId);
+    if (container) {
+      const targetName = focus.itemName.trim().toLowerCase();
+      const children = Array.from(container.querySelectorAll<HTMLElement>('[data-moment-name]'));
+      const matched = children.find(el => (el.dataset.momentName || '').trim().toLowerCase() === targetName);
+      if (matched) {
+        matched.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        matched.classList.add('planner-item-highlight');
+        window.setTimeout(() => matched.classList.remove('planner-item-highlight'), 2200);
+        return;
+      }
+    }
+  }
+  jumpToPlannerStep(fallbackTargetId);
+}
+
 function renderPlannerPathsSummary(containerId: string, paths: PlannerPathCard[]): void {
   const container = document.getElementById(containerId);
   if (!container) return;
   container.innerHTML = paths
-    .map(p => {
+    .map((p, idx) => {
       const toneClass = `num-${p.numTone}`;
       const stateClass = p.active ? 'path-active' : 'path-muted';
       const titleAttr = p.badgeTitle ? ` title="${escapeHtml(p.badgeTitle)}"` : '';
+      const badgeEl = p.focusItem
+        ? `<button type="button" class="badge badge-xs ${p.badgeClass} font-mono planner-path-badge-link" data-path-focus-idx="${idx}"${titleAttr}>${escapeHtml(p.badgeText)}</button>`
+        : `<span class="badge badge-xs ${p.badgeClass} font-mono"${titleAttr}>${escapeHtml(p.badgeText)}</span>`;
       return `
         <div class="planner-path-card ${stateClass}">
           <div>
@@ -955,24 +991,26 @@ function renderPlannerPathsSummary(containerId: string, paths: PlannerPathCard[]
                 <span class="planner-path-num ${toneClass}">${escapeHtml(p.num)}</span>
                 <span class="planner-path-title">${escapeHtml(p.title)}</span>
               </div>
-              <span class="badge badge-xs ${p.badgeClass} font-mono"${titleAttr}>${escapeHtml(p.badgeText)}</span>
+              ${badgeEl}
             </div>
             <p class="planner-path-desc" style="margin-top: 0.4rem;">${escapeHtml(p.description)}</p>
           </div>
           <div class="planner-path-footer">
             <span class="font-mono text-muted" style="font-size: 0.67rem;">${escapeHtml(p.footerMeta)}</span>
-            <a href="#${escapeHtml(p.targetId)}" class="planner-path-jump-link" data-jump-step="${escapeHtml(p.targetId)}">${escapeHtml(p.linkLabel)}</a>
+            <a href="#${escapeHtml(p.targetId)}" class="planner-path-jump-link" data-jump-step="${escapeHtml(p.targetId)}" data-path-focus-idx="${idx}">${escapeHtml(p.linkLabel)}</a>
           </div>
         </div>
       `;
     })
     .join('');
 
-  container.querySelectorAll<HTMLAnchorElement>('[data-jump-step]').forEach(link => {
-    link.addEventListener('click', (e) => {
+  container.querySelectorAll<HTMLElement>('[data-path-focus-idx]').forEach(el => {
+    el.addEventListener('click', (e) => {
       e.preventDefault();
-      const targetId = link.dataset.jumpStep;
-      if (targetId) jumpToPlannerStep(targetId);
+      const idx = Number(el.dataset.pathFocusIdx ?? -1);
+      const card = paths[idx];
+      if (!card) return;
+      focusPlannerPathItem(card.focusItem, card.targetId);
     });
   });
 }
@@ -1368,12 +1406,15 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
         ? `Aligned · ${(th.current || 0.5315).toFixed(4)}`
         : `${(th.current || 0).toFixed(4)} > ${(th.historical_min || 0.5315).toFixed(4)}`,
       badgeClass: th.aligned && needsSync.length === 0 ? 'badge-green' : 'badge-amber',
-      badgeTitle: thDriverSummary ? `Top driver: ${thDriverSummary}` : undefined,
+      badgeTitle: thDriverSummary ? `Click to jump & expand driver group: ${thDriverSummary}` : undefined,
       description: `Run Option [1] (${needsSync.length} moment(s) needing sync) and assign/ignore ${outstandingGroupsCount} outstanding unassigned group(s) until threshold aligns.`,
       footerMeta: thDriverSummary ? `Driver: ${thDriverSummary}` : `${rawClustersForSummary.length} total groups`,
       targetId: 'mode-m-step-1',
       linkLabel: 'Go to 1️⃣ Threshold & Groups ↓',
-      active: !th.aligned || needsSync.length > 0 || outstandingGroupsCount > 0
+      active: !th.aligned || needsSync.length > 0 || outstandingGroupsCount > 0,
+      focusItem: th.driver?.folder
+        ? { containerId: 'mode-m-unassigned-list', itemName: th.driver.folder, isCluster: true }
+        : undefined
     },
     {
       num: '2',
@@ -1381,12 +1422,13 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       title: 'Publish Top Ready Moments',
       badgeText: topRec ? formatMomentScoreBadge(topRec.moment_name, Number(topRec.avg_score || 0)) : '0 actionable',
       badgeClass: recs.length > 0 ? 'badge-green' : 'badge-outline',
-      badgeTitle: topRec ? `Top publishing candidate: ${topRec.moment_name} (${Number(topRec.avg_score || 0).toFixed(4)})` : undefined,
+      badgeTitle: topRec ? `Click to jump to publishing candidate: ${topRec.moment_name} (${Number(topRec.avg_score || 0).toFixed(4)})` : undefined,
       description: `Publish threshold-aligned Moments ready for Shutterfly / YouTube in curated batches (up to 9 assets).`,
       footerMeta: `${recs.length} actionable${th.aligned ? '' : ' · after Path 1'}`,
       targetId: 'mode-m-step-2',
       linkLabel: 'Go to 2️⃣ Publishing ↓',
-      active: recs.length > 0
+      active: recs.length > 0,
+      focusItem: topRec ? { containerId: 'mode-m-recs-tbody', itemName: topRec.moment_name } : undefined
     },
     {
       num: '3',
@@ -1394,12 +1436,13 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       title: 'Consolidate Disjoint Moments (< 2)',
       badgeText: topDisjoint ? formatMomentScoreBadge(topDisjoint.moment_name, Number(topDisjoint.avg_score || 0)) : '0 disjoint',
       badgeClass: disjoint.length > 0 ? 'badge-amber' : 'badge-outline',
-      badgeTitle: topDisjoint ? `Top disjoint candidate: ${topDisjoint.moment_name} (${Number(topDisjoint.avg_score || 0).toFixed(4)})` : undefined,
+      badgeTitle: topDisjoint ? `Click to jump to disjoint Moment: ${topDisjoint.moment_name} (${Number(topDisjoint.avg_score || 0).toFixed(4)})` : undefined,
       description: `Review small single-asset disjoint Moments and merge them into neighboring chronological Moments.`,
       footerMeta: disjoint.length > 0 ? `${disjoint.length} disjoint` : '0 disjoint',
       targetId: 'mode-m-step-3',
       linkLabel: 'Go to 3️⃣ Disjoint Merge ↓',
-      active: disjoint.length > 0
+      active: disjoint.length > 0,
+      focusItem: topDisjoint ? { containerId: 'mode-m-disjoint-tbody', itemName: topDisjoint.moment_name } : undefined
     },
     {
       num: '4',
@@ -1410,13 +1453,14 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
         : '0 published',
       badgeClass: topPublished || pubMomentsTotal > 0 ? 'badge-blue' : 'badge-outline',
       badgeTitle: topPublished
-        ? `Top published Moment: ${topPublished.moment_name} (${Number(topPublished.avg_score || 0).toFixed(4)}) · ${pubMomentsTotal} Moments (${pubAssetsTotal} pub.)`
+        ? `Click to jump to top published Moment: ${topPublished.moment_name} (${Number(topPublished.avg_score || 0).toFixed(4)}) · ${pubMomentsTotal} Moments (${pubAssetsTotal} pub.)`
         : undefined,
       description: 'Review Shutterfly & YouTube published albums, search history, or open live platform links.',
       footerMeta: `${pubMomentsTotal} Moments · ${m500Count} M500 · ${m450Count} M450`,
       targetId: 'published-memories-card',
       linkLabel: 'Go to 4️⃣ Published History ↓',
-      active: pubMomentsTotal > 0
+      active: pubMomentsTotal > 0,
+      focusItem: topPublished ? { containerId: 'featured-moments-list', itemName: topPublished.moment_name } : undefined
     }
   ]);
 
@@ -1507,7 +1551,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
           const actionBtn = `<button type="button" class="btn btn-xs ${actionBtnClass} btn-open-publish-moment" data-moment-name="${escapeHtml(r.moment_name)}" title="Open Publish / Republish workflow for '${escapeHtml(r.moment_name)}'">${escapeHtml(r.action)}</button>`;
           const tagBadgeHtml = renderMomentTaggedBadge(r.is_tagged, r.paradigm_confirmed, r.tag_summary);
           return `
-          <tr>
+          <tr data-moment-name="${escapeHtml(r.moment_name)}">
             <td><strong class="text-primary">${escapeHtml(r.moment_name)}</strong>${tagBadgeHtml}</td>
             <td style="text-align: right;" class="font-mono text-amber">${r.avg_score.toFixed(4)}</td>
             <td style="text-align: right;" class="font-mono">${r.files}</td>
@@ -1555,7 +1599,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
             'awaiting merge'
           );
           return `
-            <tr${d.is_tagged ? ' style="opacity: 0.84;"' : ''}>
+            <tr data-moment-name="${escapeHtml(d.moment_name)}"${d.is_tagged ? ' style="opacity: 0.84;"' : ''}>
               <td>
                 <div class="disjoint-row-title">
                   ${thumbHtml}
@@ -1644,6 +1688,7 @@ function sortNormalizedClusters(clusters: UnassignedClusterItem[]): UnassignedCl
 
 function jumpToUnassignedCluster(folder: string): void {
   if (!folder) return;
+  ensureModeMStep1Expanded();
   if (unassignedSearchQuery) {
     unassignedSearchQuery = '';
     const searchEl = document.getElementById('mode-m-unassigned-search') as HTMLInputElement | null;

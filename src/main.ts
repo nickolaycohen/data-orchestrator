@@ -730,7 +730,7 @@ function renderPublishedMomentsHistory(): void {
       );
 
       return `
-      <div class="moment-card" style="flex-direction: column; align-items: stretch;" title="${acctTitle}">
+      <div class="moment-card" data-moment-name="${escapedMoment}" style="flex-direction: column; align-items: stretch;" title="${acctTitle}">
         <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;">
           <div style="min-width: 0; flex: 1;">
             <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">

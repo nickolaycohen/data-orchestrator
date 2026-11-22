@@ -3094,6 +3094,23 @@ body {
   opacity: 0.72;
 }
 
+.planner-path-badge-link {
+  cursor: pointer;
+  transition: transform 0.12s ease, filter 0.15s ease;
+}
+
+.planner-path-badge-link:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+}
+
+.planner-item-highlight {
+  outline: 2px solid rgba(245, 158, 11, 0.9) !important;
+  outline-offset: -1px;
+  background: rgba(245, 158, 11, 0.14) !important;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25);
+}
+
 .planner-path-card:hover {
   border-color: rgba(196, 181, 253, 0.55);
 }
