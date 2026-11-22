@@ -3401,6 +3401,30 @@ body {
   transition: opacity 0.2s ease, filter 0.2s ease;
 }
 
+.apple-workspace-sync-banner {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 45;
+  margin-bottom: 0.85rem;
+  border: 1px solid rgba(245, 158, 11, 0.48);
+  border-radius: 8px;
+  background: rgba(24, 24, 38, 0.96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+#tab-media.apple-photos-workspace-locked #planner-modes-grid,
+#tab-media.apple-photos-workspace-locked #media-cleanup-card,
+#tab-media.apple-photos-workspace-locked #published-memories-card,
+#tab-media.apple-photos-workspace-locked #mode-m-folders-block,
+#tab-media.apple-photos-workspace-locked #media-stats-collapsible,
+#tab-media.apple-photos-workspace-locked #planner-mode-selector-bar {
+  opacity: 0.42;
+  filter: grayscale(0.55);
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 0.2s ease, filter 0.2s ease;
+}
+
 .unassigned-clusters-toolbar {
   display: flex;
   align-items: center;

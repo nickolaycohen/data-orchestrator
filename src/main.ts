@@ -11,7 +11,11 @@ import {
   setupMediaCleanup
 } from './modules/cleanup.ts';
 import {
+  beginApplePhotosSyncLock,
+  cancelApplePhotosSyncLock,
+  consumePostAppleReloadState,
   fetchPlannerOverview,
+  finishApplePhotosActionSyncLock,
   openResolveDisjointModal,
   renderMomentTaggedBadge,
   setupPlannerOverview,
@@ -39,6 +43,12 @@ document.addEventListener('DOMContentLoaded', () => {
   setupUtilities();
   setupMediaCleanup();
   setupPlannerOverview(fetchExecutorMonitor, fetchMediaMetrics);
+
+  const restoredReload = consumePostAppleReloadState();
+  if (restoredReload?.tab) {
+    const targetTabBtn = document.querySelector<HTMLElement>(`.nav-tab[data-tab="${restoredReload.tab}"]`);
+    targetTabBtn?.click();
+  }
 
   // Initial data loading
   fetchAllMetrics();
@@ -1896,6 +1906,12 @@ let activeTaskCallbacks: {
   onDone: null
 };
 
+const APPLE_PHOTOS_WRITE_TASKS = new Set([
+  'media_create_moments',
+  'media_managed_intake',
+  'media_dedup_unassigned'
+]);
+
 window.triggerTask = async function (
   taskId: string,
   args: any = null,
@@ -1903,6 +1919,12 @@ window.triggerTask = async function (
   onLog: ((text: string) => void) | null = null,
   onDone: ((exitCode: number, errDetail?: string) => void) | null = null
 ): Promise<any> {
+  const isAppleWriteTask = APPLE_PHOTOS_WRITE_TASKS.has(taskId);
+  if (isAppleWriteTask) {
+    beginApplePhotosSyncLock(
+      `🍎 Running Apple Photos task (${taskId}) — UI is grayed out until completed and Background DB Sync refreshes…`
+    );
+  }
   if (openConsole) {
     const drawer = document.getElementById('console-drawer');
     drawer?.classList.add('open');
@@ -1934,6 +1956,7 @@ window.triggerTask = async function (
     });
     const data = await res.json();
     if (!res.ok) {
+      if (isAppleWriteTask) cancelApplePhotosSyncLock();
       const errMsg = `[ERROR] ${data.detail || 'Failed to dispatch task'}\n`;
       if (openConsole) {
         appendConsoleLog(errMsg);
@@ -1951,6 +1974,7 @@ window.triggerTask = async function (
     if (activeExecutionId) connectWebSocket(activeExecutionId);
     return activeExecutionId;
   } catch (err: any) {
+    if (isAppleWriteTask) cancelApplePhotosSyncLock();
     const errMsg = `[ERROR] Network error starting task: ${err}\n`;
     if (openConsole) {
       appendConsoleLog(errMsg);
@@ -2011,6 +2035,16 @@ function connectWebSocket(executionId: string): void {
     }
     if (activeTaskCallbacks.onDone) {
       activeTaskCallbacks.onDone(exitCode);
+    }
+    const completedTaskId = activeTaskCallbacks.taskId;
+    if (completedTaskId && APPLE_PHOTOS_WRITE_TASKS.has(completedTaskId)) {
+      if (exitCode === 0) {
+        finishApplePhotosActionSyncLock(
+          `⏳ ${completedTaskId} finished updating Apple Photos — awaiting Background DB Copy & Sync Service refresh to re-enable UI & reload browser…`
+        );
+      } else {
+        cancelApplePhotosSyncLock();
+      }
     }
     fetchAllMetrics();
     fetchPlannerOverview(true);

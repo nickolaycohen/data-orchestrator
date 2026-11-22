@@ -346,6 +346,30 @@
           </div>
         </div>
 
+        <!-- Global Apple Photos Write Sync Banner (visible & interactive while #tab-media is grayed out awaiting BG DB sync) -->
+        <div id="apple-photos-sync-banner" class="clusters-sync-banner apple-workspace-sync-banner" style="display: none;">
+          <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+            <div class="spinner-sm"></div>
+            <div>
+              <strong style="font-size: 0.78rem; color: #fef3c7;">Apple Photos Mutation Sync Lock</strong>
+              <span id="apple-photos-sync-banner-text" style="margin-left: 0.45rem; font-size: 0.76rem;">
+                Updating Apple Photos — UI paused until Background DB Sync completes and refreshes browser…
+              </span>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+            <span class="badge badge-xs badge-amber font-mono" id="apple-photos-sync-pill">⏳ Sync Pending</span>
+            <button type="button" class="btn btn-xs btn-green" id="btn-apple-sync-start-bg" style="display: none;"
+              title="Start Background DB Copy &amp; Sync Service so Apple Photos changes sync to SQLite">
+              ▶ Start BG Service
+            </button>
+            <button type="button" class="btn btn-xs btn-outline" id="btn-apple-sync-force-unlock"
+              title="Re-enable UI and reload browser immediately">
+              🔄 Force Refresh &amp; Unlock
+            </button>
+          </div>
+        </div>
+
         <!-- Two Sections: [B] Batch Management (default) | [M] Moments Organizer -->
         <div class="planner-modes-grid single-col mb-4" id="planner-modes-grid">
           <!-- SECTION [B]: Batch Management (default) -->
