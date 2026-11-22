@@ -765,7 +765,7 @@ function renderPublishedMomentsHistory(): void {
   momentsContainer.querySelectorAll<HTMLElement>('.btn-pub-tag-moment').forEach(btn => {
     btn.addEventListener('click', () => {
       const mName = btn.getAttribute('data-tag-moment') || '';
-      if (mName) void openResolveDisjointModal(mName);
+      if (mName) void openResolveDisjointModal(mName, '', { isHistoricalMoment: true });
     });
   });
 

@@ -105,6 +105,7 @@ interface TaggingEngineState {
 
 let resolveDisjointMomentName = '';
 let resolveDisjointIsUnassignedCluster = false;
+let resolveDisjointIsHistoricalMoment = false;
 let resolveDisjointExplicitAssetIds: string[] = [];
 let resolveDisjointAssets: DisjointDetailAsset[] = [];
 const resolveDisjointSelectedIds = new Set<string>();
@@ -2979,7 +2980,7 @@ function renderMemoriesFolders(items: MemoriesFolderItem[]): void {
   tbody.querySelectorAll<HTMLElement>('.btn-retag-memories-folder').forEach(btn => {
     btn.addEventListener('click', () => {
       const mName = btn.dataset.momentName || '';
-      if (mName) void openResolveDisjointModal(mName);
+      if (mName) void openResolveDisjointModal(mName, '', { isHistoricalMoment: true });
     });
   });
 
@@ -4901,7 +4902,8 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
         apply_to_folder_name: applyToFolderName,
         composed_name: applyToFolderName ? composed : null,
         merge_existing: true,
-        removed_tags: Array.from(state.removedTagValues)
+        removed_tags: Array.from(state.removedTagValues),
+        include_all_moment_assets: state === sourceTagState && resolveDisjointIsHistoricalMoment
       })
     });
     const rawText = await res.text();
@@ -5026,12 +5028,14 @@ function updateResolveDisjointTargetPreview(): void {
 export async function openResolveDisjointModal(
   momentName: string,
   suggestedTarget = '',
-  options?: { assetIds?: string[]; isUnassignedCluster?: boolean }
+  options?: { assetIds?: string[]; isUnassignedCluster?: boolean; isHistoricalMoment?: boolean }
 ): Promise<void> {
   const isUnassigned = Boolean(options?.isUnassignedCluster);
+  const isHistorical = Boolean(options?.isHistoricalMoment);
   const explicitIds = (options?.assetIds || []).map(s => (s || '').trim()).filter(Boolean);
   resolveDisjointMomentName = momentName;
   resolveDisjointIsUnassignedCluster = isUnassigned;
+  resolveDisjointIsHistoricalMoment = isHistorical;
   resolveDisjointExplicitAssetIds = explicitIds;
   resolveDisjointAssets = [];
   resolveDisjointSelectedIds.clear();
@@ -5087,7 +5091,9 @@ export async function openResolveDisjointModal(
   if (titleEl) {
     titleEl.textContent = isUnassigned
       ? `🏷️ Tag & Consolidate Unassigned Group · ${momentName}`
-      : `🏷️ Tag & Consolidate Moment · ${momentName}`;
+      : isHistorical
+        ? `🏷️ Tag Historical Moment (All Assets) · ${momentName}`
+        : `🏷️ Tag & Consolidate Moment · ${momentName}`;
   }
   if (badgeEl) badgeEl.textContent = 'loading...';
   if (summaryEl) {
@@ -5145,7 +5151,9 @@ export async function openResolveDisjointModal(
     resolveDisjointAssets = assets;
     const histMinVal = data.historical_min ?? 0.5315;
     assets.forEach(a => {
-      if (a.qualified && !a.is_duplicate_copy) resolveDisjointSelectedIds.add(a.asset_id);
+      if ((isHistorical ? !a.is_duplicate_copy : a.qualified && !a.is_duplicate_copy)) {
+        resolveDisjointSelectedIds.add(a.asset_id);
+      }
       const sizeBytes = a.file_size_bytes || 0;
       candidateAssetMeta.set(a.asset_id, {
         asset_id: a.asset_id,

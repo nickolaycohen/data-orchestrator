@@ -6458,6 +6458,38 @@ class SaveMomentTagsRequest(BaseModel):
     notes: Optional[str] = None
     merge_existing: bool = True
     removed_tags: list[str] = []
+    include_all_moment_assets: bool = False
+
+
+def _collect_moment_asset_ids(cur: sqlite3.Cursor, m_name: str) -> list[str]:
+    """Return all distinct active asset IDs belonging to a Moment across assets, albums, publications, and exports."""
+    cur.execute(
+        """
+        SELECT DISTINCT a.asset_id
+        FROM assets a
+        LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+        WHERE COALESCE(za.ZTRASHEDSTATE, 0) = 0
+          AND COALESCE(a.removed_from_source, 0) = 0
+          AND (
+              TRIM(LOWER(COALESCE(a.MomentsAlbumName, ''))) = TRIM(LOWER(?))
+              OR a.asset_id IN (
+                  SELECT moaa.asset_id
+                  FROM media_organizer_album_assets moaa
+                  JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                  WHERE moa.is_folder = 0
+                    AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+              )
+              OR a.asset_id IN (
+                  SELECT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+              )
+              OR a.asset_id IN (
+                  SELECT asset_id FROM moment_exports WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+              )
+          )
+        """,
+        (m_name, m_name, m_name, m_name),
+    )
+    return [r[0] for r in cur.fetchall() if r[0]]
 
 
 def _load_moment_detail_core(
@@ -6497,7 +6529,7 @@ def _load_moment_detail_core(
         query_params: tuple = tuple(clean_explicit_ids)
     else:
         where_clause = """(
-            TRIM(COALESCE(a.MomentsAlbumName, '')) = TRIM(?)
+            TRIM(LOWER(COALESCE(a.MomentsAlbumName, ''))) = TRIM(LOWER(?))
             OR a.asset_id IN (
                 SELECT moaa.asset_id
                 FROM media_organizer_album_assets moaa
@@ -6505,8 +6537,14 @@ def _load_moment_detail_core(
                 WHERE moa.is_folder = 0
                   AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
             )
+            OR a.asset_id IN (
+                SELECT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+            )
+            OR a.asset_id IN (
+                SELECT asset_id FROM moment_exports WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+            )
           )"""
-        query_params = (m_name, m_name)
+        query_params = (m_name, m_name, m_name, m_name)
 
     cur.execute(
         f"""
@@ -6992,22 +7030,8 @@ def save_moment_tags(req: SaveMomentTagsRequest):
             cur = conn.cursor()
             _ensure_moment_tag_tables(cur)
 
-            if not clean_aids:
-                cur.execute(
-                    """
-                    SELECT DISTINCT a.asset_id
-                    FROM assets a
-                    WHERE TRIM(LOWER(COALESCE(a.MomentsAlbumName, ''))) = TRIM(LOWER(?))
-                       OR a.asset_id IN (
-                            SELECT moaa.asset_id
-                            FROM media_organizer_album_assets moaa
-                            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                            WHERE moa.is_folder = 0 AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
-                       )
-                    """,
-                    (m_name, m_name),
-                )
-                for (aid,) in cur.fetchall():
+            if not clean_aids or req.include_all_moment_assets:
+                for aid in _collect_moment_asset_ids(cur, m_name):
                     if aid and aid not in seen_aids:
                         seen_aids.add(aid)
                         clean_aids.append(aid)
@@ -7015,43 +7039,48 @@ def save_moment_tags(req: SaveMomentTagsRequest):
             target_ids_for_rows = ["", *clean_aids]
             removed_count = 0
             if removed_lc:
-                ph_ids = ",".join("?" for _ in target_ids_for_rows)
                 ph_rem = ",".join("?" for _ in removed_lc)
-                cur.execute(
-                    f"""
-                    DELETE FROM moment_tags
-                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-                      AND asset_id IN ({ph_ids})
-                      AND LOWER(tag_value) IN ({ph_rem})
-                    """,
-                    [m_name, *target_ids_for_rows, *sorted(removed_lc)],
-                )
-                removed_count = cur.rowcount or 0
+                sorted_rem = sorted(removed_lc)
+                for off in range(0, len(target_ids_for_rows), 400):
+                    chunk_ids = target_ids_for_rows[off : off + 400]
+                    ph_ids = ",".join("?" for _ in chunk_ids)
+                    cur.execute(
+                        f"""
+                        DELETE FROM moment_tags
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                          AND asset_id IN ({ph_ids})
+                          AND LOWER(tag_value) IN ({ph_rem})
+                        """,
+                        [m_name, *chunk_ids, *sorted_rem],
+                    )
+                    removed_count += cur.rowcount or 0
 
             existing_by_aid: dict[str, list[dict]] = {}
             all_target_existing: list[dict] = []
             if req.merge_existing:
-                ph_ids = ",".join("?" for _ in target_ids_for_rows)
-                cur.execute(
-                    f"""
-                    SELECT asset_id, category, tag_value, include_in_name
-                    FROM moment_tags
-                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-                      AND asset_id IN ({ph_ids})
-                    ORDER BY id ASC
-                    """,
-                    [m_name, *target_ids_for_rows],
-                )
-                for row_aid, cat, val, inc in cur.fetchall():
-                    item = {
-                        "category": (cat or "").strip().lower(),
-                        "tag_value": re.sub(r"\s+", " ", (val or "").strip()),
-                        "include_in_name": bool(inc),
-                    }
-                    if not item["tag_value"] or item["tag_value"].lower() in removed_lc:
-                        continue
-                    existing_by_aid.setdefault(row_aid or "", []).append(item)
-                    all_target_existing.append(item)
+                for off in range(0, len(target_ids_for_rows), 400):
+                    chunk_ids = target_ids_for_rows[off : off + 400]
+                    ph_ids = ",".join("?" for _ in chunk_ids)
+                    cur.execute(
+                        f"""
+                        SELECT asset_id, category, tag_value, include_in_name
+                        FROM moment_tags
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                          AND asset_id IN ({ph_ids})
+                        ORDER BY id ASC
+                        """,
+                        [m_name, *chunk_ids],
+                    )
+                    for row_aid, cat, val, inc in cur.fetchall():
+                        item = {
+                            "category": (cat or "").strip().lower(),
+                            "tag_value": re.sub(r"\s+", " ", (val or "").strip()),
+                            "include_in_name": bool(inc),
+                        }
+                        if not item["tag_value"] or item["tag_value"].lower() in removed_lc:
+                            continue
+                        existing_by_aid.setdefault(row_aid or "", []).append(item)
+                        all_target_existing.append(item)
 
                 # Also fold in active flags stored in each asset's unified JSON metadata construct
                 for aid in clean_aids:
