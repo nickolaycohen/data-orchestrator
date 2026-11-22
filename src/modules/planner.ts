@@ -3,6 +3,7 @@
 // ==========================================================================
 
 import type {
+  AppleMonthSelectionDetailResponse,
   BatchDeviceSummary,
   CreateMomentResponse,
   DisjointDetailAsset,
@@ -16,6 +17,7 @@ import type {
   MomentAssetsPreviewResponse,
   MomentTagItem,
   MomentTagSessionSummary,
+  PlannerBatchCandidate,
   PlannerModeB,
   PlannerModeM,
   PlannerOverviewResponse,
@@ -797,6 +799,235 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     void updateGroupingRules({ reset_defaults: true });
   });
 
+  let msDialogMonth = '';
+  let msDialogSourceStep: 'step2' | 'step3' = 'step3';
+  let msDialogQueueBlocked = false;
+  let msDialogActionPending = false;
+
+  const setMsDialogOpen = (open: boolean) => {
+    const modal = document.getElementById('modal-month-selection-detail');
+    if (modal) modal.classList.toggle('open', open);
+  };
+
+  const renderMsDialogBody = (data: AppleMonthSelectionDetailResponse) => {
+    const ms = data.month_selection;
+    const badgeEl = document.getElementById('ms-detail-status-badge');
+    const bannerEl = document.getElementById('ms-detail-banner');
+    const metaEl = document.getElementById('ms-detail-meta');
+    const liveEl = document.getElementById('ms-detail-live-box');
+    const assetsHeadEl = document.getElementById('ms-detail-assets-heading');
+    const syncNoteEl = document.getElementById('ms-detail-sync-note');
+    const assetsListEl = document.getElementById('ms-detail-assets-list');
+    const btnClose = document.getElementById('btn-ms-detail-close');
+    const btnQueueReady = document.getElementById('btn-ms-detail-queue-ready');
+    const btnOverride = document.getElementById('btn-ms-detail-override');
+
+    if (badgeEl) {
+      badgeEl.className = `badge badge-xs font-mono ${
+        ms.ready ? 'badge-green' : ms.exists ? 'badge-amber' : 'badge-red'
+      }`;
+      badgeEl.textContent = ms.ready
+        ? `✓ Ready (${ms.asset_count})`
+        : ms.exists
+        ? `⚠️ Empty (0 assets)`
+        : `⚠️ Missing Album`;
+    }
+
+    if (bannerEl) {
+      if (!ms.ready) {
+        bannerEl.style.display = 'block';
+        const isStep3Block = msDialogSourceStep === 'step3' || msDialogQueueBlocked || data.status_code === '500' || data.status_code === '550';
+        bannerEl.style.borderColor = isStep3Block ? 'rgba(239, 68, 68, 0.45)' : 'rgba(245, 158, 11, 0.45)';
+        bannerEl.style.background = isStep3Block ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)';
+        bannerEl.style.color = isStep3Block ? '#fecaca' : '#fde68a';
+        const problemText = ms.exists
+          ? `Album <code>${escapeHtml(ms.matched_album_name || ms.expected_album)}</code> exists under <code>Apple Photos Month Selection</code>, but currently has <strong>0 assets</strong>.`
+          : `Album <code>${escapeHtml(ms.expected_album)}</code> was <strong>not found</strong> under <code>Media Organizer on LaCie / Apple Photos Month Selection</code>.`;
+        bannerEl.innerHTML = `
+          <div><strong>${msDialogQueueBlocked ? '🚫 Step 3 Queue Blocked' : '⚠️ Apple Photos Month Selection Incomplete'}:</strong> ${problemText}</div>
+          <div style="margin-top: 0.35rem; opacity: 0.92;">
+            Why Step 3 blocks: assets in <strong>Apple Photos Month Selection</strong> receive the <code>+0.15</code> ranking boost before Google Favorites pull &amp; AI ranking (Stage 600). Creating and populating <code>${escapeHtml(ms.expected_album)}</code> in Apple Photos is a one-step action that unlocks this batch and prevents unexpected lower-tier photos from surfacing later.
+          </div>
+        `;
+      } else {
+        bannerEl.style.display = 'block';
+        bannerEl.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+        bannerEl.style.background = 'rgba(16, 185, 129, 0.09)';
+        bannerEl.style.color = '#a7f3d0';
+        bannerEl.innerHTML = `✅ <strong>Unlocked &amp; Ready:</strong> Album <code>${escapeHtml(
+          ms.matched_album_name || ms.expected_album
+        )}</code> exists with <strong>${ms.asset_count}</strong> asset(s) synced.`;
+      }
+    }
+
+    if (metaEl) {
+      metaEl.innerHTML = `
+        <div><span class="text-muted">Batch / Stage:</span> <strong class="font-mono">${escapeHtml(data.month)}</strong> · <span class="badge badge-xs badge-outline font-mono">${escapeHtml(data.status_code)}</span></div>
+        <div><span class="text-muted">Batch Assets:</span> <strong class="font-mono">${(data.batch_assets_count || 0).toLocaleString()}</strong> (flagged: <strong class="font-mono">${ms.batch_selected_count || 0}</strong>)</div>
+        <div style="grid-column: 1 / -1;"><span class="text-muted">Expected Path:</span> <code style="word-break: break-word;">${escapeHtml(data.expected_path)}</code></div>
+      `;
+    }
+
+    if (liveEl) {
+      if (data.live_photos_app && data.live_photos_app.checked) {
+        liveEl.style.display = 'block';
+        if (data.live_photos_app.error) {
+          liveEl.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+          liveEl.style.background = 'rgba(245, 158, 11, 0.1)';
+          liveEl.style.color = '#fde68a';
+          liveEl.innerHTML = `⚠️ <strong>Live Apple Photos Check:</strong> ${escapeHtml(data.live_photos_app.error)}`;
+        } else if (data.live_photos_app.exists && data.live_photos_app.count > 0) {
+          liveEl.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+          liveEl.style.background = 'rgba(16, 185, 129, 0.1)';
+          liveEl.style.color = '#a7f3d0';
+          liveEl.innerHTML = ms.ready
+            ? `📸 <strong>Live Photos.app Check:</strong> Found <code>${escapeHtml(data.live_photos_app.matched_name || ms.expected_album)}</code> (${data.live_photos_app.count} item(s)) — matches synced DB.`
+            : `📸 <strong>Live Photos.app Check:</strong> Found <code>${escapeHtml(data.live_photos_app.matched_name || ms.expected_album)}</code> (${data.live_photos_app.count} item(s)) in Apple Photos! Wait for <strong>Background DB Copy &amp; Sync</strong> to refresh <code>media_organizer.db</code>, then click Re-check.`;
+        } else if (data.live_photos_app.exists) {
+          liveEl.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+          liveEl.style.background = 'rgba(245, 158, 11, 0.1)';
+          liveEl.style.color = '#fde68a';
+          liveEl.innerHTML = `📸 <strong>Live Photos.app Check:</strong> Album <code>${escapeHtml(data.live_photos_app.matched_name || ms.expected_album)}</code> exists in Photos.app with <strong>0 items</strong>.`;
+        } else {
+          liveEl.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+          liveEl.style.background = 'rgba(239, 68, 68, 0.08)';
+          liveEl.style.color = '#fecaca';
+          liveEl.innerHTML = `📸 <strong>Live Photos.app Check:</strong> Album <code>${escapeHtml(ms.expected_album)}</code> is still missing in Photos.app.`;
+        }
+      } else {
+        liveEl.style.display = 'none';
+      }
+    }
+
+    if (assetsHeadEl) {
+      assetsHeadEl.textContent = `Album Assets (${data.assets.length})`;
+    }
+    if (syncNoteEl) {
+      syncNoteEl.textContent = data.db_synced_at_utc ? `DB album sync: ${data.db_synced_at_utc} UTC` : '';
+    }
+    if (assetsListEl) {
+      if (!data.assets.length) {
+        assetsListEl.innerHTML = `<div class="text-muted font-mono" style="grid-column: 1 / -1; font-size: 0.72rem; padding: 0.4rem 0;">No synced assets recorded in this Month Selection album yet.</div>`;
+      } else {
+        assetsListEl.innerHTML = data.assets
+          .map(a => {
+            const thumb = `/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}`;
+            return `
+            <div style="display: flex; align-items: center; gap: 0.45rem; padding: 0.32rem; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(148,163,184,0.14);">
+              <img src="${thumb}" alt="" style="width: 36px; height: 36px; object-fit: cover; border-radius: 4px; flex-shrink: 0; background: #0f172a;" loading="lazy" />
+              <div style="min-width: 0; flex: 1;">
+                <div class="font-mono" style="font-size: 0.68rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(a.original_filename)}">${escapeHtml(a.original_filename)}</div>
+                <div class="font-mono text-muted" style="font-size: 0.63rem;">${escapeHtml((a.date_created_utc || '').slice(0, 10))} · ★ ${a.score_normalized.toFixed(3)}</div>
+              </div>
+            </div>`;
+          })
+          .join('');
+      }
+    }
+
+    const isStage500 = data.status_code === '500' || data.status_code === '550' || msDialogSourceStep === 'step3';
+    if (btnClose) {
+      btnClose.textContent = !ms.ready && isStage500 && msDialogQueueBlocked ? 'Close (Keep Blocked)' : 'Close';
+    }
+    if (btnQueueReady) {
+      btnQueueReady.style.display = ms.ready && isStage500 && !data.in_queue ? 'inline-flex' : 'none';
+    }
+    if (btnOverride) {
+      btnOverride.style.display = !ms.ready && isStage500 && !data.in_queue ? 'inline-flex' : 'none';
+    }
+  };
+
+  const loadMonthSelectionDialogData = async (month: string, live = false) => {
+    const titleEl = document.getElementById('ms-detail-title');
+    const badgeEl = document.getElementById('ms-detail-status-badge');
+    const statusEl = document.getElementById('ms-detail-action-status');
+    const metaEl = document.getElementById('ms-detail-meta');
+    const assetsListEl = document.getElementById('ms-detail-assets-list');
+    if (titleEl) titleEl.textContent = `📅 Apple Photos Month Selection · ${month}`;
+    if (badgeEl) {
+      badgeEl.className = 'badge badge-xs badge-outline font-mono';
+      badgeEl.textContent = live ? 'Checking Photos.app...' : 'Loading...';
+    }
+    if (statusEl) {
+      statusEl.style.display = 'none';
+      statusEl.innerHTML = '';
+    }
+    if (!live && metaEl) metaEl.innerHTML = '<div class="text-muted font-mono">Checking database...</div>';
+    if (!live && assetsListEl) assetsListEl.innerHTML = '';
+
+    try {
+      const qs = new URLSearchParams({ month, live: live ? 'true' : 'false' });
+      const res = await fetch(`/api/media/planner/month-selection-detail?${qs.toString()}`);
+      const data: AppleMonthSelectionDetailResponse = await res.json();
+      if (!data.ok) {
+        if (statusEl) {
+          statusEl.style.display = 'block';
+          statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || 'Failed to inspect Month Selection album')}</span>`;
+        }
+        return;
+      }
+      renderMsDialogBody(data);
+      if (live) {
+        await fetchPlannerOverview(true, 'b');
+      }
+    } catch (err: any) {
+      if (statusEl) {
+        statusEl.style.display = 'block';
+        statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+      }
+    }
+  };
+
+  window.openMonthSelectionDialog = async function (
+    month: string,
+    opts?: { sourceStep?: 'step2' | 'step3'; queueBlocked?: boolean }
+  ): Promise<void> {
+    msDialogMonth = month;
+    msDialogSourceStep = opts?.sourceStep || 'step3';
+    msDialogQueueBlocked = Boolean(opts?.queueBlocked);
+    setMsDialogOpen(true);
+    await loadMonthSelectionDialogData(month, false);
+  };
+
+  document.querySelectorAll('.btn-close-ms-detail-modal').forEach(btn => {
+    btn.addEventListener('click', () => setMsDialogOpen(false));
+  });
+  document.getElementById('btn-ms-detail-recheck')?.addEventListener('click', async () => {
+    if (!msDialogMonth || msDialogActionPending) return;
+    msDialogActionPending = true;
+    try {
+      await loadMonthSelectionDialogData(msDialogMonth, true);
+    } finally {
+      msDialogActionPending = false;
+    }
+  });
+  document.getElementById('btn-ms-detail-queue-ready')?.addEventListener('click', async () => {
+    if (!msDialogMonth || msDialogActionPending) return;
+    msDialogActionPending = true;
+    try {
+      await window.runPlannerBatchAction(msDialogMonth, 'queue', false);
+      setMsDialogOpen(false);
+    } finally {
+      msDialogActionPending = false;
+    }
+  });
+  document.getElementById('btn-ms-detail-override')?.addEventListener('click', async () => {
+    if (!msDialogMonth || msDialogActionPending) return;
+    const statusEl = document.getElementById('ms-detail-action-status');
+    msDialogActionPending = true;
+    try {
+      await window.runPlannerBatchAction(msDialogMonth, 'queue', true);
+      setMsDialogOpen(false);
+    } catch (err: any) {
+      if (statusEl) {
+        statusEl.style.display = 'block';
+        statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(err?.message || 'Failed to override')}</span>`;
+      }
+    } finally {
+      msDialogActionPending = false;
+    }
+  });
+
   window.runPlannerBatchAction = async function (
     month: string,
     action: string,
@@ -814,18 +1045,10 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       });
       const data = await res.json();
       if (!data.ok && data.requires_confirmation && !confirmMissingMonthSelection) {
-        const ms = data.month_selection;
-        const expectedName = ms?.expected_album || month;
-        const detailMsg =
-          data.warning_code === 'EMPTY_MONTH_SELECTION'
-            ? `Album "${ms?.matched_album_name || expectedName}" exists under "Apple Photos Month Selection" but currently has 0 assets.`
-            : `No album named "${expectedName}" was found under "Apple Photos Month Selection".`;
-        const okProceed = window.confirm(
-          `⚠️ Apple Photos Month Selection Check (${month})\n\n${detailMsg}\n\nQueueing without a populated Apple Photos Month Selection folder means those picks will miss the +0.15 ranking boost before pulling Google Favorites.\n\nClick OK to queue ${month} anyway (override check), or Cancel to populate "${expectedName}" in Apple Photos first.`
-        );
-        if (okProceed) {
-          await window.runPlannerBatchAction(month, action, true);
-        }
+        await window.openMonthSelectionDialog(month, {
+          sourceStep: 'step3',
+          queueBlocked: true
+        });
         return;
       }
       if (!data.ok) {
@@ -1141,6 +1364,32 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
     }
   ]);
 
+  const renderAppleMonthSelectionCell = (
+    item: PlannerBatchCandidate,
+    sourceStep: 'step2' | 'step3'
+  ): string => {
+    const ms = item.month_selection;
+    if (!ms) {
+      return `<button type="button" class="badge badge-xs badge-outline font-mono" style="cursor: pointer;" onclick="window.openMonthSelectionDialog('${escapeHtml(
+        item.month
+      )}', { sourceStep: '${sourceStep}' })" title="Inspect Apple Photos Month Selection folder">Check</button>`;
+    }
+    const cls = ms.ready ? 'badge-green' : ms.exists ? 'badge-amber' : sourceStep === 'step3' ? 'badge-red' : 'badge-amber';
+    const label = ms.ready
+      ? `✓ ${ms.matched_album_name || ms.expected_album} (${ms.asset_count})`
+      : ms.exists
+      ? `⚠️ ${ms.matched_album_name || ms.expected_album} (0)`
+      : `⚠️ Missing (${ms.expected_album})`;
+    const title = ms.ready
+      ? `Click for details: Apple Photos Month Selection / ${ms.matched_album_name || ms.expected_album} (${ms.asset_count} assets)`
+      : ms.exists
+      ? `Click for details: Album exists under Apple Photos Month Selection with 0 assets`
+      : `Click for details: Missing album '${ms.expected_album}' under Apple Photos Month Selection`;
+    return `<button type="button" class="badge badge-xs ${cls} font-mono" style="cursor: pointer;" onclick="window.openMonthSelectionDialog('${escapeHtml(
+      item.month
+    )}', { sourceStep: '${sourceStep}' })" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+  };
+
   // 1. Manual 400 -> 500 Table
   const b400Badge = document.getElementById('mode-b-400-badge');
   const b400Tbody = document.getElementById('mode-b-400-tbody');
@@ -1149,7 +1398,7 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
   if (b400Tbody) {
     if (!c400.length) {
       b400Tbody.innerHTML =
-        '<tr><td colspan="6" class="text-center text-muted">No batches currently awaiting manual Google Photos curation (400).</td></tr>';
+        '<tr><td colspan="7" class="text-center text-muted">No batches currently awaiting manual Google Photos curation (400).</td></tr>';
     } else {
       b400Tbody.innerHTML = c400
         .map(item => {
@@ -1157,6 +1406,7 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
             (item.fav_assets || 0) > 0
               ? `<span class="badge badge-xs badge-green font-mono">⭐ ${item.fav_assets}</span>`
               : `<span class="text-muted font-mono">0</span>`;
+          const msCell = renderAppleMonthSelectionCell(item, 'step2');
           const elapsedStr =
             item.elapsed_days !== null && item.elapsed_days !== undefined ? ` (${item.elapsed_days}d ago)` : '';
           return `
@@ -1165,6 +1415,7 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
             <td><span class="badge badge-xs badge-amber font-mono">400</span></td>
             <td style="text-align: right;" class="font-mono">${item.total_assets.toLocaleString()}</td>
             <td style="text-align: right;">${favBadge}</td>
+            <td>${msCell}</td>
             <td style="font-size: 0.72rem;">${escapeHtml(item.next_step)}${escapeHtml(elapsedStr)}</td>
             <td style="text-align: right; white-space: nowrap;">
               <button class="btn btn-xs btn-green" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'confirm_500')" title="Confirm Google Photos curation complete (400 ➜ 500)">
@@ -1199,17 +1450,7 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
               : item.is_bypassed
               ? `<span class="badge badge-xs badge-outline">Bypassed</span>`
               : `<span class="text-muted font-mono">0</span>`;
-          const ms = item.month_selection;
-          let msBadge = `<span class="text-muted font-mono">—</span>`;
-          if (ms) {
-            if (ms.ready) {
-              msBadge = `<span class="badge badge-xs badge-green font-mono" title="Apple Photos Month Selection/${escapeHtml(ms.matched_album_name || ms.expected_album)} (${ms.asset_count} assets)">✓ ${escapeHtml(ms.matched_album_name || ms.expected_album)} (${ms.asset_count})</span>`;
-            } else if (ms.exists) {
-              msBadge = `<span class="badge badge-xs badge-amber font-mono" title="Album exists under Apple Photos Month Selection but has 0 assets">⚠️ ${escapeHtml(ms.matched_album_name || ms.expected_album)} (0)</span>`;
-            } else {
-              msBadge = `<span class="badge badge-xs badge-amber font-mono" title="Missing album '${escapeHtml(ms.expected_album)}' under Apple Photos Month Selection">⚠️ Missing (${escapeHtml(ms.expected_album)})</span>`;
-            }
-          }
+          const msBadge = renderAppleMonthSelectionCell(item, 'step3');
           const actionBtn = item.in_queue
             ? `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'remove_queue')" title="Remove from planned_execution queue">✓ Queued (Remove)</button>`
             : `<button class="btn btn-xs btn-purple" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'queue')" title="Add ${escapeHtml(item.month)} to planned_execution queue">➕ Queue (500➜650)</button>`;

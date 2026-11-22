@@ -3801,6 +3801,8 @@ def get_planner_overview(mode: str = "all"):
                     }
 
                     if sc_str == "400":
+                        ms_info = _check_apple_month_selection_status(cur, m_str)
+                        item["month_selection"] = ms_info
                         if fav_a > 0:
                             item["readiness"] = "ready"
                             item["next_step"] = f"Confirm Google AI rating & Best-of Favorites (400 ➜ 500) — {fav_a} favorites detected"
@@ -4008,6 +4010,195 @@ def get_planner_overview(mode: str = "all"):
             conn.close()
     except Exception as e:
         return {"connected": False, "error": str(e)}
+
+
+_MONTH_SELECTION_LIVE_APPLESCRIPT = r'''
+on run argv
+    set targetName to item 1 of argv
+    tell application "Photos"
+        try
+            set topF to folder "Media Organizer on LaCie"
+            set msF to folder "Apple Photos Month Selection" of topF
+        on error errMsg
+            return "ERROR|" & errMsg
+        end try
+
+        set matchedName to ""
+        set matchedCount to 0
+        try
+            set albList to albums of msF
+            repeat with aObj in albList
+                set rawName to (name of aObj) as string
+                if rawName is targetName then
+                    set matchedName to rawName
+                    set matchedCount to count of media items of aObj
+                    return "FOUND|" & matchedName & "|" & (matchedCount as string)
+                end if
+            end repeat
+            -- Trimmed/case-insensitive check via lowercase comparison
+            repeat with aObj in albList
+                set rawName to (name of aObj) as string
+                ignoring case
+                    set trimmedOk to (rawName is targetName) or (rawName starts with targetName and length of rawName <= (length of targetName + 2))
+                end ignoring
+                if trimmedOk then
+                    set matchedName to rawName
+                    set matchedCount to count of media items of aObj
+                    return "FOUND|" & matchedName & "|" & (matchedCount as string)
+                end if
+            end repeat
+        on error errMsg
+            return "ERROR|" & errMsg
+        end try
+        return "MISSING|" & targetName & "|0"
+    end tell
+end run
+'''
+
+
+def _check_live_photos_month_selection(expected_album: str) -> dict:
+    """Read-only AppleScript check for an album under Media Organizer on LaCie / Apple Photos Month Selection."""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-", expected_album],
+            input=_MONTH_SELECTION_LIVE_APPLESCRIPT,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        stdout = (proc.stdout or "").strip()
+        if proc.returncode != 0:
+            err = (proc.stderr or stdout or f"osascript exited {proc.returncode}").strip()
+            return {"checked": True, "exists": False, "count": 0, "matched_name": None, "error": err}
+        parts = stdout.split("|")
+        tag = parts[0] if parts else ""
+        if tag == "FOUND":
+            cnt = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            return {
+                "checked": True,
+                "exists": True,
+                "count": cnt,
+                "matched_name": parts[1] if len(parts) > 1 else expected_album,
+                "error": None,
+            }
+        if tag == "MISSING":
+            return {"checked": True, "exists": False, "count": 0, "matched_name": None, "error": None}
+        err_msg = parts[1] if len(parts) > 1 else stdout
+        return {"checked": True, "exists": False, "count": 0, "matched_name": None, "error": err_msg}
+    except Exception as e:
+        return {"checked": True, "exists": False, "count": 0, "matched_name": None, "error": str(e)}
+
+
+@router.get("/planner/month-selection-detail")
+def get_planner_month_selection_detail(month: str, live: bool = False):
+    """Inspect Apple Photos Month Selection album existence, asset count, and sample assets for a batch."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    m_str = (month or "").strip()
+    if not m_str:
+        return {"ok": False, "error": "month is required"}
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            ms_info = _check_apple_month_selection_status(cur, m_str)
+
+            cur.execute(
+                "SELECT status_code, COALESCE(assets_count, 0), COALESCE(is_bypassed, 0) FROM month_batches WHERE month = ?",
+                (m_str,),
+            )
+            mb_row = cur.fetchone()
+            status_code = str(mb_row[0]) if mb_row and mb_row[0] is not None else "—"
+            batch_assets_count = int(mb_row[1] or 0) if mb_row else 0
+            is_bypassed = bool(mb_row[2]) if mb_row else False
+
+            cur.execute("SELECT 1 FROM planned_execution WHERE planned_month = ? AND active = 1 LIMIT 1", (m_str,))
+            in_queue = cur.fetchone() is not None
+
+            cur.execute("SELECT MAX(synced_at_utc) FROM media_organizer_albums")
+            sync_row = cur.fetchone()
+            db_synced_at_utc = sync_row[0] if sync_row else None
+
+            assets_preview = []
+            album_pk = ms_info.get("album_pk")
+            if album_pk is not None:
+                cur.execute(
+                    """
+                    SELECT
+                        moaa.asset_id,
+                        COALESCE(v.original_filename, a.original_filename, moaa.original_filename, ''),
+                        COALESCE(v.date_created_utc, a.date_created_utc, moaa.date_created_utc, ''),
+                        ROUND(COALESCE(v.score_normalized, 0.0), 4),
+                        COALESCE(a.month, '')
+                    FROM media_organizer_album_assets moaa
+                    LEFT JOIN assets a ON a.asset_id = moaa.asset_id
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = moaa.asset_id
+                    WHERE moaa.album_pk = ?
+                    ORDER BY COALESCE(v.score_normalized, 0.0) DESC, moaa.date_created_utc ASC
+                    LIMIT 24
+                    """,
+                    (album_pk,),
+                )
+                for aid, fn, dt_s, sc, asset_month in cur.fetchall():
+                    assets_preview.append(
+                        {
+                            "asset_id": aid,
+                            "original_filename": fn or aid,
+                            "date_created_utc": (dt_s or "")[:19],
+                            "score_normalized": float(sc or 0.0),
+                            "month": asset_month or "",
+                        }
+                    )
+
+            if not assets_preview and ms_info.get("batch_selected_count", 0) > 0:
+                cur.execute(
+                    """
+                    SELECT
+                        a.asset_id,
+                        COALESCE(v.original_filename, a.original_filename, ''),
+                        COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                        ROUND(COALESCE(v.score_normalized, 0.0), 4),
+                        COALESCE(a.month, '')
+                    FROM assets a
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    WHERE a.month = ? AND COALESCE(a.apple_photos_monthly_selection, 0) = 1
+                    ORDER BY COALESCE(v.score_normalized, 0.0) DESC, a.date_created_utc ASC
+                    LIMIT 24
+                    """,
+                    (m_str,),
+                )
+                for aid, fn, dt_s, sc, asset_month in cur.fetchall():
+                    assets_preview.append(
+                        {
+                            "asset_id": aid,
+                            "original_filename": fn or aid,
+                            "date_created_utc": (dt_s or "")[:19],
+                            "score_normalized": float(sc or 0.0),
+                            "month": asset_month or "",
+                        }
+                    )
+
+            live_check = _check_live_photos_month_selection(ms_info["expected_album"]) if live else None
+            return {
+                "ok": True,
+                "month": m_str,
+                "status_code": status_code,
+                "is_bypassed": is_bypassed,
+                "in_queue": in_queue,
+                "batch_assets_count": batch_assets_count,
+                "db_synced_at_utc": db_synced_at_utc,
+                "expected_path": f"Media Organizer on LaCie / Apple Photos Month Selection / {ms_info['expected_album']}",
+                "month_selection": ms_info,
+                "assets": assets_preview,
+                "live_photos_app": live_check,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @router.post("/planner/batch-action")

@@ -660,6 +660,37 @@ export interface ResolveDisjointResponse {
   moment_paradigm_confirmed?: boolean;
 }
 
+export interface MonthSelectionDetailAsset {
+  asset_id: string;
+  original_filename: string;
+  date_created_utc: string;
+  score_normalized: number;
+  month: string;
+}
+
+export interface LivePhotosMonthSelectionCheck {
+  checked: boolean;
+  exists: boolean;
+  count: number;
+  matched_name?: string | null;
+  error?: string | null;
+}
+
+export interface AppleMonthSelectionDetailResponse {
+  ok: boolean;
+  error?: string;
+  month: string;
+  status_code: string;
+  is_bypassed: boolean;
+  in_queue: boolean;
+  batch_assets_count: number;
+  db_synced_at_utc?: string | null;
+  expected_path: string;
+  month_selection: AppleMonthSelectionStatus;
+  assets: MonthSelectionDetailAsset[];
+  live_photos_app?: LivePhotosMonthSelectionCheck | null;
+}
+
 export type TriggerTaskFn = (
   taskId: string,
   args?: Record<string, any> | null,
@@ -674,6 +705,10 @@ declare global {
     triggerTask: TriggerTaskFn;
     openManagedIntakeModal: () => void;
     runPlannerBatchAction: (month: string, action: string, confirmMissingMonthSelection?: boolean) => Promise<void>;
+    openMonthSelectionDialog: (
+      month: string,
+      opts?: { sourceStep?: 'step2' | 'step3'; queueBlocked?: boolean }
+    ) => Promise<void>;
   }
 }
 
