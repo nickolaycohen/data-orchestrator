@@ -5888,11 +5888,11 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
           .map(al => `<code>${escapeHtml(`Media Organizer on LaCie / ${al.parent_folder_name} / ${al.album_name}`)}</code>`)
           .join(', ');
         stepsHtml.push(
-          `<strong>Remove prior Moment albums (once all non-duplicate assets are copied):</strong> Delete pre-merge album(s) ${albumBadges} in Apple Photos &amp; local DB even if skipped duplicate copies remain inside them.`
+          `<strong>Remove prior Moment albums &amp; mark status Deleted:</strong> Once non-duplicate assets are copied, delete pre-merge album(s) ${albumBadges} in Apple Photos, clear stale <code>moment_exports</code> rows, and set old <code>curated_moments.memory_stage</code> to <code>Deleted</code> (preserving historical <code>publications</code> URLs/records).`
         );
       } else if (deletableSources.length) {
         stepsHtml.push(
-          `<strong>Remove prior Moment albums (once all non-duplicate assets are copied):</strong> Delete obsolete source album(s) ${deletableSources.map(s => `<code>${escapeHtml(s)}</code>`).join(', ')} in Apple Photos (across Moments/ToBeCurated/Curated) &amp; clean DB rows, even if skipped duplicate copies remain.`
+          `<strong>Remove prior Moment albums &amp; mark status Deleted:</strong> Once non-duplicate assets are copied, delete obsolete source album(s) ${deletableSources.map(s => `<code>${escapeHtml(s)}</code>`).join(', ')} in Apple Photos (across Moments/ToBeCurated/Curated), clear stale <code>moment_exports</code> rows, and mark old <code>curated_moments.memory_stage</code> as <code>Deleted</code>.`
         );
       } else if (resolveDisjointIsUnassignedCluster) {
         stepsHtml.push(
@@ -5905,6 +5905,19 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
       }
     } else {
       stepsHtml.push('<strong>Keep prior albums:</strong> Leave all pre-merge source albums intact in Apple Photos.');
+    }
+
+    const parentLcForStage = resolvedParent.trim().toLowerCase();
+    const newFolderResetStage =
+      parentLcForStage === 'tobecurated'
+        ? 'M200'
+        : parentLcForStage === 'curated'
+          ? 'M300'
+          : 'M100';
+    if (!existingInfo.exists) {
+      stepsHtml.push(
+        `<strong>Reset Moment Status (treat as new folder):</strong> Initialize/reset <code>${escapeHtml(targetMoment)}</code> stage in <code>curated_moments</code> to <code>${newFolderResetStage}</code> so it runs through Mode [M] as a new folder and assets moved from any <code>Deleted</code> folder can be re-published.`
+      );
     }
 
     if (action === 'merge_new' && (savePerSource || shareDisjoint)) {
@@ -5982,7 +5995,7 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
       `<strong>Ignore assets:</strong> Run dedup ignore pipeline (<code>--apply --asset-ids</code>) for ${assetIds.length} selected asset(s).`
     );
     if (delSrc) {
-      stepsHtml.push(`<strong>Delete source album rows:</strong> Clean up obsolete album rows for <code>${escapeHtml(resolveDisjointMomentName)}</code> in <code>media_organizer.db</code>.`);
+      stepsHtml.push(`<strong>Delete source album rows &amp; mark Deleted:</strong> Remove obsolete album rows for <code>${escapeHtml(resolveDisjointMomentName)}</code> in <code>media_organizer.db</code> and mark its <code>curated_moments.memory_stage</code> as <code>Deleted</code>.`);
     }
     noteEl.innerHTML = '⚠️ Selected assets will be marked ignored and excluded from the Media Organizer.';
     proceedBtn.className = 'btn btn-purple';
