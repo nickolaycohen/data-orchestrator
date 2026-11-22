@@ -3267,10 +3267,10 @@ body {
 
 .planner-subblock-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 0.75rem;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   padding: 0.72rem 0.9rem;
   background: rgba(255, 255, 255, 0.035);
   border-bottom: 1px solid var(--border-subtle);
@@ -3282,6 +3282,18 @@ body {
   display: flex;
   align-items: flex-start;
   gap: 0.65rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.planner-subblock-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  margin-left: auto;
+  flex-wrap: wrap;
 }
 
 .planner-step-num {
