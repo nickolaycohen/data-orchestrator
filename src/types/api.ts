@@ -219,6 +219,15 @@ export interface PlannerUnassignedCluster {
   assets: CleanupCandidateAsset[];
 }
 
+export interface MonthIngestionUnlockInfo {
+  unlocked: boolean;
+  pending_months: string[];
+  target_month: string;
+  latest_ingested_month?: string | null;
+  last_complete_month: string;
+  active_devices: string[];
+}
+
 export interface PlannerModeB {
   status_breakdown: Record<string, { name: string; count: number; assets: number }>;
   active_queue: Array<{
@@ -228,6 +237,7 @@ export interface PlannerModeB {
     status_code: string;
     status_name: string;
   }>;
+  month_ingestion_unlock?: MonthIngestionUnlockInfo | null;
   manual_400_candidates: PlannerBatchCandidate[];
   pipeline_500_candidates: PlannerBatchCandidate[];
   pipeline_000_candidates: PlannerBatchCandidate[];
@@ -703,7 +713,7 @@ declare global {
   interface Window {
     loadReport: (id: string, title: string, filename: string) => Promise<void>;
     triggerTask: TriggerTaskFn;
-    openManagedIntakeModal: () => void;
+    openManagedIntakeModal: (defaultMonth?: string) => void;
     runPlannerBatchAction: (month: string, action: string, confirmMissingMonthSelection?: boolean) => Promise<void>;
     openMonthSelectionDialog: (
       month: string,

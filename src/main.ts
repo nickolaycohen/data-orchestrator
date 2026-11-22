@@ -2082,8 +2082,12 @@ function appendConsoleLog(text: string): void {
   }
 }
 
-window.openManagedIntakeModal = function (): void {
+window.openManagedIntakeModal = function (defaultMonth?: string): void {
   const modal = document.getElementById('modal-managed-intake');
+  const monthInp = document.getElementById('managed-intake-month') as HTMLInputElement | null;
+  if (monthInp && defaultMonth) {
+    monthInp.value = defaultMonth;
+  }
   modal?.classList.add('open');
 };
 

@@ -383,7 +383,6 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   const cardC = document.getElementById('media-cleanup-card');
   const cardPub = document.getElementById('published-memories-card');
   const cardFolders = document.getElementById('mode-m-folders-block');
-  const cardTrack1 = document.getElementById('track-1-reference-card');
 
   if (view === 'b') {
     closeIntakeDedupModal();
@@ -399,7 +398,6 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     if (cardC) cardC.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardFolders) cardFolders.style.display = 'none';
-    if (cardTrack1) cardTrack1.style.display = 'block';
     if (!modeBLoaded) {
       void fetchPlannerOverview(false, 'b');
     }
@@ -413,7 +411,6 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     if (cardC) cardC.style.display = 'none';
     if (cardPub) cardPub.style.display = 'block';
     if (cardFolders) cardFolders.style.display = 'block';
-    if (cardTrack1) cardTrack1.style.display = 'none';
     if (!modeMLoaded) {
       void fetchPlannerOverview(false, 'm');
     }
@@ -428,7 +425,6 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     if (grid) grid.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardFolders) cardFolders.style.display = 'none';
-    if (cardTrack1) cardTrack1.style.display = 'none';
     if (cardC) {
       cardC.style.display = 'block';
     }
@@ -1312,8 +1308,14 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
   const secEl = document.getElementById('mode-b-primary-secondary');
 
   const total000Batches = modeB.total_000_batches || cnt000;
+  const unlockInfo = modeB.month_ingestion_unlock || null;
+  const isIntakeUnlocked = Boolean(unlockInfo?.unlocked && unlockInfo.pending_months?.length);
+  const pendingIntakeMonths = unlockInfo?.pending_months || [];
   if (headlineEl) {
-    headlineEl.textContent = `Summary: ${c400.length} at 400 (Path 2 Confirm) · ${c500.length} in 500/550 (Path 3 Schedule) · ${total000Batches} unprocessed in 000 (Path 1 Upload)`;
+    const unlockPrefix = isIntakeUnlocked
+      ? `${pendingIntakeMonths.length} unlocked for 050 Intake (${pendingIntakeMonths.join(', ')}) · `
+      : '';
+    headlineEl.textContent = `Summary: ${unlockPrefix}${c400.length} at 400 (Path 2 Confirm) · ${c500.length} in 500/550 (Path 3 Schedule) · ${total000Batches} unprocessed in 000 (Path 1 Upload)`;
   }
   if (primary) {
     if (detailEl) detailEl.textContent = `👉 Recommended Next Step: ${primary.headline} — ${primary.detail}`;
@@ -1325,7 +1327,25 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
 
   const c400MonthsPreview = c400.slice(0, 3).map(x => x.month).join(', ') + (c400.length > 3 ? '…' : '');
   const c500MonthsPreview = c500.slice(0, 3).map(x => x.month).join(', ') + (c500.length > 3 ? '…' : '');
-  renderPlannerPathsSummary('mode-b-paths-summary', [
+  const modeBPathCards: PlannerPathCard[] = [];
+  if (isIntakeUnlocked && unlockInfo) {
+    const devPreview = unlockInfo.active_devices?.length
+      ? ` Active sources: ${unlockInfo.active_devices.join(', ')}.`
+      : '';
+    modeBPathCards.push({
+      num: '0',
+      numTone: 'green',
+      title: 'Ingest Completed Month (050 Intake)',
+      badgeText: `🔓 ${unlockInfo.target_month} Unlocked`,
+      badgeClass: 'badge-green',
+      description: `Completed month ${pendingIntakeMonths.join(', ')} has not been ingested yet.${devPreview}`,
+      footerMeta: 'New month unlocked for ingestion',
+      targetId: 'mode-b-step-0',
+      linkLabel: `Go to 0️⃣ Ingest ${unlockInfo.target_month} ↓`,
+      active: true
+    });
+  }
+  modeBPathCards.push(
     {
       num: '1',
       numTone: 'blue',
@@ -1362,7 +1382,41 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
       linkLabel: 'Go to 3️⃣ Schedule 500➜650 ↓',
       active: c500.length > 0
     }
-  ]);
+  );
+  renderPlannerPathsSummary('mode-b-paths-summary', modeBPathCards);
+
+  // 0. Step 0: Month Ingestion Unlocked (only visible when a completed calendar month has un-ingested assets)
+  const step0Block = document.getElementById('mode-b-step-0');
+  const b050Badge = document.getElementById('mode-b-050-badge');
+  const b050Tbody = document.getElementById('mode-b-050-tbody');
+  if (step0Block) {
+    step0Block.style.display = isIntakeUnlocked ? 'block' : 'none';
+  }
+  if (isIntakeUnlocked && unlockInfo) {
+    if (b050Badge) {
+      b050Badge.textContent = `${pendingIntakeMonths.length} unlocked`;
+    }
+    if (b050Tbody) {
+      const devicesLabel = unlockInfo.active_devices?.length
+        ? unlockInfo.active_devices.join(', ')
+        : 'All configured active sources';
+      b050Tbody.innerHTML = pendingIntakeMonths
+        .map(m => `
+          <tr>
+            <td><strong class="font-mono text-primary">${escapeHtml(m)}</strong></td>
+            <td><span class="badge badge-xs badge-green font-mono">🔓 Unlocked</span></td>
+            <td style="font-size: 0.72rem;">${escapeHtml(devicesLabel)}</td>
+            <td style="font-size: 0.72rem;">Completed calendar month has not been ingested yet — run 050 Managed Intake to import assets.</td>
+            <td style="text-align: right; white-space: nowrap;">
+              <button type="button" class="btn btn-xs btn-green" onclick="window.openManagedIntakeModal('${escapeHtml(m)}')" title="Open Managed Intake (050) pre-filled for ${escapeHtml(m)}">
+                📥 Ingest ${escapeHtml(m)} (050)
+              </button>
+            </td>
+          </tr>
+        `)
+        .join('');
+    }
+  }
 
   const renderAppleMonthSelectionCell = (
     item: PlannerBatchCandidate,

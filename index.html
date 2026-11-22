@@ -369,91 +369,12 @@
                   </p>
                 </div>
               </div>
-            </div>
-
-            <!-- Track 1: Monthly Batch Ingest Reference (At the top of Mode [B]) -->
-            <div style="padding: 0 1rem; margin-bottom: 0.75rem;">
-              <details class="card track-1-compact-card" id="track-1-reference-card">
-                <summary class="card-header"
-                  style="cursor: pointer; user-select: none; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.55rem 0.85rem;">
-                  <div style="display: flex; align-items: center; gap: 0.65rem;">
-                    <span style="font-size: 1rem;">⚙️</span>
-                    <div>
-                      <h4
-                        style="margin: 0; font-size: 0.86rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                        Track 1: Monthly Batch Ingest (Mode [B])
-                        <span class="badge badge-xs badge-outline font-mono">050 ➜ 100 ➜ 200 ➜ 210 ➜ 400 ➜ 600</span>
-                      </h4>
-                      <span class="text-muted" style="font-size: 0.71rem;">Step-by-step pipeline execution
-                        sequence</span>
-                    </div>
-                  </div>
-                  <div style="display: flex; align-items: center; gap: 0.5rem;">
-                    <span class="badge badge-xs badge-purple font-mono">Steps</span>
-                  </div>
-                </summary>
-                <div class="track-1-body"
-                  style="padding: 0.65rem 0.85rem 0.8rem 0.85rem; border-top: 1px solid var(--border-subtle);">
-                  <div class="track-1-horizontal-strip">
-                    <div class="track-mini-step">
-                      <div class="track-mini-header">
-                        <span class="step-num">050</span>
-                        <strong>Managed Intake</strong>
-                      </div>
-                      <p class="track-mini-desc">Direct import + Privacy split</p>
-                      <button class="btn btn-xs btn-outline" id="btn-open-managed-intake"
-                        onclick="window.openManagedIntakeModal()">Run</button>
-                    </div>
-                    <div class="track-mini-arrow">➜</div>
-                    <div class="track-mini-step">
-                      <div class="track-mini-header">
-                        <span class="step-num">100</span>
-                        <strong>Verify Export</strong>
-                      </div>
-                      <p class="track-mini-desc">Readiness check in DB</p>
-                      <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_verify')">Run</button>
-                    </div>
-                    <div class="track-mini-arrow">➜</div>
-                    <div class="track-mini-step">
-                      <div class="track-mini-header">
-                        <span class="step-num">200</span>
-                        <strong>Export Wrapper</strong>
-                      </div>
-                      <p class="track-mini-desc">O(1) originals + Live Photos</p>
-                      <span class="badge badge-xs badge-outline">Step</span>
-                    </div>
-                    <div class="track-mini-arrow">➜</div>
-                    <div class="track-mini-step">
-                      <div class="track-mini-header">
-                        <span class="step-num">210</span>
-                        <strong>Deduplicate</strong>
-                      </div>
-                      <p class="track-mini-desc">Dedupe staging files</p>
-                      <button class="btn btn-xs btn-outline" onclick="window.triggerTask('media_dedupe')">Run</button>
-                    </div>
-                    <div class="track-mini-arrow">➜</div>
-                    <div class="track-mini-step" style="cursor: pointer;"
-                      onclick="document.querySelector('[data-tab=background]')?.click(); setTimeout(() => document.getElementById('upload-throughput-panel')?.scrollIntoView({behavior: 'smooth'}), 50)"
-                      title="Click to view Upload Throughput Timeline in Background Processes">
-                      <div class="track-mini-header">
-                        <span class="step-num">400</span>
-                        <strong>Google Upload</strong>
-                      </div>
-                      <p class="track-mini-desc">Sync to 5TB archive</p>
-                      <span class="badge badge-xs badge-outline" id="step-400-badge">Step</span>
-                    </div>
-                    <div class="track-mini-arrow">➜</div>
-                    <div class="track-mini-step">
-                      <div class="track-mini-header">
-                        <span class="step-num">600</span>
-                        <strong>AI Ranking</strong>
-                      </div>
-                      <p class="track-mini-desc">CLIP aesthetic scoring</p>
-                      <span class="badge badge-xs badge-outline">Step</span>
-                    </div>
-                  </div>
-                </div>
-              </details>
+              <div style="display: flex; align-items: center; gap: 0.45rem;">
+                <button type="button" class="btn btn-xs btn-outline" id="btn-open-managed-intake"
+                  onclick="window.openManagedIntakeModal()" title="Open 050 Managed Intake modal manually">
+                  📥 050 Intake
+                </button>
+              </div>
             </div>
 
             <!-- Primary Suggested Action Banner for Mode [B] -->
@@ -495,6 +416,36 @@
 
             <!-- Step-by-Step Candidate Queues for Mode [B] -->
             <div class="planner-steps-body">
+              <!-- Step 0: Month Ingestion Unlocked (only shown when a complete month has un-ingested assets) -->
+              <div class="planner-subblock" id="mode-b-step-0" style="display: none;">
+                <div class="planner-subblock-header">
+                  <div class="planner-subblock-title-wrap">
+                    <span class="planner-step-num step-num-green">0</span>
+                    <div>
+                      <div class="planner-subblock-title">New Completed Month Unlocked for Ingestion
+                        (<code>050 Managed Intake</code>)</div>
+                      <div class="planner-subblock-desc">Path 0: A completed calendar month has not been ingested yet —
+                        run Managed Intake to import family media from active devices.</div>
+                    </div>
+                  </div>
+                  <span class="badge badge-xs badge-green font-mono" id="mode-b-050-badge">Unlocked</span>
+                </div>
+                <div class="planner-table-wrap">
+                  <table class="cleanup-table planner-compact-table">
+                    <thead>
+                      <tr>
+                        <th>Month</th>
+                        <th>Status</th>
+                        <th>Active Family Devices</th>
+                        <th>Reminder / Next Step</th>
+                        <th style="text-align: right;">Quick Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="mode-b-050-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+
               <!-- Step 1: Next Unprocessed Batches for Ingest & Upload (000 -> 100 -> 200 -> 210 -> 399) -->
               <div class="planner-subblock" id="mode-b-step-1">
                 <div class="planner-subblock-header">

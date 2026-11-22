@@ -3680,6 +3680,96 @@ def _ensure_planned_execution_override_column(cur: sqlite3.Cursor) -> None:
         mod.ensure_planned_execution_override_column(cur)
 
 
+def _compute_month_ingestion_unlock(cur: sqlite3.Cursor, current_month_str: str) -> dict:
+    """Detect whether any completed calendar month is unlocked for 050 Managed Intake (not yet ingested)."""
+    now_local = datetime.now()
+    last_complete_dt = now_local.replace(day=1) - timedelta(days=1)
+    last_complete_month = last_complete_dt.strftime("%Y-%m")
+
+    cur.execute("SELECT MAX(month) FROM month_batches WHERE month <= ?", (last_complete_month,))
+    row_mb = cur.fetchone()
+    latest_batch_month = str(row_mb[0]) if row_mb and row_mb[0] else None
+
+    cur.execute(
+        """
+        SELECT DISTINCT month
+        FROM month_batches
+        WHERE month <= ? AND COALESCE(assets_count, 0) > 0
+        """,
+        (last_complete_month,),
+    )
+    existing_batches = {str(r[0]) for r in cur.fetchall() if r[0]}
+
+    cur.execute(
+        """
+        SELECT DISTINCT month
+        FROM assets
+        WHERE month IS NOT NULL AND month <= ?
+        GROUP BY month
+        HAVING COUNT(*) > 0
+        """,
+        (last_complete_month,),
+    )
+    ingested_asset_months = {str(r[0]) for r in cur.fetchall() if r[0]}
+
+    # Check calendar months after latest_batch_month up through last_complete_month (and last_complete_month itself)
+    pending_months: list[str] = []
+    if latest_batch_month and latest_batch_month < last_complete_month:
+        try:
+            cursor_dt = datetime.strptime(f"{latest_batch_month}-01", "%Y-%m-%d")
+            end_dt = datetime.strptime(f"{last_complete_month}-01", "%Y-%m-%d")
+            while cursor_dt < end_dt:
+                # Advance one calendar month
+                cursor_dt = (cursor_dt + timedelta(days=32)).replace(day=1)
+                m_cand = cursor_dt.strftime("%Y-%m")
+                if m_cand <= last_complete_month and (
+                    m_cand not in existing_batches or m_cand not in ingested_asset_months
+                ):
+                    pending_months.append(m_cand)
+        except Exception:
+            pass
+    elif last_complete_month not in existing_batches or last_complete_month not in ingested_asset_months:
+        pending_months.append(last_complete_month)
+
+    target_month = pending_months[0] if pending_months else last_complete_month
+    active_devices: list[str] = []
+    try:
+        y, mon = map(int, target_month.split("-"))
+        _, last_day = calendar.monthrange(y, mon)
+        m_start = f"{y}-{mon:02d}-01"
+        m_end = f"{y}-{mon:02d}-{last_day:02d}"
+        cur.execute(
+            """
+            SELECT d.camera_model, d.owner_name
+            FROM device_owners d
+            LEFT JOIN owners o ON d.owner_name = o.name
+            WHERE COALESCE(o.is_family, 0) = 1
+              AND (d.notes IS NULL OR (d.notes NOT LIKE 'Alias for %' AND d.notes NOT LIKE '%(trimmed)%'))
+              AND (d.start_date IS NULL OR d.start_date <= ?)
+              AND (d.end_date IS NULL OR d.end_date >= ?)
+            ORDER BY d.owner_name, d.camera_model
+            """,
+            (m_end, m_start),
+        )
+        seen_dev: set[str] = set()
+        for cam, own in cur.fetchall():
+            label = f"{cam} ({own})" if own else cam
+            if label not in seen_dev:
+                seen_dev.add(label)
+                active_devices.append(label)
+    except Exception:
+        pass
+
+    return {
+        "unlocked": len(pending_months) > 0,
+        "pending_months": pending_months,
+        "target_month": target_month,
+        "latest_ingested_month": latest_batch_month,
+        "last_complete_month": last_complete_month,
+        "active_devices": active_devices,
+    }
+
+
 @router.get("/planner-overview")
 def get_planner_overview(mode: str = "all"):
     """Return next-step overview for Mode [B] Batch Management and/or Mode [M] Moments Organizer."""
@@ -3903,6 +3993,7 @@ def get_planner_overview(mode: str = "all"):
                     "active_queue": active_queue,
                     "status_breakdown": status_breakdown,
                     "outdated_batches": outdated_batches,
+                    "month_ingestion_unlock": _compute_month_ingestion_unlock(cur, current_month_str),
                     "manual_400_candidates": manual_400_candidates,
                     "pipeline_500_candidates": pipeline_500_candidates,
                     "pipeline_600_candidates": pipeline_600_candidates,
