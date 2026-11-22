@@ -1331,6 +1331,7 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
 
   const topRec = recs[0];
   const topDisjoint = disjoint[0];
+  const topPublished = sc.top_published || null;
   const pubMomentsTotal = Number(sc.published_moments_total || 0);
   const pubAssetsTotal = Number(sc.published_assets_total || 0);
   const m450Count = Number(sc.M450 || 0);
@@ -1382,11 +1383,15 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       num: '4',
       numTone: 'blue',
       title: 'Published History',
-      badgeText: pubMomentsTotal > 0 ? `${pubMomentsTotal} Moments · ${pubAssetsTotal} pub.` : '0 published',
-      badgeClass: pubMomentsTotal > 0 ? 'badge-blue' : 'badge-outline',
-      badgeTitle: `${m500Count} M500 fully published · ${m450Count} M450 partial`,
+      badgeText: topPublished
+        ? formatMomentScoreBadge(topPublished.moment_name, Number(topPublished.avg_score || 0))
+        : '0 published',
+      badgeClass: topPublished || pubMomentsTotal > 0 ? 'badge-blue' : 'badge-outline',
+      badgeTitle: topPublished
+        ? `Top published Moment: ${topPublished.moment_name} (${Number(topPublished.avg_score || 0).toFixed(4)}) · ${pubMomentsTotal} Moments (${pubAssetsTotal} pub.)`
+        : undefined,
       description: 'Review Shutterfly & YouTube published albums, search history, or open live platform links.',
-      footerMeta: `${m500Count} M500 · ${m450Count} M450`,
+      footerMeta: `${pubMomentsTotal} Moments · ${m500Count} M500 · ${m450Count} M450`,
       targetId: 'published-memories-card',
       linkLabel: 'Go to 4️⃣ Published History ↓',
       active: pubMomentsTotal > 0

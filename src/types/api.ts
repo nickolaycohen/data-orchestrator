@@ -255,7 +255,9 @@ export interface PlannerModeM {
     M450: number;
     M500: number;
     total_moments: number;
+    published_moments_total?: number;
     published_assets_total: number;
+    top_published?: { moment_name: string; avg_score: number } | null;
   };
   needs_sync_moments: Array<{
     moment_name: string;
