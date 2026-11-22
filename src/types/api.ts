@@ -396,6 +396,11 @@ export interface CliStep2Simulation {
     pending_curation: number;
     pending_cooldown: number;
     disjoint_pending: number;
+    publishable_tbc_total?: number;
+    publishable_clean_total?: number;
+    pending_curation_total?: number;
+    pending_cooldown_total?: number;
+    disjoint_pending_total?: number;
   };
   console_moments: CliStep2ConsoleMomentRow[];
   pending_publishing: {

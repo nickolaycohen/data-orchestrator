@@ -63,6 +63,8 @@ let memoriesFoldersSort: 'name' | 'recent' | 'assets' = 'name';
 let memoriesFoldersData: MemoriesFoldersResponse | null = null;
 let memoriesFoldersCollapsed = false;
 let memoriesFoldersSearchTimer: number | null = null;
+let cliStep2bCollapsed = false;
+const collapsedCliStep2bBuckets = new Set<string>();
 
 interface CreateMomentContext {
   sourceClusterFolder?: string;
@@ -1950,38 +1952,78 @@ function renderCliSimPendingSection(
     pending_cooldown: [],
     disjoint: []
   };
-  const subsections: Array<{ title: string; rows: CliStep2PendingPublishingRow[]; showTbc: boolean }> = [
+  const c = sim.counts;
+  const subsections: Array<{
+    key: string;
+    shortLabel: string;
+    badgeCls: string;
+    title: string;
+    rows: CliStep2PendingPublishingRow[];
+    totalCount: number;
+    showTbc: boolean;
+  }> = [
     {
+      key: 'publishable_tbc',
+      shortLabel: '⚠️ TBC',
+      badgeCls: 'badge-amber',
       title: '⚠️ 🚀 Ready for Publishing (Action Required: Assets in ToBeCurated Need Review & Move to Curated)',
       rows: pp.publishable_tbc || [],
+      totalCount: c.publishable_tbc_total ?? (pp.publishable_tbc || []).length,
       showTbc: true
     },
     {
+      key: 'publishable_clean',
+      shortLabel: '🚀 Clean',
+      badgeCls: 'badge-green',
       title: '🚀 Ready for Publishing (Fully Curated — No Assets in ToBeCurated, Ready to Export)',
       rows: pp.publishable_clean || [],
+      totalCount: c.publishable_clean_total ?? (pp.publishable_clean || []).length,
       showTbc: false
     },
     {
+      key: 'pending_curation',
+      shortLabel: '⏳ Curation',
+      badgeCls: 'badge-purple',
       title: '⏳ Pending Curation (New Assets in ToBeCurated)',
       rows: pp.pending_curation || [],
+      totalCount: c.pending_curation_total ?? (pp.pending_curation || []).length,
       showTbc: true
     },
     {
+      key: 'pending_cooldown',
+      shortLabel: '⏱️ Cooldown',
+      badgeCls: 'badge-outline',
       title: '⏱️ Pending Time Restriction (Cooldown Delay < 30d)',
       rows: pp.pending_cooldown || [],
+      totalCount: c.pending_cooldown_total ?? (pp.pending_cooldown || []).length,
       showTbc: false
     },
     {
+      key: 'disjoint',
+      shortLabel: '🔀 Disjoint',
+      badgeCls: 'badge-red',
       title: '🔀 Disjoint Moments (< 2 Qualified Assets)',
       rows: pp.disjoint || [],
+      totalCount: c.disjoint_pending_total ?? (pp.disjoint || []).length,
       showTbc: false
     }
   ];
 
   const totalPendingRows = subsections.reduce((acc, s) => acc + s.rows.length, 0);
+  const totalPendingAll = subsections.reduce((acc, s) => acc + s.totalCount, 0);
   const headingTitle = sim.has_pending_curation
     ? '🔒 Step 2B Preview: Curated Moments Pending Publishing (Unlocks After M200/M300 Queue Clears)'
     : '🌟 Curated Moments Pending Publishing (Active CLI Step 2B Output)';
+
+  const summaryPills = subsections
+    .filter(s => s.totalCount > 0)
+    .map(
+      s =>
+        `<span class="badge badge-xs ${s.badgeCls} font-mono">${escapeHtml(s.shortLabel)}: ${s.rows.length}${
+          s.totalCount > s.rows.length ? `/${s.totalCount}` : ''
+        }</span>`
+    )
+    .join(' ');
 
   if (totalPendingRows === 0) {
     return `
@@ -2001,19 +2043,51 @@ function renderCliSimPendingSection(
   const bodyRows = subsections
     .filter(sub => sub.rows.length > 0)
     .map(sub => {
+      const isBucketCollapsed = collapsedCliStep2bBuckets.has(sub.key);
+      const countText = sub.totalCount > sub.rows.length ? `Top ${sub.rows.length} of ${sub.totalCount}` : `${sub.rows.length}`;
       const divider = `
-        <tr class="cli-sim-subdivider-row">
-          <td colspan="10">${escapeHtml(sub.title)} · <strong>${sub.rows.length}</strong></td>
+        <tr class="cli-sim-subdivider-row cli-step2b-bucket-toggle" data-bucket-key="${escapeHtml(sub.key)}"
+          style="cursor: pointer;" title="Click to expand or collapse this subsection">
+          <td colspan="11">
+            <span>${isBucketCollapsed ? '▸' : '▾'}</span>
+            ${escapeHtml(sub.title)} · <strong>${escapeHtml(countText)}</strong>
+          </td>
         </tr>
       `;
+      const bucketRowsStartSeq = seq;
+      seq += sub.rows.length;
+      if (isBucketCollapsed) {
+        return divider;
+      }
       const rowsHtml = sub.rows
-        .map(entry => {
-          const rowNo = seq++;
+        .map((entry, idx) => {
+          const rowNo = bucketRowsStartSeq + idx;
           const scoresStr = (entry.proposed_scores || []).map(s => s.toFixed(4)).join(', ') || '—';
+          const filesStr = (entry.proposed_filenames || []).slice(0, 4).join(', ') +
+            ((entry.proposed_filenames || []).length > 4 ? ` (+${entry.proposed_filenames.length - 4})` : '');
           const tbcPrefix =
             sub.showTbc && entry.to_be_curated_count > 0
               ? `ToBeCurated: ${entry.to_be_curated_count} ${entry.to_be_curated_count === 1 ? 'asset' : 'assets'} | `
               : '';
+          const combinedDetail = filesStr ? `${tbcPrefix}${filesStr} · [${scoresStr}]` : `${tbcPrefix}${scoresStr}`;
+
+          let actionCellHtml = `<span class="text-muted font-mono" style="font-size: 0.68rem;">Wait</span>`;
+          if (sub.key === 'publishable_tbc' || sub.key === 'publishable_clean') {
+            actionCellHtml = `<button type="button" class="btn btn-xs ${
+              entry.published > 0 ? 'btn-purple' : 'btn-green'
+            } btn-cli-sim-publish" data-moment-name="${escapeHtml(
+              entry.moment_name
+            )}" title="Review & publish batch for '${escapeHtml(entry.moment_name)}'">🚀 Publish</button>`;
+          } else if (sub.key === 'disjoint') {
+            actionCellHtml = `<button type="button" class="btn btn-xs btn-amber btn-cli-sim-merge" data-moment-name="${escapeHtml(
+              entry.moment_name
+            )}" title="Merge or resolve disjoint moment '${escapeHtml(entry.moment_name)}'">🔀 Resolve</button>`;
+          } else if (sub.key === 'pending_curation') {
+            actionCellHtml = `<span class="badge badge-xs badge-purple font-mono">⏳ TBC: ${entry.to_be_curated_count}</span>`;
+          } else if (sub.key === 'pending_cooldown') {
+            actionCellHtml = `<span class="badge badge-xs badge-outline font-mono">${escapeHtml(entry.can_publish_str)}</span>`;
+          }
+
           return `
             <tr>
               <td class="font-mono text-muted">${rowNo}</td>
@@ -2025,9 +2099,10 @@ function renderCliSimPendingSection(
               <td style="text-align: right;" class="font-mono">${entry.pending}</td>
               <td class="font-mono" style="white-space: nowrap;">${escapeHtml(entry.can_publish_str)}</td>
               <td class="font-mono" style="white-space: nowrap;">${escapeHtml(entry.propose_str)}</td>
-              <td class="font-mono text-muted" style="font-size: 0.68rem; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(tbcPrefix + scoresStr)}">
-                ${escapeHtml(tbcPrefix + scoresStr)}
+              <td class="font-mono text-muted" style="font-size: 0.68rem; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(combinedDetail)}">
+                ${escapeHtml(combinedDetail)}
               </td>
+              <td style="white-space: nowrap;">${actionCellHtml}</td>
             </tr>
           `;
         })
@@ -2039,27 +2114,39 @@ function renderCliSimPendingSection(
   return `
     <div class="cli-sim-section-block">
       <div class="cli-sim-section-heading">
-        <span>${escapeHtml(headingTitle)}</span>
-        <span class="badge badge-xs badge-purple font-mono">${totalPendingRows} shown</span>
+        <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+          <span>${escapeHtml(headingTitle)}</span>
+          ${summaryPills}
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.4rem;">
+          <span class="badge badge-xs badge-purple font-mono">${totalPendingRows}${totalPendingAll > totalPendingRows ? ` / ${totalPendingAll}` : ''} shown</span>
+          <button type="button" class="btn btn-xs btn-outline" id="btn-toggle-mode-m-cli-step2b"
+            aria-expanded="${String(!cliStep2bCollapsed)}" title="Expand or collapse Step 2B Pending Publishing breakdown">
+            ${cliStep2bCollapsed ? '▾ Expand' : '▴ Collapse'}
+          </button>
+        </div>
       </div>
-      <div class="planner-table-wrap">
-        <table class="cleanup-table planner-compact-table">
-          <thead>
-            <tr>
-              <th>No.</th>
-              <th>Moment Name</th>
-              <th>Status</th>
-              <th style="text-align: right;">Avg Score</th>
-              <th style="text-align: right;">Curated</th>
-              <th style="text-align: right;">Pub.</th>
-              <th style="text-align: right;">Pending</th>
-              <th>Can Publish?</th>
-              <th>Propose Next</th>
-              <th>Proposed Scores / ToBeCurated</th>
-            </tr>
-          </thead>
-          <tbody>${bodyRows}</tbody>
-        </table>
+      <div id="mode-m-cli-step2b-body" class="mode-m-step-body${cliStep2bCollapsed ? ' collapsed' : ''}">
+        <div class="planner-table-wrap">
+          <table class="cleanup-table planner-compact-table">
+            <thead>
+              <tr>
+                <th>No.</th>
+                <th>Moment Name</th>
+                <th>Status</th>
+                <th style="text-align: right;">Avg Score</th>
+                <th style="text-align: right;">Curated</th>
+                <th style="text-align: right;">Pub.</th>
+                <th style="text-align: right;">Pending</th>
+                <th>Can Publish?</th>
+                <th>Propose Next</th>
+                <th>Proposed Assets &amp; Scores</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>${bodyRows}</tbody>
+          </table>
+        </div>
       </div>
     </div>
   `;
@@ -2186,6 +2273,44 @@ function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
 
   const pendingStartIdx = Math.max(1, c.console_total + 1);
   contentEl.innerHTML = consoleSectionHtml + renderCliSimPendingSection(sim, pendingStartIdx);
+
+  document.getElementById('btn-toggle-mode-m-cli-step2b')?.addEventListener('click', btnEv => {
+    cliStep2bCollapsed = !cliStep2bCollapsed;
+    const bodyEl = document.getElementById('mode-m-cli-step2b-body');
+    const toggleBtn = btnEv.currentTarget as HTMLButtonElement | null;
+    bodyEl?.classList.toggle('collapsed', cliStep2bCollapsed);
+    if (toggleBtn) {
+      toggleBtn.textContent = cliStep2bCollapsed ? '▾ Expand' : '▴ Collapse';
+      toggleBtn.setAttribute('aria-expanded', String(!cliStep2bCollapsed));
+    }
+  });
+
+  contentEl.querySelectorAll<HTMLElement>('.cli-step2b-bucket-toggle').forEach(rowEl => {
+    rowEl.addEventListener('click', () => {
+      const bKey = rowEl.dataset.bucketKey || '';
+      if (!bKey) return;
+      if (collapsedCliStep2bBuckets.has(bKey)) {
+        collapsedCliStep2bBuckets.delete(bKey);
+      } else {
+        collapsedCliStep2bBuckets.add(bKey);
+      }
+      renderModeMCliStep2Sim(sim);
+    });
+  });
+
+  contentEl.querySelectorAll<HTMLButtonElement>('.btn-cli-sim-publish').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const momentName = btn.dataset.momentName || '';
+      if (momentName) void openPublishMomentModal(momentName);
+    });
+  });
+
+  contentEl.querySelectorAll<HTMLButtonElement>('.btn-cli-sim-merge').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const momentName = btn.dataset.momentName || '';
+      if (momentName) void openResolveDisjointModal(momentName, '', { isHistoricalMoment: true });
+    });
+  });
 }
 
 function renderModeMOverview(modeM: Partial<PlannerModeM>): void {

@@ -2762,27 +2762,32 @@ def _build_cli_step2_simulation(
         row_copy["no"] = idx
         console_rows.append(row_copy)
 
-    # Classify Curated Moments Pending Publishing (CLI 5 subsections)
-    pub_tbc = sorted(
+    # Classify Curated Moments Pending Publishing (CLI 5 subsections, Top 20 per bucket)
+    pub_tbc_all = sorted(
         [e for e in pending_publishing_entries if e["total_qualified"] >= 2 and e["can_publish_ok"] and e["to_be_curated_exists"]],
         key=lambda e: -e["avg_proposed"],
-    )[:20]
-    pub_clean = sorted(
+    )
+    pub_clean_all = sorted(
         [e for e in pending_publishing_entries if e["total_qualified"] >= 2 and e["can_publish_ok"] and not e["to_be_curated_exists"]],
         key=lambda e: -e["avg_proposed"],
-    )[:20]
-    pend_cur = sorted(
+    )
+    pend_cur_all = sorted(
         [e for e in pending_publishing_entries if e["total_qualified"] >= 2 and not e["can_publish_ok"] and e["to_be_curated_exists"]],
         key=lambda e: -e["avg_proposed"],
-    )[:20]
-    pend_cool = sorted(
+    )
+    pend_cool_all = sorted(
         [e for e in pending_publishing_entries if e["total_qualified"] >= 2 and not e["can_publish_ok"] and not e["to_be_curated_exists"]],
         key=lambda e: -e["avg_proposed"],
-    )[:20]
-    disjoint_pend = sorted(
+    )
+    disjoint_pend_all = sorted(
         [e for e in pending_publishing_entries if e["total_qualified"] < 2],
         key=lambda e: -e["avg_proposed"],
-    )[:20]
+    )
+    pub_tbc = pub_tbc_all[:20]
+    pub_clean = pub_clean_all[:20]
+    pend_cur = pend_cur_all[:20]
+    pend_cool = pend_cool_all[:20]
+    disjoint_pend = disjoint_pend_all[:20]
 
     if not threshold_aligned:
         gate = "threshold_unaligned"
@@ -2847,6 +2852,11 @@ def _build_cli_step2_simulation(
             "pending_curation": len(pend_cur),
             "pending_cooldown": len(pend_cool),
             "disjoint_pending": len(disjoint_pend),
+            "publishable_tbc_total": len(pub_tbc_all),
+            "publishable_clean_total": len(pub_clean_all),
+            "pending_curation_total": len(pend_cur_all),
+            "pending_cooldown_total": len(pend_cool_all),
+            "disjoint_pending_total": len(disjoint_pend_all),
         },
         "console_moments": console_rows,
         "pending_publishing": {
