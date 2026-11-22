@@ -6556,33 +6556,40 @@ class SaveMomentTagsRequest(BaseModel):
     include_all_moment_assets: bool = False
 
 
+def _moment_membership_where_sql(m_name: str) -> tuple[str, tuple[str, str, str, str]]:
+    """Return shared SQL predicate and params matching active assets of a Moment across assets, albums, publications, and exports."""
+    predicate = """(
+        TRIM(LOWER(COALESCE(a.MomentsAlbumName, ''))) = TRIM(LOWER(?))
+        OR a.asset_id IN (
+            SELECT moaa.asset_id
+            FROM media_organizer_album_assets moaa
+            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+            WHERE moa.is_folder = 0
+              AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+        )
+        OR a.asset_id IN (
+            SELECT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+        )
+        OR a.asset_id IN (
+            SELECT asset_id FROM moment_exports WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+        )
+    )"""
+    return predicate, (m_name, m_name, m_name, m_name)
+
+
 def _collect_moment_asset_ids(cur: sqlite3.Cursor, m_name: str) -> list[str]:
     """Return all distinct active asset IDs belonging to a Moment across assets, albums, publications, and exports."""
+    where_clause, query_params = _moment_membership_where_sql(m_name)
     cur.execute(
-        """
+        f"""
         SELECT DISTINCT a.asset_id
         FROM assets a
         LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
         WHERE COALESCE(za.ZTRASHEDSTATE, 0) = 0
           AND COALESCE(a.removed_from_source, 0) = 0
-          AND (
-              TRIM(LOWER(COALESCE(a.MomentsAlbumName, ''))) = TRIM(LOWER(?))
-              OR a.asset_id IN (
-                  SELECT moaa.asset_id
-                  FROM media_organizer_album_assets moaa
-                  JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                  WHERE moa.is_folder = 0
-                    AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
-              )
-              OR a.asset_id IN (
-                  SELECT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-              )
-              OR a.asset_id IN (
-                  SELECT asset_id FROM moment_exports WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-              )
-          )
+          AND {where_clause}
         """,
-        (m_name, m_name, m_name, m_name),
+        query_params,
     )
     return [r[0] for r in cur.fetchall() if r[0]]
 
@@ -6623,23 +6630,7 @@ def _load_moment_detail_core(
         where_clause = f"a.asset_id IN ({ph_exp})"
         query_params: tuple = tuple(clean_explicit_ids)
     else:
-        where_clause = """(
-            TRIM(LOWER(COALESCE(a.MomentsAlbumName, ''))) = TRIM(LOWER(?))
-            OR a.asset_id IN (
-                SELECT moaa.asset_id
-                FROM media_organizer_album_assets moaa
-                JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                WHERE moa.is_folder = 0
-                  AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
-            )
-            OR a.asset_id IN (
-                SELECT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-            )
-            OR a.asset_id IN (
-                SELECT asset_id FROM moment_exports WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-            )
-          )"""
-        query_params = (m_name, m_name, m_name, m_name)
+        where_clause, query_params = _moment_membership_where_sql(m_name)
 
     cur.execute(
         f"""
