@@ -133,6 +133,53 @@ function setupTabs(): void {
   });
 }
 
+async function sendExecutorControl(
+  action: 'start' | 'stop' | 'restart' | 'stop_after_step' | 'cancel_stop_after_step' | 'resume_cron',
+  confirmText?: string
+): Promise<void> {
+  if (confirmText && !window.confirm(confirmText)) return;
+  const feedbackEl = document.getElementById('executor-control-feedback');
+  const controlBtnIds = [
+    'btn-executor-start',
+    'btn-executor-restart',
+    'btn-executor-stop',
+    'btn-executor-stop-after',
+    'btn-executor-unpause'
+  ];
+  controlBtnIds.forEach(id => {
+    const b = document.getElementById(id) as HTMLButtonElement | null;
+    if (b) b.disabled = true;
+  });
+  if (feedbackEl) {
+    feedbackEl.style.display = 'block';
+    feedbackEl.textContent = `⏳ Executor action (${action}) in progress…`;
+  }
+  try {
+    const res = await fetch('/api/media/executor/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    });
+    const data = await res.json();
+    if (feedbackEl) {
+      feedbackEl.style.display = 'block';
+      feedbackEl.textContent = data.ok ? `✅ ${data.message}` : `❌ ${data.message || 'Executor control failed'}`;
+    }
+    await Promise.all([fetchExecutorMonitor(), fetchPlannerOverview()]);
+  } catch (err) {
+    console.error('Executor control error:', err);
+    if (feedbackEl) {
+      feedbackEl.style.display = 'block';
+      feedbackEl.textContent = `❌ Executor control error: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  } finally {
+    controlBtnIds.forEach(id => {
+      const b = document.getElementById(id) as HTMLButtonElement | null;
+      if (b) b.disabled = false;
+    });
+  }
+}
+
 // Refresh all metrics across pillars
 function setupRefresh(): void {
   document.getElementById('planner-bg-sync-pill')?.addEventListener('click', () => {
@@ -143,6 +190,31 @@ function setupRefresh(): void {
   });
   document.getElementById('btn-refresh-monitor')?.addEventListener('click', () => {
     fetchExecutorMonitor();
+  });
+  document.getElementById('btn-executor-start')?.addEventListener('click', () => {
+    void sendExecutorControl('start');
+  });
+  document.getElementById('btn-executor-unpause')?.addEventListener('click', () => {
+    void sendExecutorControl('resume_cron');
+  });
+  document.getElementById('btn-executor-restart')?.addEventListener('click', () => {
+    const badgeText = document.getElementById('monitor-executor-badge')?.textContent || 'ACTIVE';
+    void sendExecutorControl(
+      'restart',
+      `Gracefully stop the active executor (${badgeText}) and start a fresh instance cleanly? (Batch status is preserved so active steps resume safely.)`
+    );
+  });
+  document.getElementById('btn-executor-stop')?.addEventListener('click', () => {
+    const badgeText = document.getElementById('monitor-executor-badge')?.textContent || 'ACTIVE';
+    void sendExecutorControl(
+      'stop',
+      `Gracefully stop the active executor (${badgeText}) cleanly without marking batch errors, and pause 15-min auto-cron until resumed?`
+    );
+  });
+  document.getElementById('btn-executor-stop-after')?.addEventListener('click', e => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    const action = btn.dataset.armed === 'true' ? 'cancel_stop_after_step' : 'stop_after_step';
+    void sendExecutorControl(action);
   });
   document.getElementById('btn-toggle-bg-service')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget as HTMLButtonElement;
@@ -846,16 +918,52 @@ async function fetchExecutorMonitor(): Promise<void> {
     const data = await res.json();
 
     const execBadge = document.getElementById('monitor-executor-badge');
-    if (execBadge && data.executor) {
-      if (data.executor.is_running) {
-        execBadge.className = 'badge badge-sm badge-green pulse';
-        execBadge.textContent = `🟢 Executor: ACTIVE (PID: ${data.executor.pid})`;
-      } else if (data.executor.status === 'STALE') {
-        execBadge.className = 'badge badge-sm badge-amber';
-        execBadge.textContent = `🟡 Executor: STALE (PID: ${data.executor.pid})`;
-      } else {
-        execBadge.className = 'badge badge-sm badge-outline';
-        execBadge.textContent = '⚪ Executor: IDLE';
+    const execPausedBadge = document.getElementById('monitor-executor-paused-badge');
+    const execDrainBadge = document.getElementById('monitor-executor-drain-badge');
+    const btnExecStart = document.getElementById('btn-executor-start');
+    const btnExecUnpause = document.getElementById('btn-executor-unpause');
+    const btnExecRestart = document.getElementById('btn-executor-restart');
+    const btnExecStop = document.getElementById('btn-executor-stop');
+    const btnExecStopAfter = document.getElementById('btn-executor-stop-after') as HTMLButtonElement | null;
+
+    if (data.executor) {
+      const ex = data.executor;
+      if (execBadge) {
+        if (ex.is_running) {
+          execBadge.className = 'badge badge-sm badge-green pulse';
+          execBadge.textContent = `🟢 Executor: ACTIVE (PID: ${ex.pid})`;
+        } else if (ex.status === 'STALE') {
+          execBadge.className = 'badge badge-sm badge-amber';
+          execBadge.textContent = `🟡 Executor: STALE (PID: ${ex.pid})`;
+        } else {
+          execBadge.className = 'badge badge-sm badge-outline';
+          execBadge.textContent = '⚪ Executor: IDLE';
+        }
+      }
+      if (execPausedBadge) {
+        execPausedBadge.style.display = ex.paused ? 'inline-flex' : 'none';
+      }
+      if (execDrainBadge) {
+        execDrainBadge.style.display = ex.is_running && ex.stop_after_step ? 'inline-flex' : 'none';
+      }
+      if (btnExecStart) {
+        btnExecStart.style.display = ex.is_running ? 'none' : 'inline-flex';
+        btnExecStart.textContent = ex.paused ? '▶ Resume Executor' : '▶ Start Executor';
+      }
+      if (btnExecUnpause) {
+        btnExecUnpause.style.display = !ex.is_running && ex.paused ? 'inline-flex' : 'none';
+      }
+      if (btnExecRestart) {
+        btnExecRestart.style.display = ex.is_running ? 'inline-flex' : 'none';
+      }
+      if (btnExecStop) {
+        btnExecStop.style.display = ex.is_running ? 'inline-flex' : 'none';
+      }
+      if (btnExecStopAfter) {
+        btnExecStopAfter.style.display = ex.is_running ? 'inline-flex' : 'none';
+        const armed = Boolean(ex.stop_after_step);
+        btnExecStopAfter.dataset.armed = String(armed);
+        btnExecStopAfter.textContent = armed ? '✕ Cancel After-Step Stop' : '⏸ Stop After Step';
       }
     }
 

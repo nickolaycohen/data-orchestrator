@@ -28,6 +28,9 @@ router = APIRouter(prefix="/api/media", tags=["media"])
 class BgServiceControlRequest(BaseModel):
     action: str  # "start" or "stop"
 
+class ExecutorControlRequest(BaseModel):
+    action: str  # "start", "stop", "restart", "stop_after_step", "cancel_stop_after_step", "resume_cron"
+
 class PublishedUrlUpdateRequest(BaseModel):
     moment_name: str
     shutterfly_url: Optional[str] = None
@@ -818,13 +821,30 @@ def get_executor_monitor():
     else:
         bg_status = "STOPPED"
 
+    paused_paths = [sibling_repo / "db" / "executor.paused", pipe_repo / "db" / "executor.paused"]
+    stop_after_paths = [sibling_repo / "db" / "executor.stop_after_step", pipe_repo / "db" / "executor.stop_after_step"]
+    paused_info = None
+    paused_flag = False
+    for pp in paused_paths:
+        if pp.exists():
+            paused_flag = True
+            try:
+                paused_info = json.loads(pp.read_text(encoding="utf-8"))
+            except Exception:
+                paused_info = {"paused_at_utc": None}
+            break
+    stop_after_flag = any(sp.exists() for sp in stop_after_paths)
+
     return {
         "timestamp": now_str,
         "executor": {
             "is_running": is_running,
             "pid": pid,
             "status": status,
-            "status_banner": f"ACTIVE (PID: {pid})" if is_running else ("STALE (PID: {pid})" if status == "STALE" else "IDLE")
+            "paused": paused_flag,
+            "paused_at_utc": (paused_info or {}).get("paused_at_utc"),
+            "stop_after_step": stop_after_flag,
+            "status_banner": f"ACTIVE (PID: {pid})" if is_running else (f"STALE (PID: {pid})" if status == "STALE" else "IDLE")
         },
         "bg_service": {
             "is_running": bg_running,
@@ -863,6 +883,292 @@ def get_executor_monitor():
             "points": throughput_points
         }
     }
+
+def _list_child_pids(parent_pid: int) -> list[int]:
+    """Return direct child PIDs for a running process using pgrep."""
+    try:
+        res = subprocess.run(["pgrep", "-P", str(parent_pid)], capture_output=True, text=True, check=False)
+        if res.returncode == 0 and res.stdout:
+            return [int(line.strip()) for line in res.stdout.splitlines() if line.strip().isdigit()]
+    except Exception:
+        pass
+    return []
+
+
+def _is_pid_alive(pid: Optional[int]) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError as e:
+        return e.errno != errno.ESRCH
+
+
+def _wait_pids_exit(pids: list[int], timeout_sec: float) -> list[int]:
+    """Wait up to timeout_sec for given PIDs to exit and return any still alive."""
+    deadline = time.time() + timeout_sec
+    remaining = list(pids)
+    while remaining and time.time() < deadline:
+        remaining = [p for p in remaining if _is_pid_alive(p)]
+        if not remaining:
+            return []
+        time.sleep(0.2)
+    return [p for p in remaining if _is_pid_alive(p)]
+
+
+def _release_executor_locks(stopped_pid: Optional[int], lock_paths: list[Path]) -> None:
+    """Remove stale executor.lock and clear executor_active DB copy lock if owned by stopped/dead PID."""
+    for lp in lock_paths:
+        if lp.exists():
+            try:
+                cur_pid = int(lp.read_text().strip())
+            except Exception:
+                cur_pid = None
+            if not _is_pid_alive(cur_pid):
+                try:
+                    lp.unlink()
+                except OSError:
+                    pass
+
+    db_lock_candidates = [
+        Path("/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite.lock"),
+        Path("/Volumes/Macintosh HD/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite.lock"),
+    ]
+    for dlp in db_lock_candidates:
+        if not dlp.exists():
+            continue
+        try:
+            lock_data = json.loads(dlp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if lock_data.get("status") != "executor_active":
+            continue
+        lock_pid = lock_data.get("pid")
+        if lock_pid == stopped_pid or not _is_pid_alive(lock_pid):
+            try:
+                lock_data["status"] = "available"
+                lock_data["pid"] = None
+                dlp.write_text(json.dumps(lock_data, indent=2), encoding="utf-8")
+            except OSError:
+                pass
+
+
+@router.post("/executor/control")
+def control_executor(req: ExecutorControlRequest):
+    action = (req.action or "").strip().lower()
+    pipe_repo = REPOS["media-organizer-pipeline"]
+    sibling_repo = Path("/Users/nickolaycohen/dev/media-organizer-pipeline")
+    target_repo = sibling_repo if (sibling_repo / "scripts" / "pipeline_executor.py").exists() else pipe_repo
+
+    lock_paths = [target_repo / "db" / "executor.lock", pipe_repo / "db" / "executor.lock", sibling_repo / "db" / "executor.lock"]
+    paused_paths = [target_repo / "db" / "executor.paused", pipe_repo / "db" / "executor.paused", sibling_repo / "db" / "executor.paused"]
+    stop_after_paths = [target_repo / "db" / "executor.stop_after_step", pipe_repo / "db" / "executor.stop_after_step", sibling_repo / "db" / "executor.stop_after_step"]
+
+    def _dedup_paths(paths: list[Path]) -> list[Path]:
+        seen = set()
+        out = []
+        for p in paths:
+            rp = str(p.resolve()) if p.parent.exists() else str(p)
+            if rp not in seen:
+                seen.add(rp)
+                out.append(p)
+        return out
+
+    lock_paths = _dedup_paths(lock_paths)
+    paused_paths = _dedup_paths(paused_paths)
+    stop_after_paths = _dedup_paths(stop_after_paths)
+
+    active_pid = None
+    for lp in lock_paths:
+        if lp.exists():
+            try:
+                cand_pid = int(lp.read_text().strip())
+                if _is_pid_alive(cand_pid):
+                    active_pid = cand_pid
+                    break
+            except Exception:
+                pass
+
+    def _clear_sentinels(paths: list[Path]) -> None:
+        for p in paths:
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+    def _write_pause_sentinel(reason: str) -> None:
+        p = target_repo / "db" / "executor.paused"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(
+                {"paused_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"), "reason": reason},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def _stop_running(set_paused: bool) -> tuple[bool, Optional[int], str]:
+        _clear_sentinels(stop_after_paths)
+        if set_paused:
+            _write_pause_sentinel("manual_ui_stop")
+        else:
+            _clear_sentinels(paused_paths)
+
+        if not active_pid:
+            _release_executor_locks(None, lock_paths)
+            return True, None, "Executor was already stopped (cleaned stale locks)."
+
+        child_pids = _list_child_pids(active_pid)
+        try:
+            os.kill(active_pid, signal.SIGTERM)
+        except OSError as e:
+            if e.errno != errno.ESRCH:
+                return False, active_pid, f"Failed sending SIGTERM to PID {active_pid}: {e}"
+
+        still_parent = _wait_pids_exit([active_pid], 10.0)
+        if still_parent:
+            try:
+                os.kill(active_pid, signal.SIGKILL)
+                _wait_pids_exit([active_pid], 2.0)
+            except OSError:
+                pass
+
+        # Ensure any child subprocess (e.g., upload_to_google_photos.py if legacy parent died on SIGTERM) exits cleanly
+        alive_children = [cp for cp in child_pids if _is_pid_alive(cp)]
+        if alive_children:
+            for cp in alive_children:
+                try:
+                    os.kill(cp, signal.SIGINT)
+                except OSError:
+                    pass
+            alive_children = _wait_pids_exit(alive_children, 5.0)
+            for cp in alive_children:
+                try:
+                    os.kill(cp, signal.SIGTERM)
+                except OSError:
+                    pass
+            alive_children = _wait_pids_exit(alive_children, 3.0)
+            for cp in alive_children:
+                try:
+                    os.kill(cp, signal.SIGKILL)
+                except OSError:
+                    pass
+
+        _release_executor_locks(active_pid, lock_paths)
+        return True, active_pid, f"Gracefully stopped executor PID {active_pid}" + (
+            f" (plus child {', '.join(map(str, child_pids))})" if child_pids else ""
+        )
+
+    def _start_executor() -> dict:
+        _clear_sentinels(paused_paths)
+        _clear_sentinels(stop_after_paths)
+        for lp in lock_paths:
+            if lp.exists():
+                try:
+                    existing_pid = int(lp.read_text().strip())
+                    if _is_pid_alive(existing_pid):
+                        return {
+                            "ok": True,
+                            "status": "ACTIVE",
+                            "pid": existing_pid,
+                            "message": f"Executor is already running (PID: {existing_pid}).",
+                        }
+                except Exception:
+                    pass
+                try:
+                    lp.unlink()
+                except OSError:
+                    pass
+
+        script_path = target_repo / "scripts" / "pipeline_executor.py"
+        if not script_path.exists():
+            return {"ok": False, "status": "ERROR", "message": f"Executor script not found: {script_path}"}
+
+        python_bin = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+        if not Path(python_bin).exists():
+            python_bin = sys.executable
+
+        log_path = target_repo / "logs" / "pipeline_executor_cron.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as log_f:
+            proc = subprocess.Popen(
+                [python_bin, str(script_path), "--cron"],
+                cwd=str(target_repo),
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+        new_pid = None
+        for _ in range(25):
+            time.sleep(0.1)
+            for lp in lock_paths:
+                if lp.exists():
+                    try:
+                        cand = int(lp.read_text().strip())
+                        if _is_pid_alive(cand):
+                            new_pid = cand
+                            break
+                    except Exception:
+                        pass
+            if new_pid:
+                break
+            if proc.poll() is not None:
+                break
+
+        if new_pid:
+            return {"ok": True, "status": "ACTIVE", "pid": new_pid, "message": f"Started executor (PID: {new_pid})."}
+        if proc.poll() is None:
+            return {"ok": True, "status": "ACTIVE", "pid": proc.pid, "message": f"Launched executor (PID: {proc.pid})."}
+        return {
+            "ok": True,
+            "status": "IDLE",
+            "pid": None,
+            "message": "Executor checked queue cleanly and exited (no active planned batch or inside backup window).",
+        }
+
+    if action == "stop":
+        ok, stopped_pid, msg = _stop_running(set_paused=True)
+        return {"ok": ok, "status": "STOPPED" if ok else "ERROR", "stopped_pid": stopped_pid, "paused": True, "message": msg}
+
+    if action == "start":
+        return _start_executor()
+
+    if action == "restart":
+        ok, stopped_pid, stop_msg = _stop_running(set_paused=False)
+        if not ok:
+            return {"ok": False, "status": "ERROR", "message": stop_msg}
+        start_res = _start_executor()
+        if stopped_pid and start_res.get("ok"):
+            start_res["message"] = f"Stopped PID {stopped_pid} -> {start_res['message']}"
+        return start_res
+
+    if action == "stop_after_step":
+        if not active_pid:
+            return {"ok": False, "status": "IDLE", "message": "Executor is not currently running."}
+        sp = target_repo / "db" / "executor.stop_after_step"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"), encoding="utf-8")
+        return {
+            "ok": True,
+            "status": "DRAIN_ARMED",
+            "pid": active_pid,
+            "message": f"Armed graceful stop after current step completes (PID: {active_pid}).",
+        }
+
+    if action == "cancel_stop_after_step":
+        _clear_sentinels(stop_after_paths)
+        return {"ok": True, "status": "ACTIVE" if active_pid else "IDLE", "message": "Cancelled pending stop-after-step."}
+
+    if action == "resume_cron":
+        _clear_sentinels(paused_paths)
+        return {"ok": True, "status": "ACTIVE" if active_pid else "IDLE", "paused": False, "message": "Auto-cron pause cleared."}
+
+    return {"ok": False, "status": "INVALID", "message": f"Unsupported action: {action}"}
+
 
 @router.post("/bg-service/control")
 def control_bg_service(req: BgServiceControlRequest):

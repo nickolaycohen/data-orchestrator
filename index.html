@@ -1275,6 +1275,10 @@
                 <h3 style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
                   Media Scheduler &amp; Executor Monitor
                   <span class="badge badge-sm" id="monitor-executor-badge">Checking...</span>
+                  <span class="badge badge-sm badge-amber" id="monitor-executor-paused-badge" style="display: none;"
+                    title="Auto-cron (*/15) is paused because executor was stopped from UI">⏸️ Auto-Cron Paused</span>
+                  <span class="badge badge-sm badge-purple" id="monitor-executor-drain-badge" style="display: none;"
+                    title="Executor will finish the current step cleanly and stop">⏳ Stopping After Step</span>
                   <span class="badge badge-sm badge-outline" id="monitor-bg-service-badge">🔄 BG Sync:
                     Checking...</span>
                   <span class="badge badge-sm badge-outline" id="monitor-db-lock-badge">🔓 DB Lock: Checking</span>
@@ -1287,6 +1291,27 @@
             <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
               <span style="font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono);"
                 id="monitor-last-updated">Updating...</span>
+              <button class="btn btn-xs btn-green" id="btn-executor-start" style="display: none;"
+                title="Start pipeline_executor.py in background">
+                ▶ Start Executor
+              </button>
+              <button class="btn btn-xs btn-outline" id="btn-executor-unpause" style="display: none;"
+                title="Clear auto-cron pause so scheduled */15 cron runs resume">
+                ▶ Unpause Cron
+              </button>
+              <button class="btn btn-xs btn-outline" id="btn-executor-restart" style="display: none;"
+                title="Gracefully stop active executor cleanly (preserving batch state) and restart">
+                ↻ Restart
+              </button>
+              <button class="btn btn-xs btn-outline" id="btn-executor-stop-after" style="display: none;"
+                title="Let the current step finish cleanly, then stop &amp; pause auto-cron">
+                ⏸ Stop After Step
+              </button>
+              <button class="btn btn-xs btn-outline" id="btn-executor-stop"
+                style="display: none; border-color: rgba(239, 68, 68, 0.45); color: #f87171;"
+                title="Gracefully stop active executor &amp; child subprocesses without marking batch error, and pause auto-cron">
+                ■ Stop
+              </button>
               <button class="btn btn-xs btn-outline" id="btn-refresh-monitor" title="Refresh Monitor Status">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
@@ -1298,6 +1323,9 @@
                 ▶ Run CLI (monitor_executor.py)
               </button>
             </div>
+          </div>
+          <div id="executor-control-feedback" class="text-muted font-mono"
+            style="display: none; font-size: 0.72rem; margin: -0.35rem 0 0.65rem 0; padding: 0.35rem 0.6rem; border-radius: 6px; background: rgba(255,255,255,0.04);">
           </div>
 
           <!-- Live Telemetry Banner (Active Step & Upload Progress) -->
