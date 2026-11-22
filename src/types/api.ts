@@ -160,6 +160,17 @@ export interface BatchDeviceSummary {
   other_assets_count: number;
 }
 
+export interface AppleMonthSelectionStatus {
+  expected_album: string;
+  exists: boolean;
+  has_assets: boolean;
+  asset_count: number;
+  matched_album_name?: string | null;
+  batch_selected_count?: number;
+  ready: boolean;
+  status: 'ready' | 'empty' | 'missing';
+}
+
 export interface PlannerBatchCandidate {
   month: string;
   status_code: string;
@@ -170,6 +181,7 @@ export interface PlannerBatchCandidate {
   elapsed_days?: number | null;
   in_queue?: boolean;
   next_step: string;
+  month_selection?: AppleMonthSelectionStatus;
   device_summary?: BatchDeviceSummary | null;
 }
 
@@ -661,7 +673,7 @@ declare global {
     loadReport: (id: string, title: string, filename: string) => Promise<void>;
     triggerTask: TriggerTaskFn;
     openManagedIntakeModal: () => void;
-    runPlannerBatchAction: (month: string, action: string) => Promise<void>;
+    runPlannerBatchAction: (month: string, action: string, confirmMissingMonthSelection?: boolean) => Promise<void>;
   }
 }
 

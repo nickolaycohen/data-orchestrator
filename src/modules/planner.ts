@@ -797,14 +797,37 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     void updateGroupingRules({ reset_defaults: true });
   });
 
-  window.runPlannerBatchAction = async function (month: string, action: string): Promise<void> {
+  window.runPlannerBatchAction = async function (
+    month: string,
+    action: string,
+    confirmMissingMonthSelection = false
+  ): Promise<void> {
     try {
       const res = await fetch('/api/media/planner/batch-action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ month, action })
+        body: JSON.stringify({
+          month,
+          action,
+          confirm_missing_month_selection: confirmMissingMonthSelection
+        })
       });
       const data = await res.json();
+      if (!data.ok && data.requires_confirmation && !confirmMissingMonthSelection) {
+        const ms = data.month_selection;
+        const expectedName = ms?.expected_album || month;
+        const detailMsg =
+          data.warning_code === 'EMPTY_MONTH_SELECTION'
+            ? `Album "${ms?.matched_album_name || expectedName}" exists under "Apple Photos Month Selection" but currently has 0 assets.`
+            : `No album named "${expectedName}" was found under "Apple Photos Month Selection".`;
+        const okProceed = window.confirm(
+          `⚠️ Apple Photos Month Selection Check (${month})\n\n${detailMsg}\n\nQueueing without a populated Apple Photos Month Selection folder means those picks will miss the +0.15 ranking boost before pulling Google Favorites.\n\nClick OK to queue ${month} anyway (override check), or Cancel to populate "${expectedName}" in Apple Photos first.`
+        );
+        if (okProceed) {
+          await window.runPlannerBatchAction(month, action, true);
+        }
+        return;
+      }
       if (!data.ok) {
         alert(`Action failed: ${data.error || 'Unknown error'}`);
         return;
@@ -1166,7 +1189,7 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
   if (b500Tbody) {
     if (!c500.length) {
       b500Tbody.innerHTML =
-        '<tr><td colspan="6" class="text-center text-muted">No batches at stage 500 waiting for favorites pull & ranking.</td></tr>';
+        '<tr><td colspan="7" class="text-center text-muted">No batches at stage 500 waiting for favorites pull & ranking.</td></tr>';
     } else {
       b500Tbody.innerHTML = c500
         .map(item => {
@@ -1176,6 +1199,17 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
               : item.is_bypassed
               ? `<span class="badge badge-xs badge-outline">Bypassed</span>`
               : `<span class="text-muted font-mono">0</span>`;
+          const ms = item.month_selection;
+          let msBadge = `<span class="text-muted font-mono">—</span>`;
+          if (ms) {
+            if (ms.ready) {
+              msBadge = `<span class="badge badge-xs badge-green font-mono" title="Apple Photos Month Selection/${escapeHtml(ms.matched_album_name || ms.expected_album)} (${ms.asset_count} assets)">✓ ${escapeHtml(ms.matched_album_name || ms.expected_album)} (${ms.asset_count})</span>`;
+            } else if (ms.exists) {
+              msBadge = `<span class="badge badge-xs badge-amber font-mono" title="Album exists under Apple Photos Month Selection but has 0 assets">⚠️ ${escapeHtml(ms.matched_album_name || ms.expected_album)} (0)</span>`;
+            } else {
+              msBadge = `<span class="badge badge-xs badge-amber font-mono" title="Missing album '${escapeHtml(ms.expected_album)}' under Apple Photos Month Selection">⚠️ Missing (${escapeHtml(ms.expected_album)})</span>`;
+            }
+          }
           const actionBtn = item.in_queue
             ? `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'remove_queue')" title="Remove from planned_execution queue">✓ Queued (Remove)</button>`
             : `<button class="btn btn-xs btn-purple" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'queue')" title="Add ${escapeHtml(item.month)} to planned_execution queue">➕ Queue (500➜650)</button>`;
@@ -1186,6 +1220,7 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
             <td><span class="badge badge-xs badge-purple font-mono">${escapeHtml(item.status_code)}</span></td>
             <td style="text-align: right;" class="font-mono">${item.total_assets.toLocaleString()}</td>
             <td style="text-align: right;">${favBadge}</td>
+            <td>${msBadge}</td>
             <td class="font-mono" style="font-size: 0.7rem; color: var(--text-secondary);">500 ➜ 550 (Pull Favs) ➜ 600 (Rank) ➜ 650</td>
             <td style="text-align: right; white-space: nowrap;">${actionBtn}</td>
           </tr>

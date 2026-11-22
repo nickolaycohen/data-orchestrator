@@ -16,7 +16,7 @@ import calendar
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response
-from backend.config import MEDIA_DB_PATH, REPOS, get_db_connection
+from backend.config import BASE_DIR, MEDIA_DB_PATH, REPOS, get_db_connection
 
 APPLE_PHOTOS_LIBRARY_PATH = Path("/Volumes/Extreme Pro/Photos Library/All-Media.photoslibrary")
 CURATED_LACIE_DIR = Path("/Volumes/LaCie/Media Organizer/Curated")
@@ -40,6 +40,7 @@ class MarkRemovedRequest(BaseModel):
 class PlannerBatchActionRequest(BaseModel):
     month: str
     action: str  # "queue" | "remove_queue" | "confirm_500" | "bypass_500" | "reset_000"
+    confirm_missing_month_selection: bool = False
 
 class ModeMDedupApplyRequest(BaseModel):
     asset_ids: list[str]
@@ -3627,6 +3628,58 @@ def _enrich_batch_candidates_with_devices(cur, candidates):
                 item["device_summary"] = None
 
 
+def _load_pipeline_queries_module():
+    """Dynamically load shared queries module from live sibling or submodule media-organizer-pipeline."""
+    import importlib.util
+
+    candidate_roots = [
+        BASE_DIR.parent / "media-organizer-pipeline",
+        REPOS["media-organizer-pipeline"],
+    ]
+    for pipe_root in candidate_roots:
+        queries_path = pipe_root / "db" / "queries.py"
+        if not queries_path.exists():
+            continue
+        scripts_dir = pipe_root / "scripts"
+        for p in (str(pipe_root), str(scripts_dir)):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        spec = importlib.util.spec_from_file_location("pipeline_db_queries", queries_path)
+        if spec is None or spec.loader is None:
+            continue
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if hasattr(mod, "check_apple_month_selection_album"):
+            return mod
+    return None
+
+
+def _check_apple_month_selection_status(cur: sqlite3.Cursor, month_str: str) -> dict:
+    """Delegate Apple Photos Month Selection verification to shared pipeline helper."""
+    mod = _load_pipeline_queries_module()
+    if mod is not None and hasattr(mod, "check_apple_month_selection_album"):
+        return mod.check_apple_month_selection_album(cur, month_str)
+    return {
+        "month": month_str,
+        "expected_album": month_str,
+        "exists": False,
+        "has_assets": False,
+        "asset_count": 0,
+        "matched_album_name": None,
+        "album_pk": None,
+        "batch_selected_count": 0,
+        "ready": False,
+        "status": "missing",
+    }
+
+
+def _ensure_planned_execution_override_column(cur: sqlite3.Cursor) -> None:
+    """Delegate schema guard for planned_execution override flag to shared pipeline helper."""
+    mod = _load_pipeline_queries_module()
+    if mod is not None and hasattr(mod, "ensure_planned_execution_override_column"):
+        mod.ensure_planned_execution_override_column(cur)
+
+
 @router.get("/planner-overview")
 def get_planner_overview(mode: str = "all"):
     """Return next-step overview for Mode [B] Batch Management and/or Mode [M] Moments Organizer."""
@@ -3759,12 +3812,22 @@ def get_planner_overview(mode: str = "all"):
                             item["next_step"] = "Confirm Google AI rating (Best-of lists generated & Favorites manually added) via Confirm 500 or Bypass"
                         manual_400_candidates.append(item)
                     elif sc_str in ("500", "550"):
+                        ms_info = _check_apple_month_selection_status(cur, m_str)
+                        item["month_selection"] = ms_info
                         item["transition_path"] = "500 ➜ 550 (Pull Favorites) ➜ 600 (Rank & Export) ➜ 650 (Cloud Retain)"
-                        item["next_step"] = (
-                            f"Queue pipeline execution ({fav_a} favorites synced)"
-                            if fav_a > 0
-                            else ("Queue Direct-Rank Bypass execution" if is_byp else "Queue Pull Google Favorites & Rank (500 ➜ 650)")
-                        )
+                        if not ms_info.get("ready") and not is_byp:
+                            ms_warn = (
+                                f"Apple Photos Month Selection '{ms_info['matched_album_name']}' is empty (0 assets)"
+                                if ms_info.get("exists")
+                                else f"Missing Apple Photos Month Selection album '{ms_info['expected_album']}'"
+                            )
+                            item["next_step"] = f"⚠️ {ms_warn} — populate before pulling Google Favorites"
+                        else:
+                            item["next_step"] = (
+                                f"Queue pipeline execution ({fav_a} favorites synced)"
+                                if fav_a > 0
+                                else ("Queue Direct-Rank Bypass execution" if is_byp else "Queue Pull Google Favorites & Rank (500 ➜ 650)")
+                            )
                         pipeline_500_candidates.append(item)
                     elif sc_str == "600":
                         item["transition_path"] = "600 ➜ 650 (Cloud Retention & Local Staging Cleanup)"
@@ -3964,13 +4027,45 @@ def execute_planner_batch_action(req: PlannerBatchActionRequest):
         try:
             cur = conn.cursor()
             if action == "queue":
+                _ensure_planned_execution_override_column(cur)
+                cur.execute("SELECT status_code, COALESCE(is_bypassed, 0) FROM month_batches WHERE month = ?", (month,))
+                mb_row = cur.fetchone()
+                batch_status = str(mb_row[0]) if mb_row and mb_row[0] is not None else ""
+                is_byp = bool(mb_row[1]) if mb_row else False
+
+                skip_ms_flag = 0
+                if batch_status in ("500", "550"):
+                    ms_info = _check_apple_month_selection_status(cur, month)
+                    if not ms_info.get("ready"):
+                        if not is_byp and not req.confirm_missing_month_selection:
+                            warn_code = "EMPTY_MONTH_SELECTION" if ms_info.get("exists") else "MISSING_MONTH_SELECTION"
+                            err_msg = (
+                                f"Apple Photos Month Selection album '{ms_info.get('matched_album_name') or ms_info.get('expected_album')}' has 0 assets."
+                                if ms_info.get("exists")
+                                else f"Apple Photos Month Selection album '{ms_info.get('expected_album')}' was not found."
+                            )
+                            return {
+                                "ok": False,
+                                "requires_confirmation": True,
+                                "warning_code": warn_code,
+                                "month_selection": ms_info,
+                                "error": err_msg,
+                            }
+                        skip_ms_flag = 1
+
                 cur.execute("SELECT id FROM planned_execution WHERE planned_month = ? AND active = 1", (month,))
                 existing = cur.fetchone()
                 if existing:
-                    cur.execute("UPDATE planned_execution SET set_at_utc = datetime('now') WHERE id = ?", (existing[0],))
+                    cur.execute(
+                        "UPDATE planned_execution SET set_at_utc = datetime('now'), skip_month_selection_check = ? WHERE id = ?",
+                        (skip_ms_flag, existing[0]),
+                    )
                     msg = f"Updated existing queue entry for batch {month} (ID #{existing[0]})"
                 else:
-                    cur.execute("INSERT INTO planned_execution (planned_month, active, set_at_utc) VALUES (?, 1, datetime('now'))", (month,))
+                    cur.execute(
+                        "INSERT INTO planned_execution (planned_month, active, set_at_utc, skip_month_selection_check) VALUES (?, 1, datetime('now'), ?)",
+                        (month, skip_ms_flag),
+                    )
                     msg = f"Added batch {month} to active execution queue"
             elif action == "remove_queue":
                 cur.execute("UPDATE planned_execution SET active = 0 WHERE planned_month = ? AND active = 1", (month,))
