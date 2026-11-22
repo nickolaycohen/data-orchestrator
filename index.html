@@ -713,7 +713,7 @@
                         <div class="planner-subblock-desc">Path 2: Publish threshold-aligned Moments sorted by aesthetic rank (up to 9 assets per batch).</div>
                       </div>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                    <div class="planner-subblock-actions">
                       <button type="button" class="btn btn-xs btn-outline" id="btn-open-all-pub-rec-folder" title="Open /Volumes/LaCie/Media Organizer/Publishing Recommendation in Finder">
                         📂 Open Pub. Rec
                       </button>
@@ -721,24 +721,29 @@
                         🔄 Sync Pub. Rec Folder
                       </button>
                       <span class="badge badge-xs badge-green font-mono" id="mode-m-rec-badge">0 actionable</span>
+                      <button type="button" class="btn btn-xs btn-outline" id="btn-toggle-mode-m-step-2" aria-expanded="false" title="Expand or collapse Top Actionable Publishing Recommendations">
+                        ▾ Expand
+                      </button>
                     </div>
                   </div>
-                  <div class="planner-table-wrap">
-                    <table class="cleanup-table planner-compact-table">
-                      <thead>
-                        <tr>
-                          <th>Moment Name</th>
-                          <th style="text-align: right;">Avg Score</th>
-                          <th style="text-align: right;">Curated</th>
-                          <th style="text-align: right;">Pub.</th>
-                          <th>Recommended Next Action</th>
-                          <th>Top Proposed Assets</th>
-                        </tr>
-                      </thead>
-                      <tbody id="mode-m-recs-tbody">
-                        <tr><td colspan="6" class="text-center text-muted">Loading publishing recommendations...</td></tr>
-                      </tbody>
-                    </table>
+                  <div id="mode-m-step-2-body" class="mode-m-step-body collapsed">
+                    <div class="planner-table-wrap">
+                      <table class="cleanup-table planner-compact-table">
+                        <thead>
+                          <tr>
+                            <th>Moment Name</th>
+                            <th style="text-align: right;">Avg Score</th>
+                            <th style="text-align: right;">Curated</th>
+                            <th style="text-align: right;">Pub.</th>
+                            <th>Recommended Next Action</th>
+                            <th>Top Proposed Assets</th>
+                          </tr>
+                        </thead>
+                        <tbody id="mode-m-recs-tbody">
+                          <tr><td colspan="6" class="text-center text-muted">Loading publishing recommendations...</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
 

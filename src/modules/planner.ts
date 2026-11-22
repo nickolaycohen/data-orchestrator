@@ -577,16 +577,18 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     void fetchMemoriesFolders();
   });
 
-  const btnToggleStep1 = document.getElementById('btn-toggle-mode-m-step-1');
-  if (btnToggleStep1) {
-    btnToggleStep1.addEventListener('click', () => {
-      const bodyEl = document.getElementById('mode-m-step-1-body');
+  const wireStepToggle = (btnId: string, bodyId: string): void => {
+    const btn = document.getElementById(btnId);
+    btn?.addEventListener('click', () => {
+      const bodyEl = document.getElementById(bodyId);
       if (!bodyEl) return;
       const collapsed = bodyEl.classList.toggle('collapsed');
-      btnToggleStep1.textContent = collapsed ? '▾ Expand' : '▴ Collapse';
-      btnToggleStep1.setAttribute('aria-expanded', String(!collapsed));
+      btn.textContent = collapsed ? '▾ Expand' : '▴ Collapse';
+      btn.setAttribute('aria-expanded', String(!collapsed));
     });
-  }
+  };
+  wireStepToggle('btn-toggle-mode-m-step-1', 'mode-m-step-1-body');
+  wireStepToggle('btn-toggle-mode-m-step-2', 'mode-m-step-2-body');
 
   const btnToggleFolders = document.getElementById('btn-toggle-memories-folders');
   if (btnToggleFolders) {
@@ -927,9 +929,16 @@ interface PlannerPathCard {
   focusItem?: PlannerPathFocusItem;
 }
 
-function ensureModeMStep1Expanded(): void {
-  const bodyEl = document.getElementById('mode-m-step-1-body');
-  const toggleBtn = document.getElementById('btn-toggle-mode-m-step-1');
+const MODE_M_COLLAPSIBLE_STEPS: Record<string, { bodyId: string; btnId: string }> = {
+  'mode-m-step-1': { bodyId: 'mode-m-step-1-body', btnId: 'btn-toggle-mode-m-step-1' },
+  'mode-m-step-2': { bodyId: 'mode-m-step-2-body', btnId: 'btn-toggle-mode-m-step-2' }
+};
+
+function ensureModeMStepExpanded(stepId: string): void {
+  const cfg = MODE_M_COLLAPSIBLE_STEPS[stepId];
+  if (!cfg) return;
+  const bodyEl = document.getElementById(cfg.bodyId);
+  const toggleBtn = document.getElementById(cfg.btnId);
   if (bodyEl?.classList.contains('collapsed')) {
     bodyEl.classList.remove('collapsed');
     if (toggleBtn) {
@@ -942,15 +951,14 @@ function ensureModeMStep1Expanded(): void {
 function jumpToPlannerStep(targetId: string): void {
   const el = document.getElementById(targetId);
   if (!el) return;
-  if (targetId === 'mode-m-step-1') {
-    ensureModeMStep1Expanded();
-  }
+  ensureModeMStepExpanded(targetId);
   el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   el.classList.add('subblock-highlight');
   window.setTimeout(() => el.classList.remove('subblock-highlight'), 2000);
 }
 
 function focusPlannerPathItem(focus: PlannerPathFocusItem | undefined, fallbackTargetId: string): void {
+  ensureModeMStepExpanded(fallbackTargetId);
   if (focus?.isCluster && focus.itemName) {
     jumpToUnassignedCluster(focus.itemName);
     return;
@@ -1693,7 +1701,7 @@ function sortNormalizedClusters(clusters: UnassignedClusterItem[]): UnassignedCl
 
 function jumpToUnassignedCluster(folder: string): void {
   if (!folder) return;
-  ensureModeMStep1Expanded();
+  ensureModeMStepExpanded('mode-m-step-1');
   if (unassignedSearchQuery) {
     unassignedSearchQuery = '';
     const searchEl = document.getElementById('mode-m-unassigned-search') as HTMLInputElement | null;
