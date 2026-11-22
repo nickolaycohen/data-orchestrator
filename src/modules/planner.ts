@@ -1331,6 +1331,10 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
 
   const topRec = recs[0];
   const topDisjoint = disjoint[0];
+  const pubMomentsTotal = Number(sc.published_moments_total || 0);
+  const pubAssetsTotal = Number(sc.published_assets_total || 0);
+  const m450Count = Number(sc.M450 || 0);
+  const m500Count = Number(sc.M500 || 0);
 
   renderPlannerPathsSummary('mode-m-paths-summary', [
     {
@@ -1373,6 +1377,19 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       targetId: 'mode-m-step-3',
       linkLabel: 'Go to 3️⃣ Disjoint Merge ↓',
       active: disjoint.length > 0
+    },
+    {
+      num: '4',
+      numTone: 'blue',
+      title: 'Published History',
+      badgeText: pubMomentsTotal > 0 ? `${pubMomentsTotal} Moments · ${pubAssetsTotal} pub.` : '0 published',
+      badgeClass: pubMomentsTotal > 0 ? 'badge-blue' : 'badge-outline',
+      badgeTitle: `${m500Count} M500 fully published · ${m450Count} M450 partial`,
+      description: 'Review Shutterfly & YouTube published albums, search history, or open live platform links.',
+      footerMeta: `${m500Count} M500 · ${m450Count} M450`,
+      targetId: 'published-memories-card',
+      linkLabel: 'Go to 4️⃣ Published History ↓',
+      active: pubMomentsTotal > 0
     }
   ]);
 
