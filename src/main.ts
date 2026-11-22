@@ -42,10 +42,38 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchAllMetrics();
 });
 
+function setMediaStatsVisibility(isMediaTab: boolean, forceCollapsed = false): void {
+  const wrap = document.getElementById('media-stats-collapsible');
+  const body = document.getElementById('media-stats-body');
+  const toggleBtn = document.getElementById('btn-toggle-media-stats') as HTMLButtonElement | null;
+  if (wrap) {
+    wrap.style.display = isMediaTab ? 'block' : 'none';
+  }
+  if (forceCollapsed || !isMediaTab) {
+    body?.classList.add('collapsed');
+    if (toggleBtn) {
+      toggleBtn.textContent = '▾ Expand';
+      toggleBtn.setAttribute('aria-expanded', 'false');
+    }
+  }
+}
+
 // Tab Navigation
 function setupTabs(): void {
   const tabs = document.querySelectorAll<HTMLElement>('.nav-tab');
   const panels = document.querySelectorAll<HTMLElement>('.tab-panel');
+  const toggleStatsBtn = document.getElementById('btn-toggle-media-stats') as HTMLButtonElement | null;
+
+  toggleStatsBtn?.addEventListener('click', () => {
+    const body = document.getElementById('media-stats-body');
+    if (!body) return;
+    const isCollapsed = body.classList.toggle('collapsed');
+    toggleStatsBtn.textContent = isCollapsed ? '▾ Expand' : '▴ Minimize';
+    toggleStatsBtn.setAttribute('aria-expanded', String(!isCollapsed));
+  });
+
+  const activeTab = document.querySelector<HTMLElement>('.nav-tab.active');
+  setMediaStatsVisibility(activeTab?.dataset.tab === 'media', true);
 
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
@@ -57,6 +85,8 @@ function setupTabs(): void {
       if (targetPanel) {
         targetPanel.classList.add('active');
       }
+
+      setMediaStatsVisibility(tab.dataset.tab === 'media', true);
 
       if (tab.dataset.tab === 'media' || tab.dataset.tab === 'background') {
         fetchExecutorMonitor();
@@ -258,6 +288,15 @@ async function fetchMediaMetrics(): Promise<void> {
     if (statMoments) statMoments.textContent = (stats.curated_moments || 0).toLocaleString();
     if (statBatches) statBatches.textContent = (stats.month_batches || 0).toLocaleString();
     if (statTriage) statTriage.textContent = `${stats.triage_saved_gb || 0} GB`;
+
+    const pillAssets = document.getElementById('stat-media-assets-pill');
+    const pillMoments = document.getElementById('stat-media-moments-pill');
+    const pillBatches = document.getElementById('stat-media-batches-pill');
+    const pillTriage = document.getElementById('stat-media-triage-pill');
+    if (pillAssets) pillAssets.textContent = `${(stats.total_assets || 0).toLocaleString()} Assets`;
+    if (pillMoments) pillMoments.textContent = `${(stats.curated_moments || 0).toLocaleString()} Moments`;
+    if (pillBatches) pillBatches.textContent = `${(stats.month_batches || 0).toLocaleString()} Batches`;
+    if (pillTriage) pillTriage.textContent = `${stats.triage_saved_gb || 0} GB Saved`;
     if (topoMedia) {
       topoMedia.textContent = `${(stats.total_assets || 0).toLocaleString()} assets · ${stats.curated_moments || 0} moments`;
     }

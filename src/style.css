@@ -349,6 +349,37 @@ body {
 .mb-4 { margin-bottom: 1.5rem; }
 
 /* Stat Tiles */
+.media-stats-collapsible {
+  padding: 0.65rem 0.9rem !important;
+}
+
+.media-stats-collapsible-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.media-stats-summary-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.media-stats-summary-pills {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.media-stats-body.collapsed {
+  display: none;
+}
+
 .stat-tiles-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

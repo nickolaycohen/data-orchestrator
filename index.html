@@ -230,35 +230,57 @@
             </div>
           </div>
 
-          <!-- Media Stats Tiles -->
-          <div class="stat-tiles-row mb-4">
-            <div class="stat-tile">
-              <span class="stat-label">Total Library Assets</span>
-              <span class="stat-value text-purple" id="stat-media-assets">213,082</span>
-              <span class="stat-detail" id="stat-media-assets-sub">In master catalog · 100% AI scored</span>
-              <div class="stat-phase-bar" id="stat-media-assets-bar"></div>
-              <div class="stat-phase-list" id="stat-media-assets-phases"></div>
+          <!-- Media Stats Tiles (Shown only in Media Organizer, auto-minimized with Expand control on right) -->
+          <div class="card media-stats-collapsible mb-3" id="media-stats-collapsible" style="display: none;">
+            <div class="media-stats-collapsible-header">
+              <div class="media-stats-summary-left">
+                <span class="font-mono text-muted" style="font-size: 0.72rem; font-weight: 600;">📊 Library &amp; Pipeline Summary</span>
+                <div class="media-stats-summary-pills">
+                  <span class="badge badge-xs badge-purple font-mono" id="stat-media-assets-pill">213,082 Assets</span>
+                  <span class="badge badge-xs badge-green font-mono" id="stat-media-moments-pill">163 Moments</span>
+                  <span class="badge badge-xs badge-blue font-mono" id="stat-media-batches-pill">285 Batches</span>
+                  <span class="badge badge-xs badge-amber font-mono" id="stat-media-triage-pill">2,950.64 GB Saved</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                class="btn btn-xs btn-outline"
+                id="btn-toggle-media-stats"
+                aria-expanded="false"
+                title="Expand or minimize detailed Library & Pipeline Summary tiles"
+              >▾ Expand</button>
             </div>
-            <div class="stat-tile">
-              <span class="stat-label">Curated Moments</span>
-              <span class="stat-value text-green" id="stat-media-moments">163</span>
-              <span class="stat-detail" id="stat-media-moments-sub">Feature memory collections</span>
-              <div class="stat-phase-bar" id="stat-media-moments-bar"></div>
-              <div class="stat-phase-list" id="stat-media-moments-phases"></div>
-            </div>
-            <div class="stat-tile">
-              <span class="stat-label">Month Batches</span>
-              <span class="stat-value text-blue" id="stat-media-batches">285</span>
-              <span class="stat-detail" id="stat-media-batches-sub">Ingested monthly folders</span>
-              <div class="stat-phase-bar" id="stat-media-batches-bar"></div>
-              <div class="stat-phase-list" id="stat-media-batches-phases"></div>
-            </div>
-            <div class="stat-tile">
-              <span class="stat-label">Triage Duplicate Savings</span>
-              <span class="stat-value text-amber" id="stat-media-triage-saved">2,950.64 GB</span>
-              <span class="stat-detail" id="stat-media-triage-sub">Saved to DELL1TB02</span>
-              <div class="stat-phase-bar" id="stat-media-triage-bar"></div>
-              <div class="stat-phase-list" id="stat-media-triage-phases"></div>
+            <div class="media-stats-body collapsed" id="media-stats-body">
+              <div class="stat-tiles-row" style="margin-top: 0.75rem;">
+                <div class="stat-tile">
+                  <span class="stat-label">Total Library Assets</span>
+                  <span class="stat-value text-purple" id="stat-media-assets">213,082</span>
+                  <span class="stat-detail" id="stat-media-assets-sub">In master catalog · 100% AI scored</span>
+                  <div class="stat-phase-bar" id="stat-media-assets-bar"></div>
+                  <div class="stat-phase-list" id="stat-media-assets-phases"></div>
+                </div>
+                <div class="stat-tile">
+                  <span class="stat-label">Curated Moments</span>
+                  <span class="stat-value text-green" id="stat-media-moments">163</span>
+                  <span class="stat-detail" id="stat-media-moments-sub">Feature memory collections</span>
+                  <div class="stat-phase-bar" id="stat-media-moments-bar"></div>
+                  <div class="stat-phase-list" id="stat-media-moments-phases"></div>
+                </div>
+                <div class="stat-tile">
+                  <span class="stat-label">Month Batches</span>
+                  <span class="stat-value text-blue" id="stat-media-batches">285</span>
+                  <span class="stat-detail" id="stat-media-batches-sub">Ingested monthly folders</span>
+                  <div class="stat-phase-bar" id="stat-media-batches-bar"></div>
+                  <div class="stat-phase-list" id="stat-media-batches-phases"></div>
+                </div>
+                <div class="stat-tile">
+                  <span class="stat-label">Triage Duplicate Savings</span>
+                  <span class="stat-value text-amber" id="stat-media-triage-saved">2,950.64 GB</span>
+                  <span class="stat-detail" id="stat-media-triage-sub">Saved to DELL1TB02</span>
+                  <div class="stat-phase-bar" id="stat-media-triage-bar"></div>
+                  <div class="stat-phase-list" id="stat-media-triage-phases"></div>
+                </div>
+              </div>
             </div>
           </div>
 
