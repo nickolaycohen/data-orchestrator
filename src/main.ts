@@ -12,6 +12,8 @@ import {
 } from './modules/cleanup.ts';
 import {
   fetchPlannerOverview,
+  openResolveDisjointModal,
+  renderMomentTaggedBadge,
   setupPlannerOverview,
   updateClustersBgSyncStatus
 } from './modules/planner.ts';
@@ -721,6 +723,12 @@ function renderPublishedMomentsHistory(): void {
     `
         : '';
 
+      const taggedBadgeHtml = renderMomentTaggedBadge(
+        m.is_tagged,
+        m.paradigm_confirmed,
+        m.tag_summary
+      );
+
       return `
       <div class="moment-card" style="flex-direction: column; align-items: stretch;" title="${acctTitle}">
         <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;">
@@ -729,6 +737,7 @@ function renderPublishedMomentsHistory(): void {
               <span class="pub-rank-num">#${idx + 1}</span>
               <span class="moment-name">${m.moment_name}</span>
               <span class="badge badge-xs badge-outline font-mono">${m.memory_stage || 'M500'}</span>
+              ${taggedBadgeHtml}
             </div>
             <div class="pub-meta-line">
               <span title="Published Timestamp (Local)">🕒 ${m.published_at_local}</span>
@@ -739,6 +748,7 @@ function renderPublishedMomentsHistory(): void {
             ${sfPill}
             ${ytPill}
             ${fallbackPill}
+            <button type="button" class="btn btn-xs btn-outline btn-pub-tag-moment" data-tag-moment="${escapedMoment}" title="Inspect, tag, or retag '${escapedMoment}' in DB">🏷️ Tag</button>
             <button type="button" class="pub-edit-url-btn" data-edit-moment="${escapedMoment}" title="Set or Edit Shutterfly Album / YouTube Video URLs">🔗</button>
             <div class="pub-score-badge" title="Normalized Aesthetic + Favorites Score (Range: ${m.score_range})">
               <span class="pub-score-val">★ ${m.avg_score.toFixed(4)}</span>
@@ -751,6 +761,13 @@ function renderPublishedMomentsHistory(): void {
     `;
     })
     .join('');
+
+  momentsContainer.querySelectorAll<HTMLElement>('.btn-pub-tag-moment').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mName = btn.getAttribute('data-tag-moment') || '';
+      if (mName) void openResolveDisjointModal(mName);
+    });
+  });
 
   momentsContainer.querySelectorAll<HTMLElement>('[data-edit-moment]').forEach(btn => {
     btn.addEventListener('click', () => {

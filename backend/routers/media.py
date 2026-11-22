@@ -371,7 +371,9 @@ def get_media_metrics():
                 GROUP BY p.moment_name
                 ORDER BY avg_score DESC NULLS LAST, last_published_utc DESC, p.moment_name ASC
             """)
-            for row in cur.fetchall():
+            pub_rows = cur.fetchall()
+            pub_tag_status_by_lc, _ = _load_moment_tagging_status_map(cur)
+            for row in pub_rows:
                 r_dict = dict(row)
                 raw_pub = r_dict.get("last_published_utc") or ""
                 pub_local = raw_pub[:19] if raw_pub else "—"
@@ -390,9 +392,11 @@ def get_media_metrics():
                 avg_s = round(float(r_dict["avg_score"]), 4) if r_dict.get("avg_score") is not None else 0.0
                 min_s = round(float(r_dict["min_score"]), 4) if r_dict.get("min_score") is not None else 0.0
                 max_s = round(float(r_dict["max_score"]), 4) if r_dict.get("max_score") is not None else 0.0
+                m_name_val = r_dict["moment_name"] or "Untitled Moment"
+                t_info = pub_tag_status_by_lc.get(m_name_val.strip().lower())
 
                 published_moments.append({
-                    "moment_name": r_dict["moment_name"] or "Untitled Moment",
+                    "moment_name": m_name_val,
                     "published_at_utc": raw_pub,
                     "published_at_local": pub_local,
                     "published_count": int(r_dict["published_count"] or 0),
@@ -408,7 +412,10 @@ def get_media_metrics():
                     "score_range": f"{min_s:.4f} – {max_s:.4f}" if min_s > 0 else "—",
                     "capture_range": capture_range,
                     "memory_stage": r_dict.get("memory_stage") or "M500",
-                    "curated_count": int(r_dict.get("curated_count") or 0)
+                    "curated_count": int(r_dict.get("curated_count") or 0),
+                    "is_tagged": bool(t_info),
+                    "paradigm_confirmed": bool(t_info and t_info.get("paradigm_confirmed")),
+                    "tag_summary": (t_info or {}).get("tag_summary", ""),
                 })
 
             if published_moments:

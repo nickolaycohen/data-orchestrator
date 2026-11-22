@@ -1244,7 +1244,7 @@ function formatDeviceSummaryCell(ds: BatchDeviceSummary | null | undefined): str
   `;
 }
 
-function renderMomentTaggedBadge(
+export function renderMomentTaggedBadge(
   isTagged?: boolean,
   paradigmConfirmed?: boolean,
   tagSummary?: string,
@@ -4905,8 +4905,9 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
     state.onTagsChanged();
     if (state === publishTagState) {
       publishTagsDirty = false;
-      void Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
     }
+    void Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
+    if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
     const mergedNote = (data.merged_existing_count ?? 0) > 0 ? ` · merged ${data.merged_existing_count} existing DB tag(s)` : '';
     state.saveStatusOk = true;
     state.saveStatusMsg = applyToFolderName
@@ -4964,7 +4965,7 @@ function updateResolveDisjointTargetPreview(): void {
   }
 }
 
-async function openResolveDisjointModal(
+export async function openResolveDisjointModal(
   momentName: string,
   suggestedTarget = '',
   options?: { assetIds?: string[]; isUnassignedCluster?: boolean }
