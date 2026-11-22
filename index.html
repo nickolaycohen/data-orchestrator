@@ -808,8 +808,10 @@
                   <div class="planner-subblock-title-wrap">
                     <span class="planner-step-num step-num-green">2</span>
                     <div>
-                      <div class="planner-subblock-title">Top Actionable Publishing Recommendations (Ready for
-                        Shutterfly / YouTube)</div>
+                      <div class="planner-subblock-title">
+                        Top Actionable Publishing Recommendations (Ready for Shutterfly / YouTube)
+                        <span id="mode-m-rec-status-summary" style="display: inline-flex; gap: 0.3rem; flex-wrap: wrap; margin-left: 0.35rem;"></span>
+                      </div>
                       <div class="planner-subblock-desc">Path 2: Publish threshold-aligned Moments sorted by aesthetic
                         rank (up to 9 assets per batch).</div>
                     </div>
@@ -836,16 +838,20 @@
                       <thead>
                         <tr>
                           <th>Moment Name</th>
+                          <th>Status</th>
                           <th style="text-align: right;">Avg Score</th>
                           <th style="text-align: right;">Curated</th>
                           <th style="text-align: right;">Pub.</th>
+                          <th>ToBeCurated?</th>
+                          <th>Curated?</th>
+                          <th>Can Pub?</th>
                           <th>Recommended Next Action</th>
                           <th>Top Proposed Assets</th>
                         </tr>
                       </thead>
                       <tbody id="mode-m-recs-tbody">
                         <tr>
-                          <td colspan="6" class="text-center text-muted">Loading publishing recommendations...</td>
+                          <td colspan="10" class="text-center text-muted">Loading publishing recommendations...</td>
                         </tr>
                       </tbody>
                     </table>

@@ -2319,13 +2319,36 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
 
   // Step 2: Top Actionable Recommendations Table
   const recBadge = document.getElementById('mode-m-rec-badge');
+  const recStatusSummary = document.getElementById('mode-m-rec-status-summary');
   const recTbody = document.getElementById('mode-m-recs-tbody');
   if (recBadge) recBadge.textContent = `${recs.length} actionable`;
+
+  if (recStatusSummary) {
+    if (!recs.length) {
+      recStatusSummary.innerHTML = '';
+    } else {
+      const m400Cnt = recs.filter(r => r.display_stage === 'M400').length;
+      const m450Cnt = recs.filter(r => r.display_stage === 'M450').length;
+      const tbcReviewCnt = recs.filter(r => r.to_be_curated_exists).length;
+      const cleanCnt = recs.length - tbcReviewCnt;
+      const pills: string[] = [];
+      if (cleanCnt > 0) {
+        pills.push(`<span class="badge badge-xs badge-green font-mono" title="Fully curated with no pending ToBeCurated review">🚀 ${cleanCnt} clean</span>`);
+      }
+      if (tbcReviewCnt > 0) {
+        pills.push(`<span class="badge badge-xs badge-amber font-mono" title="Also has uncurated assets in ToBeCurated needing review">⚠️ ${tbcReviewCnt} TBC</span>`);
+      }
+      if (m400Cnt > 0 || m450Cnt > 0) {
+        pills.push(`<span class="badge badge-xs badge-blue font-mono">M400: ${m400Cnt} · M450: ${m450Cnt}</span>`);
+      }
+      recStatusSummary.innerHTML = pills.join('');
+    }
+  }
 
   if (recTbody) {
     if (!recs.length) {
       recTbody.innerHTML =
-        '<tr><td colspan="6" class="text-center text-muted">No actionable publishing recommendations currently ready.</td></tr>';
+        '<tr><td colspan="10" class="text-center text-muted">No actionable publishing recommendations currently ready.</td></tr>';
     } else {
       recTbody.innerHTML = recs
         .map(r => {
@@ -2333,12 +2356,22 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
           const actionBtnClass = isRepub ? 'btn-purple' : 'btn-green';
           const actionBtn = `<button type="button" class="btn btn-xs ${actionBtnClass} btn-open-publish-moment" data-moment-name="${escapeHtml(r.moment_name)}" title="Open Publish / Republish workflow for '${escapeHtml(r.moment_name)}'">${escapeHtml(r.action)}</button>`;
           const tagBadgeHtml = renderMomentTaggedBadge(r.is_tagged, r.paradigm_confirmed, r.tag_summary);
+          const stage = r.display_stage || 'M400';
+          const tbcStr = r.to_be_curated_exists && (r.to_be_curated_count || 0) > 0
+            ? `⚠️ ${r.to_be_curated_count}`
+            : r.to_be_curated_str || '❌ No';
+          const curStr = r.curated_str || '✅ Yes';
+          const canPubStr = r.can_publish_str || '✅ Yes';
           return `
           <tr data-moment-name="${escapeHtml(r.moment_name)}">
             <td><strong class="text-primary">${escapeHtml(r.moment_name)}</strong>${tagBadgeHtml}</td>
+            <td><span class="badge badge-xs ${cliStageBadgeClass(stage)} font-mono">${escapeHtml(stage)}</span></td>
             <td style="text-align: right;" class="font-mono text-amber">${r.avg_score.toFixed(4)}</td>
             <td style="text-align: right;" class="font-mono">${r.files}</td>
             <td style="text-align: right;" class="font-mono">${r.published}</td>
+            <td class="font-mono" style="white-space: nowrap;" title="ToBeCurated status: ${escapeHtml(r.to_be_curated_str || '❌ No')}">${escapeHtml(tbcStr)}</td>
+            <td class="font-mono" style="white-space: nowrap;" title="Curated LaCie/Photos folder status">${escapeHtml(curStr)}</td>
+            <td class="font-mono" style="white-space: nowrap;" title="Publish readiness / cooldown">${escapeHtml(canPubStr)}</td>
             <td>${actionBtn}</td>
             <td class="font-mono text-muted" style="font-size: 0.69rem; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.details)}">
               ${escapeHtml(r.details)}

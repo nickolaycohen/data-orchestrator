@@ -298,6 +298,13 @@ export interface PlannerModeM {
     published: string;
     action: string;
     details: string;
+    display_stage?: string;
+    to_be_curated_exists?: boolean;
+    to_be_curated_count?: number;
+    to_be_curated_str?: string;
+    curated_str?: string;
+    published_str?: string;
+    can_publish_str?: string;
     is_tagged?: boolean;
     paradigm_confirmed?: boolean;
     tag_summary?: string;

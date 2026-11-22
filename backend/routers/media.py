@@ -3597,6 +3597,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             details_str = ", ".join(bases[:4]) + f" (+{len(bases) - 4} more)"
 
         rec_tagged = bool(t_info) or any(x[0] in tagged_aids for x in md.get("curated_unpublished") or [])
+        sim_row = next((r for r in ranked_moments_sim if r["moment_name"] == name), None)
         actionable_recs.append({
             "idx": 0,
             "moment_name": name,
@@ -3606,6 +3607,13 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             "recommended": len(rec_batch),
             "action": action,
             "details": details_str or "—",
+            "display_stage": sim_row["display_stage"] if sim_row else "M400",
+            "to_be_curated_exists": sim_row["to_be_curated_exists"] if sim_row else False,
+            "to_be_curated_count": sim_row["to_be_curated_count"] if sim_row else 0,
+            "to_be_curated_str": sim_row["to_be_curated_str"] if sim_row else "❌ No",
+            "curated_str": sim_row["curated_str"] if sim_row else "❌ No",
+            "published_str": sim_row["published_str"] if sim_row else "❌ No",
+            "can_publish_str": sim_row["can_publish_str"] if sim_row else "✅ Yes",
             "is_tagged": rec_tagged,
             "paradigm_confirmed": bool(t_info and t_info.get("paradigm_confirmed")),
             "tag_summary": (t_info or {}).get("tag_summary", ""),
