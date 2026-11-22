@@ -46,6 +46,9 @@ class PlannerBatchActionRequest(BaseModel):
     action: str  # "queue" | "remove_queue" | "confirm_500" | "bypass_500" | "demote_400" | "reset_000"
     confirm_missing_month_selection: bool = False
 
+class MonthSelectionCreateEmptyRequest(BaseModel):
+    month: str
+
 class ModeMDedupApplyRequest(BaseModel):
     asset_ids: list[str]
 
@@ -4978,6 +4981,129 @@ def get_planner_month_selection_detail(month: str, live: bool = False):
                 "month_selection": ms_info,
                 "assets": assets_preview,
                 "live_photos_app": live_check,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/planner/month-selection/create-empty")
+def create_empty_month_selection_album(req: MonthSelectionCreateEmptyRequest):
+    """Create an empty month album under Media Organizer on LaCie / Apple Photos Month Selection in Apple Photos."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    m_str = (req.month or "").strip()
+    if not m_str:
+        return {"ok": False, "error": "month is required"}
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            ms_info = _check_apple_month_selection_status(cur, m_str)
+            expected_album = (ms_info.get("expected_album") or m_str).strip()
+
+            try:
+                proc = subprocess.run(
+                    [
+                        "osascript",
+                        "-",
+                        "Media Organizer on LaCie",
+                        "Apple Photos Month Selection",
+                        expected_album,
+                        "1",
+                    ],
+                    input=_MOMENTS_APPLESCRIPT,
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"Failed to run osascript: {e}"}
+
+            stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+            if proc.returncode != 0:
+                return {"ok": False, "error": stderr or stdout or f"AppleScript failed (exit {proc.returncode})"}
+            if stdout.startswith("ERROR|"):
+                return {"ok": False, "error": stdout.split("|", 1)[1]}
+
+            parts = stdout.split("|")
+            action_state = parts[0] if parts and parts[0] else "created"
+
+            # Mirror album immediately into media_organizer_albums so reload sees "Folder is empty" before DB sync catches up
+            top_folder = "Media Organizer on LaCie"
+            parent_folder = "Apple Photos Month Selection"
+            full_path = f"{top_folder}/{parent_folder}/{expected_album}"
+            p_row = cur.execute(
+                """
+                SELECT album_pk, depth FROM media_organizer_albums
+                WHERE is_folder = 1
+                  AND LOWER(TRIM(album_name)) = LOWER(?)
+                  AND LOWER(full_path) LIKE 'media organizer on lacie%'
+                ORDER BY depth ASC, album_pk ASC
+                LIMIT 1
+                """,
+                (parent_folder,),
+            ).fetchone()
+            if p_row:
+                parent_pk = int(p_row[0])
+                depth = int(p_row[1] or 2) + 1
+            else:
+                top_row = cur.execute(
+                    "SELECT album_pk FROM media_organizer_albums WHERE is_folder = 1 AND LOWER(TRIM(album_name)) = LOWER(?) LIMIT 1",
+                    (top_folder,),
+                ).fetchone()
+                top_pk = int(top_row[0]) if top_row else None
+                parent_pk = _allocate_synthetic_album_pk(cur)
+                cur.execute(
+                    """
+                    INSERT INTO media_organizer_albums
+                        (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                    VALUES (?, ?, ?, ?, ?, 1, 2, 4000, 0, datetime('now'))
+                    """,
+                    (parent_pk, parent_folder, top_pk, top_folder, f"{top_folder}/{parent_folder}"),
+                )
+                depth = 3
+
+            alb_row = cur.execute(
+                """
+                SELECT album_pk FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND (
+                      LOWER(full_path) = LOWER(?)
+                      OR (LOWER(TRIM(album_name)) = LOWER(?) AND LOWER(TRIM(COALESCE(parent_folder_name, ''))) = LOWER(?))
+                  )
+                LIMIT 1
+                """,
+                (full_path, expected_album, parent_folder),
+            ).fetchone()
+            if not alb_row:
+                alb_pk = _allocate_synthetic_album_pk(cur)
+                cur.execute(
+                    """
+                    INSERT INTO media_organizer_albums
+                        (album_pk, album_name, parent_folder_pk, parent_folder_name, full_path, is_folder, depth, zkind, asset_count, synced_at_utc)
+                    VALUES (?, ?, ?, ?, ?, 0, ?, 2, 0, datetime('now'))
+                    """,
+                    (alb_pk, expected_album, parent_pk, parent_folder, full_path, depth),
+                )
+            conn.commit()
+            updated_ms = _check_apple_month_selection_status(cur, m_str)
+            return {
+                "ok": True,
+                "month": m_str,
+                "album_name": expected_album,
+                "action_state": action_state,
+                "month_selection": updated_ms,
+                "message": (
+                    f"Created empty folder '{expected_album}' in Apple Photos"
+                    if action_state == "created"
+                    else f"Folder '{expected_album}' already exists in Apple Photos"
+                ),
             }
         finally:
             conn.close()

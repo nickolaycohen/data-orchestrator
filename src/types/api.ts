@@ -804,6 +804,7 @@ declare global {
       month: string,
       opts?: { sourceStep?: 'step2' | 'step3'; queueBlocked?: boolean }
     ) => Promise<void>;
+    createEmptyMonthSelectionFolder: (month: string, expectedAlbum?: string) => Promise<void>;
   }
 }
 

@@ -989,6 +989,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     const syncNoteEl = document.getElementById('ms-detail-sync-note');
     const assetsListEl = document.getElementById('ms-detail-assets-list');
     const btnClose = document.getElementById('btn-ms-detail-close');
+    const btnCreateEmpty = document.getElementById('btn-ms-detail-create-empty') as HTMLButtonElement | null;
     const btnQueueReady = document.getElementById('btn-ms-detail-queue-ready');
     const btnOverride = document.getElementById('btn-ms-detail-override');
 
@@ -996,10 +997,11 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       badgeEl.className = `badge badge-xs font-mono ${
         ms.ready ? 'badge-green' : ms.exists ? 'badge-amber' : 'badge-red'
       }`;
+      const albLabel = ms.matched_album_name || ms.expected_album;
       badgeEl.textContent = ms.ready
         ? `✓ Ready (${ms.asset_count})`
         : ms.exists
-        ? `⚠️ Empty (0 assets)`
+        ? `⚠️ ${albLabel} Folder is empty`
         : `⚠️ Missing Album`;
     }
 
@@ -1099,6 +1101,11 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     if (btnClose) {
       btnClose.textContent = !ms.ready && isStage500 && msDialogQueueBlocked ? 'Close (Keep Blocked)' : 'Close';
     }
+    if (btnCreateEmpty) {
+      btnCreateEmpty.style.display = !ms.exists ? 'inline-flex' : 'none';
+      btnCreateEmpty.dataset.expectedAlbum = ms.expected_album || data.month;
+      btnCreateEmpty.textContent = `📁 Create Empty "${ms.expected_album || data.month}" Folder`;
+    }
     if (btnQueueReady) {
       btnQueueReady.style.display = ms.ready && isStage500 && !data.in_queue ? 'inline-flex' : 'none';
     }
@@ -1158,6 +1165,47 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     setMsDialogOpen(true);
     await loadMonthSelectionDialogData(month, false);
   };
+
+  window.createEmptyMonthSelectionFolder = async function (
+    month: string,
+    expectedAlbum?: string
+  ): Promise<void> {
+    if (msDialogActionPending) return;
+    msDialogActionPending = true;
+    const label = expectedAlbum || month;
+    setMsDialogOpen(false);
+    beginApplePhotosSyncLock(
+      `🍎 Creating empty "${label}" folder in Apple Photos Month Selection — UI paused until sync…`
+    );
+    try {
+      const res = await fetch('/api/media/planner/month-selection/create-empty', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        cancelApplePhotosSyncLock();
+        alert(`Failed to create Apple Photos folder: ${data.error || 'Unknown error'}`);
+        return;
+      }
+      finishApplePhotosActionSyncLock(
+        `✅ ${data.message || `Created '${label}' in Apple Photos`}. Waiting for Background DB Sync to refresh and reload UI…`
+      );
+      await fetchPlannerOverview(true, 'b');
+    } catch (err: any) {
+      cancelApplePhotosSyncLock();
+      alert(`Network error creating folder: ${err?.message || 'Unknown error'}`);
+    } finally {
+      msDialogActionPending = false;
+    }
+  };
+
+  document.getElementById('btn-ms-detail-create-empty')?.addEventListener('click', async e => {
+    if (!msDialogMonth) return;
+    const btn = e.currentTarget as HTMLButtonElement;
+    await window.createEmptyMonthSelectionFolder(msDialogMonth, btn.dataset.expectedAlbum);
+  });
 
   document.querySelectorAll('.btn-close-ms-detail-modal').forEach(btn => {
     btn.addEventListener('click', () => setMsDialogOpen(false));
@@ -1637,20 +1685,32 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
         item.month
       )}', { sourceStep: '${sourceStep}' })" title="Inspect Apple Photos Month Selection folder">Check</button>`;
     }
+    const albLabel = ms.matched_album_name || ms.expected_album;
     const cls = ms.ready ? 'badge-green' : ms.exists ? 'badge-amber' : sourceStep === 'step3' ? 'badge-red' : 'badge-amber';
     const label = ms.ready
-      ? `✓ ${ms.matched_album_name || ms.expected_album} (${ms.asset_count})`
+      ? `✓ ${albLabel} (${ms.asset_count})`
       : ms.exists
-      ? `⚠️ ${ms.matched_album_name || ms.expected_album} (0)`
+      ? `⚠️ ${albLabel} Folder is empty`
       : `⚠️ Missing (${ms.expected_album})`;
     const title = ms.ready
-      ? `Click for details: Apple Photos Month Selection / ${ms.matched_album_name || ms.expected_album} (${ms.asset_count} assets)`
+      ? `Click for details: Apple Photos Month Selection / ${albLabel} (${ms.asset_count} assets)`
       : ms.exists
-      ? `Click for details: Album exists under Apple Photos Month Selection with 0 assets`
-      : `Click for details: Missing album '${ms.expected_album}' under Apple Photos Month Selection`;
-    return `<button type="button" class="badge badge-xs ${cls} font-mono" style="cursor: pointer;" onclick="window.openMonthSelectionDialog('${escapeHtml(
+      ? `Click for details: ${albLabel} Folder exists under Apple Photos Month Selection with 0 assets`
+      : `Click for details: Missing folder '${ms.expected_album}' under Apple Photos Month Selection`;
+    const mainBtn = `<button type="button" class="badge badge-xs ${cls} font-mono" style="cursor: pointer;" onclick="window.openMonthSelectionDialog('${escapeHtml(
       item.month
     )}', { sourceStep: '${sourceStep}' })" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+    if (!ms.exists) {
+      const createBtn = `<button type="button" class="btn btn-xs btn-outline" onclick="window.createEmptyMonthSelectionFolder('${escapeHtml(
+        item.month
+      )}', '${escapeHtml(
+        ms.expected_album
+      )}')" title="Create empty folder '${escapeHtml(
+        ms.expected_album
+      )}' in Apple Photos under Media Organizer on LaCie / Apple Photos Month Selection">📁 Create Folder</button>`;
+      return `<div style="display: inline-flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">${mainBtn}${createBtn}</div>`;
+    }
+    return mainBtn;
   };
 
   // 1. Manual 400 -> 500 Table
