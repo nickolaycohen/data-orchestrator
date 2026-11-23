@@ -111,6 +111,7 @@ export interface CleanupCandidateAsset {
   score_normalized: number;
   score_quartile: number | string;
   assigned_moment: string;
+  asset_tags?: MomentTagItem[];
   last_asset_pub?: string | null;
   media_type: 'video' | 'photo';
   duration_sec: number;
@@ -596,6 +597,7 @@ export interface DisjointDetailAsset {
   duplicate_keeper_moment?: string;
   duplicate_match_tier?: string;
   duplicate_similarity_pct?: number;
+  asset_tags?: MomentTagItem[];
 }
 
 export interface MomentTagItem {

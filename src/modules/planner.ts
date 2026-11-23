@@ -4990,6 +4990,25 @@ function renderResolveDisjointAssets(): void {
         : '';
       const sizeStr = a.file_size_bytes ? ` · ${formatBytes(a.file_size_bytes)}` : '';
       const dateStr = a.date_created_utc ? a.date_created_utc.slice(0, 10) : a.month || '';
+      const assetTagsHtml =
+        a.asset_tags && a.asset_tags.length > 0
+          ? `<div style="display: flex; align-items: center; gap: 0.25rem; margin-top: 0.18rem; flex-wrap: wrap;">${a.asset_tags
+              .map(
+                t =>
+                  `<span class="badge badge-xs ${
+                    t.category === 'family_member'
+                      ? 'badge-green'
+                      : t.category === 'people'
+                        ? 'badge-purple'
+                        : t.category === 'activity'
+                          ? 'badge-blue'
+                          : t.category === 'location'
+                            ? 'badge-amber'
+                            : 'badge-outline'
+                  } font-mono" style="font-size: 0.62rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`
+              )
+              .join('')}</div>`
+          : '';
       return `
         <div class="publish-asset-row${a.is_duplicate_copy ? ' is-dup-copy' : ''}" ${dupTip ? `title="${escapeHtml(dupTip)}"` : ''}>
           <div class="publish-asset-left">
@@ -5008,6 +5027,7 @@ function renderResolveDisjointAssets(): void {
                 <span class="font-mono text-amber" style="font-size: 0.69rem;">Score ${a.score_normalized.toFixed(4)}</span>
                 <span class="font-mono text-muted" style="font-size: 0.68rem;">${escapeHtml(dateStr)}${escapeHtml(sizeStr)}</span>
               </div>
+              ${assetTagsHtml}
             </div>
           </div>
         </div>
@@ -5337,6 +5357,7 @@ async function openCandidateMomentPreview(momentName: string): Promise<void> {
         score_normalized: a.score_normalized,
         score_quartile: a.qualified ? `Top (>${histMinVal.toFixed(4)})` : 'Below Threshold',
         assigned_moment: momentName,
+        asset_tags: a.asset_tags,
         media_type: a.media_type,
         duration_sec: a.duration || 0,
         width: a.width || 0,
@@ -6244,6 +6265,7 @@ export async function openResolveDisjointModal(
         score_normalized: a.score_normalized,
         score_quartile: a.qualified ? `Top (>${histMinVal.toFixed(4)})` : 'Below Threshold',
         assigned_moment: momentName,
+        asset_tags: a.asset_tags,
         media_type: a.media_type,
         duration_sec: a.duration || 0,
         width: a.width || 0,

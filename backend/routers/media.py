@@ -7838,6 +7838,92 @@ def _read_asset_metadata_tags(cur: sqlite3.Cursor, asset_id: str) -> list[dict]:
         return []
 
 
+def _load_per_asset_tags_map(cur: sqlite3.Cursor, asset_ids: list[str]) -> dict[str, list[dict]]:
+    """Return deduplicated individual DB tags mapped by asset_id (combining moment_tags rows and assets.tags_metadata_json)."""
+    clean_ids = [s.strip() for s in asset_ids if s and s.strip()]
+    if not clean_ids:
+        return {}
+    by_aid: dict[str, list[dict]] = {aid: [] for aid in clean_ids}
+    seen_by_aid: dict[str, set[str]] = {aid: set() for aid in clean_ids}
+
+    for off in range(0, len(clean_ids), 400):
+        chunk = clean_ids[off : off + 400]
+        ph = ",".join("?" for _ in chunk)
+        for aid, cat, val, inc in cur.execute(
+            f"""
+            SELECT asset_id, category, tag_value, include_in_name
+            FROM moment_tags
+            WHERE asset_id IN ({ph})
+            ORDER BY id ASC
+            """,
+            chunk,
+        ).fetchall():
+            c_norm = (cat or "").strip().lower()
+            v_norm = re.sub(r"\s+", " ", (val or "").strip())
+            if not aid or c_norm not in _TAG_CAT_DISPLAY or not v_norm:
+                continue
+            v_lc = v_norm.lower()
+            if v_lc not in seen_by_aid[aid]:
+                seen_by_aid[aid].add(v_lc)
+                by_aid[aid].append({"category": c_norm, "tag_value": v_norm, "include_in_name": bool(inc)})
+
+        for aid, raw_json in cur.execute(
+            f"SELECT asset_id, tags_metadata_json FROM assets WHERE asset_id IN ({ph}) AND tags_metadata_json IS NOT NULL",
+            chunk,
+        ).fetchall():
+            if not aid or not raw_json:
+                continue
+            try:
+                parsed = json.loads(raw_json)
+                for t in parsed.get("active_tags") or []:
+                    if not isinstance(t, dict):
+                        continue
+                    c_norm = (t.get("category") or "").strip().lower()
+                    v_norm = re.sub(r"\s+", " ", (t.get("tag_value") or "").strip())
+                    if c_norm not in _TAG_CAT_DISPLAY or not v_norm:
+                        continue
+                    v_lc = v_norm.lower()
+                    if v_lc not in seen_by_aid[aid]:
+                        seen_by_aid[aid].add(v_lc)
+                        by_aid[aid].append(
+                            {
+                                "category": c_norm,
+                                "tag_value": v_norm,
+                                "include_in_name": bool(t.get("include_in_name", True)),
+                            }
+                        )
+            except Exception:
+                pass
+    return by_aid
+
+
+@router.get("/asset-tags/{asset_id}")
+def get_single_asset_tags(asset_id: str):
+    """Return individual saved DB tags for a single asset (used when previewing assets in lightbox)."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "asset_id": asset_id, "tags": []}
+    aid = (asset_id or "").strip()
+    if not aid:
+        return {"ok": False, "asset_id": aid, "tags": []}
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
+        try:
+            cur = conn.cursor()
+            _ensure_moment_tag_tables(cur)
+            tags_map = _load_per_asset_tags_map(cur, [aid])
+            row = cur.execute("SELECT MomentsAlbumName FROM assets WHERE asset_id = ?", (aid,)).fetchone()
+            return {
+                "ok": True,
+                "asset_id": aid,
+                "moment_name": (row[0] or "") if row else "",
+                "tags": tags_map.get(aid, []),
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "asset_id": aid, "tags": [], "error": str(e)}
+
+
 def _backfill_assets_tags_metadata(cur: sqlite3.Cursor) -> int:
     """Populate assets.tags_metadata_json from active moment_tags for assets not yet initialized."""
     rows = cur.execute(
@@ -8102,6 +8188,10 @@ def _load_moment_detail_core(
             a_obj["duplicate_keeper_moment"] = d_info["duplicate_keeper_moment"]
             a_obj["duplicate_match_tier"] = d_info["duplicate_match_tier"]
             a_obj["duplicate_similarity_pct"] = d_info["duplicate_similarity_pct"]
+
+    per_asset_tags = _load_per_asset_tags_map(cur, [a["asset_id"] for a in assets_out])
+    for a_obj in assets_out:
+        a_obj["asset_tags"] = per_asset_tags.get(a_obj["asset_id"], [])
 
     cur.execute(
         """

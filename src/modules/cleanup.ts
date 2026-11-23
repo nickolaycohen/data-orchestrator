@@ -2,7 +2,7 @@
 // Media Cleanup & Storage Reclaim (Mode [C] UI Organizer)
 // ==========================================================================
 
-import type { CleanupCandidateAsset, CleanupDevice, CleanupDevicesResponse } from '../types/api.ts';
+import type { CleanupCandidateAsset, CleanupDevice, CleanupDevicesResponse, MomentTagItem } from '../types/api.ts';
 import {
   candidateAssetMeta,
   escapeHtml,
@@ -1363,6 +1363,38 @@ function updatePreviewGroupControls(): void {
   }
 }
 
+const previewAssetTagsCache = new Map<string, MomentTagItem[]>();
+
+function previewTagBadgeClass(cat: string): string {
+  switch (cat) {
+    case 'family_member':
+      return 'badge-green';
+    case 'people':
+      return 'badge-purple';
+    case 'activity':
+      return 'badge-blue';
+    case 'location':
+      return 'badge-amber';
+    default:
+      return 'badge-outline';
+  }
+}
+
+function renderPreviewAssetTagChips(container: HTMLElement, tags: MomentTagItem[]): void {
+  if (!tags.length) {
+    container.innerHTML = '<span class="text-muted">No individual DB tags recorded for this asset yet.</span>';
+    return;
+  }
+  container.innerHTML = tags
+    .map(
+      t =>
+        `<span class="badge badge-xs ${previewTagBadgeClass(t.category)} font-mono" title="Category: ${escapeHtml(
+          t.category
+        )}">${escapeHtml(t.category)}: ${escapeHtml(t.tag_value)}</span>`
+    )
+    .join('');
+}
+
 function renderCleanupPreviewAsset(assetId: string): void {
   const c = candidateAssetMeta.get(assetId);
   const stage = document.getElementById('cleanup-preview-stage');
@@ -1438,6 +1470,32 @@ function renderCleanupPreviewAsset(assetId: string): void {
   }
   if (momEl) momEl.textContent = c.assigned_moment || '—';
   if (uuidEl) uuidEl.textContent = `Asset UUID: ${c.asset_id}`;
+
+  const tagsEl = document.getElementById('cleanup-preview-tags');
+  if (tagsEl) {
+    if (Array.isArray(c.asset_tags)) {
+      previewAssetTagsCache.set(assetId, c.asset_tags);
+      renderPreviewAssetTagChips(tagsEl, c.asset_tags);
+    } else if (previewAssetTagsCache.has(assetId)) {
+      renderPreviewAssetTagChips(tagsEl, previewAssetTagsCache.get(assetId) || []);
+    } else {
+      tagsEl.innerHTML = '<span class="text-muted">Loading asset tags...</span>';
+      void fetch(`/api/media/asset-tags/${encodeURIComponent(assetId)}`)
+        .then(r => r.json())
+        .then(data => {
+          const tags: MomentTagItem[] = Array.isArray(data?.tags) ? data.tags : [];
+          previewAssetTagsCache.set(assetId, tags);
+          if (previewModalAssetId === assetId) {
+            renderPreviewAssetTagChips(tagsEl, tags);
+          }
+        })
+        .catch(() => {
+          if (previewModalAssetId === assetId) {
+            tagsEl.innerHTML = '<span class="text-muted">—</span>';
+          }
+        });
+    }
+  }
 }
 
 function getAssetCaptureSortValue(assetId: string): { epochMs: number; rawTs: string; filename: string } {
