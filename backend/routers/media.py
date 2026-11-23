@@ -8074,6 +8074,66 @@ def _collect_moment_asset_ids(cur: sqlite3.Cursor, m_name: str) -> list[str]:
     return [r[0] for r in cur.fetchall() if r[0]]
 
 
+def _tag_value_in_folder_name(tag_value: str, folder_name: str) -> bool:
+    """Return True when tag_value appears as a distinct phrase/token inside folder_name."""
+    val_clean = re.sub(r"\s+", " ", (tag_value or "").strip()).lower()
+    folder_clean = re.sub(r"\s+", " ", (folder_name or "").strip()).lower()
+    if not val_clean or not folder_clean:
+        return False
+    return re.search(rf"(?<!\w){re.escape(val_clean)}(?!\w)", folder_clean) is not None
+
+
+def _reconcile_include_in_name_with_folder(
+    tags: list[dict],
+    folder_name: str,
+    *,
+    has_named_session: bool = False,
+) -> list[dict]:
+    """Align tag include_in_name flags with folder_name once a Moment has been named from its tags."""
+    if not tags or not folder_name:
+        return tags
+    is_dated_legacy = bool(re.match(r"^\d{4}-\d{2}", folder_name.strip()))
+    any_match = any(_tag_value_in_folder_name(t.get("tag_value") or "", folder_name) for t in tags)
+    if not (has_named_session or (not is_dated_legacy and any_match)):
+        return tags
+    reconciled: list[dict] = []
+    for t in tags:
+        copy_t = dict(t)
+        copy_t["include_in_name"] = _tag_value_in_folder_name(copy_t.get("tag_value") or "", folder_name)
+        reconciled.append(copy_t)
+    return reconciled
+
+
+def _fetch_moment_summary_tag_rows(cur: sqlite3.Cursor, m_name: str) -> list[dict]:
+    """Fetch per-tag summary rows for a Moment, preferring Moment-level summary (asset_id='') include_in_name flags."""
+    cur.execute(
+        """
+        SELECT
+            category,
+            tag_value,
+            COALESCE(
+                MAX(CASE WHEN asset_id = '' THEN include_in_name ELSE NULL END),
+                MAX(include_in_name)
+            ) AS inc,
+            COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS asset_cnt
+        FROM moment_tags
+        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+        GROUP BY LOWER(tag_value)
+        ORDER BY MIN(id) ASC
+        """,
+        (m_name,),
+    )
+    return [
+        {
+            "category": r[0],
+            "tag_value": r[1],
+            "include_in_name": bool(r[2]),
+            "tagged_asset_count": int(r[3] or 0),
+        }
+        for r in cur.fetchall()
+    ]
+
+
 def _load_moment_detail_core(
     cur: sqlite3.Cursor,
     m_name: str,
@@ -8210,45 +8270,7 @@ def _load_moment_detail_core(
     photos_meta = _load_photos_moment_metadata([a["asset_id"] for a in assets_out])
     name_suggestion = _build_moment_name_suggestion(m_name, assets_out, qual_dates, photos_meta)
 
-    cur.execute(
-        """
-        SELECT
-            category,
-            tag_value,
-            MAX(include_in_name) AS inc,
-            COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS asset_cnt
-        FROM moment_tags
-        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-        GROUP BY LOWER(tag_value)
-        ORDER BY MIN(id) ASC
-        """,
-        (m_name,),
-    )
-    row_saved_tags = [
-        {
-            "category": r[0],
-            "tag_value": r[1],
-            "include_in_name": bool(r[2]),
-            "tagged_asset_count": int(r[3] or 0),
-        }
-        for r in cur.fetchall()
-    ]
-
-    # Merge any active flags persisted in assets.tags_metadata_json with active moment_tags rows
-    asset_meta_tags: list[dict] = []
-    for a_obj in assets_out:
-        asset_meta_tags.extend(_read_asset_metadata_tags(cur, a_obj.get("asset_id") or ""))
-    merged_tags, _ = _merge_tag_lists(asset_meta_tags, row_saved_tags, set())
-    cnt_by_val = {t["tag_value"].lower(): t["tagged_asset_count"] for t in row_saved_tags}
-    saved_tags = [
-        {
-            "category": t["category"],
-            "tag_value": t["tag_value"],
-            "include_in_name": bool(t.get("include_in_name", True)),
-            "tagged_asset_count": cnt_by_val.get(t["tag_value"].lower(), 1 if asset_meta_tags else 0),
-        }
-        for t in merged_tags
-    ]
+    row_saved_tags = _fetch_moment_summary_tag_rows(cur, m_name)
 
     cur.execute(
         """
@@ -8261,14 +8283,46 @@ def _load_moment_detail_core(
         (m_name,),
     )
     sess_row = cur.fetchone()
-    sess_tags_for_summary: list[dict] = saved_tags
+    sess_inc_by_val: dict[str, bool] = {}
+    parsed_sess_tags: list[dict] = []
     if sess_row and sess_row[4]:
         try:
-            parsed_sess = json.loads(sess_row[4])
-            if isinstance(parsed_sess, list) and parsed_sess:
-                sess_tags_for_summary = parsed_sess
+            parsed = json.loads(sess_row[4])
+            if isinstance(parsed, list) and parsed:
+                parsed_sess_tags = parsed
+                for st in parsed:
+                    if isinstance(st, dict) and st.get("tag_value"):
+                        sess_inc_by_val[str(st["tag_value"]).strip().lower()] = bool(st.get("include_in_name", True))
         except Exception:
             pass
+
+    # Merge any active flags persisted in assets.tags_metadata_json with active moment_tags rows
+    asset_meta_tags: list[dict] = []
+    for a_obj in assets_out:
+        asset_meta_tags.extend(_read_asset_metadata_tags(cur, a_obj.get("asset_id") or ""))
+    merged_tags, _ = _merge_tag_lists(asset_meta_tags, row_saved_tags, set())
+    cnt_by_val = {t["tag_value"].lower(): t["tagged_asset_count"] for t in row_saved_tags}
+    row_inc_by_val = {t["tag_value"].lower(): bool(t.get("include_in_name", True)) for t in row_saved_tags}
+    saved_tags = [
+        {
+            "category": t["category"],
+            "tag_value": t["tag_value"],
+            "include_in_name": row_inc_by_val.get(
+                t["tag_value"].lower(),
+                sess_inc_by_val.get(t["tag_value"].lower(), bool(t.get("include_in_name", True))),
+            ),
+            "tagged_asset_count": cnt_by_val.get(t["tag_value"].lower(), 1 if asset_meta_tags else 0),
+        }
+        for t in merged_tags
+    ]
+    has_named_session = bool(sess_row and bool(sess_row[2]))
+    folder_ref = (sess_row[3] or "").strip() if (sess_row and sess_row[2] and (sess_row[3] or "").strip()) else m_name
+    saved_tags = _reconcile_include_in_name_with_folder(
+        saved_tags,
+        folder_ref or m_name,
+        has_named_session=has_named_session,
+    )
+    sess_tags_for_summary: list[dict] = parsed_sess_tags or saved_tags
     metadata_struct = _build_tag_metadata_struct(
         saved_tags,
         session_id=int(sess_row[0]) if sess_row else None,
@@ -8667,6 +8721,11 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 merged_existing_count = 0
 
             composed = (req.composed_name or "").strip()
+            if req.apply_to_folder_name:
+                target_ref = composed or m_name
+                session_tags = _reconcile_include_in_name_with_folder(session_tags, target_ref, has_named_session=True)
+                clean_tags = _reconcile_include_in_name_with_folder(clean_tags, target_ref, has_named_session=True)
+
             cur.execute(
                 """
                 INSERT INTO moment_tag_sessions
@@ -8691,6 +8750,8 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                     if req.merge_existing
                     else clean_tags
                 )
+                if req.apply_to_folder_name:
+                    aid_tags = _reconcile_include_in_name_with_folder(aid_tags, composed or m_name, has_named_session=True)
                 cur.execute(
                     "DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ?",
                     (m_name, aid),
@@ -8712,7 +8773,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                     )
                 _sync_asset_metadata_json(cur, aid, m_name, aid_tags, session_id)
 
-            # Recompute Moment-level summary rows (asset_id = '') as union across active asset rows + session_tags
+            # Recompute Moment-level summary rows (asset_id = '') honoring latest checked flags & folder name
             cur.execute(
                 """
                 SELECT category, tag_value, include_in_name
@@ -8740,6 +8801,10 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 )
             else:
                 moment_summary_tags, _ = _merge_tag_lists(remaining_asset_tags, clean_tags, removed_lc)
+            if req.apply_to_folder_name:
+                moment_summary_tags = _reconcile_include_in_name_with_folder(
+                    moment_summary_tags, composed or m_name, has_named_session=True
+                )
 
             cur.execute(
                 "DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ''",
@@ -8767,29 +8832,12 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 extra_union_tags=moment_summary_tags,
             )
 
-            cur.execute(
-                """
-                SELECT
-                    category,
-                    tag_value,
-                    MAX(include_in_name) AS inc,
-                    COUNT(DISTINCT CASE WHEN asset_id != '' THEN asset_id END) AS asset_cnt
-                FROM moment_tags
-                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-                GROUP BY LOWER(tag_value)
-                ORDER BY MIN(id) ASC
-                """,
-                (m_name,),
+            saved_tags_out = _fetch_moment_summary_tag_rows(cur, m_name)
+            saved_tags_out = _reconcile_include_in_name_with_folder(
+                saved_tags_out,
+                composed or m_name if req.apply_to_folder_name else m_name,
+                has_named_session=bool(req.apply_to_folder_name),
             )
-            saved_tags_out = [
-                {
-                    "category": r[0],
-                    "tag_value": r[1],
-                    "include_in_name": bool(r[2]),
-                    "tagged_asset_count": int(r[3] or 0),
-                }
-                for r in cur.fetchall()
-            ]
 
             row_ts = cur.execute(
                 "SELECT created_at_utc FROM moment_tag_sessions WHERE session_id = ?",
