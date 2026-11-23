@@ -113,6 +113,7 @@ interface TaggingEngineState {
 let resolveDisjointMomentName = '';
 let resolveDisjointIsUnassignedCluster = false;
 let resolveDisjointIsHistoricalMoment = false;
+let resolveDisjointIsCurateM200 = false;
 let resolveDisjointExplicitAssetIds: string[] = [];
 let resolveDisjointAssets: DisjointDetailAsset[] = [];
 const resolveDisjointSelectedIds = new Set<string>();
@@ -911,7 +912,13 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       closeResolveDisjointModal();
       return;
     }
-    openResolveActionConfirmDialog('merge_new');
+    openResolveActionConfirmDialog(resolveDisjointIsCurateM200 ? 'curate' : 'merge_new');
+  });
+  document.getElementById('curate-m200-export-lacie')?.addEventListener('change', () => {
+    if (resolveDisjointIsCurateM200) updateResolveDisjointTargetPreview();
+  });
+  document.getElementById('curate-m200-handle-unselected')?.addEventListener('change', () => {
+    if (resolveDisjointIsCurateM200) updateResolveDisjointSelectionSummary();
   });
   document.getElementById('btn-resolve-disjoint-legacy-merge')?.addEventListener('click', () => {
     openResolveActionConfirmDialog('merge_legacy');
@@ -2072,7 +2079,18 @@ function renderCliSimPendingSection(
           const combinedDetail = filesStr ? `${tbcPrefix}${filesStr} · [${scoresStr}]` : `${tbcPrefix}${scoresStr}`;
 
           let actionCellHtml = `<span class="text-muted font-mono" style="font-size: 0.68rem;">Wait</span>`;
-          if (sub.key === 'publishable_tbc' || sub.key === 'publishable_clean') {
+          if (sub.key === 'publishable_tbc') {
+            actionCellHtml = `<div style="display: inline-flex; gap: 0.3rem; flex-wrap: nowrap;">
+              <button type="button" class="btn btn-xs btn-purple btn-cli-sim-curate" data-moment-name="${escapeHtml(
+                entry.moment_name
+              )}" title="Curate ToBeCurated (${entry.to_be_curated_count}) into Curated & Ignore/Skip rejects">🎨 Curate (${entry.to_be_curated_count})</button>
+              <button type="button" class="btn btn-xs ${
+                entry.published > 0 ? 'btn-purple' : 'btn-green'
+              } btn-cli-sim-publish" data-moment-name="${escapeHtml(
+                entry.moment_name
+              )}" title="Review & publish batch for '${escapeHtml(entry.moment_name)}'">🚀 Publish</button>
+            </div>`;
+          } else if (sub.key === 'publishable_clean') {
             actionCellHtml = `<button type="button" class="btn btn-xs ${
               entry.published > 0 ? 'btn-purple' : 'btn-green'
             } btn-cli-sim-publish" data-moment-name="${escapeHtml(
@@ -2083,7 +2101,9 @@ function renderCliSimPendingSection(
               entry.moment_name
             )}" title="Merge or resolve disjoint moment '${escapeHtml(entry.moment_name)}'">🔀 Resolve</button>`;
           } else if (sub.key === 'pending_curation') {
-            actionCellHtml = `<span class="badge badge-xs badge-purple font-mono">⏳ TBC: ${entry.to_be_curated_count}</span>`;
+            actionCellHtml = `<button type="button" class="btn btn-xs btn-purple btn-cli-sim-curate" data-moment-name="${escapeHtml(
+              entry.moment_name
+            )}" title="Curate ToBeCurated (${entry.to_be_curated_count}) assets into Curated & Ignore/Skip rejects">🎨 Curate (${entry.to_be_curated_count})</button>`;
           } else if (sub.key === 'pending_cooldown') {
             actionCellHtml = `<span class="badge badge-xs badge-outline font-mono">${escapeHtml(entry.can_publish_str)}</span>`;
           }
@@ -2201,7 +2221,7 @@ function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
   let upToDateHeaderPrinted = false;
 
   const consoleBodyHtml = !consoleRows.length
-    ? '<tr><td colspan="12" class="text-center text-muted">No ranked moments in CLI Step 2 console table.</td></tr>'
+    ? '<tr><td colspan="13" class="text-center text-muted">No ranked moments in CLI Step 2 console table.</td></tr>'
     : consoleRows
         .map((m: CliStep2ConsoleMomentRow) => {
           let divider = '';
@@ -2209,19 +2229,25 @@ function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
             needsUpdateHeaderPrinted = true;
             divider = `
               <tr class="cli-sim-divider-row">
-                <td colspan="12">--- Moments Requiring Curation Updates (Run Option [1] to sync proposed assets to ToBeCurated) ---</td>
+                <td colspan="13">--- Moments Requiring Curation Updates (Run Option [1] to sync proposed assets to ToBeCurated) ---</td>
               </tr>
             `;
           } else if (!m.needs_update && !upToDateHeaderPrinted) {
             upToDateHeaderPrinted = true;
             divider = `
               <tr class="cli-sim-divider-row">
-                <td colspan="12">--- Up-To-Date Moments (All qualified assets are already curated or in ToBeCurated) ---</td>
+                <td colspan="13">--- Up-To-Date Moments (All qualified assets are already curated or in ToBeCurated) ---</td>
               </tr>
             `;
           }
           const scoreRange = `${m.avg_score.toFixed(4)} (${m.min_score.toFixed(3)}..${m.max_score.toFixed(3)})`;
           const pubAvgDisplay = m.pub_count > 0 ? `${m.pub_avg_str} (${m.pub_range_str})` : '—';
+          const showCurateBtn = m.display_stage === 'M200' || m.display_stage === 'M300' || m.to_be_curated_exists;
+          const rowActionHtml = showCurateBtn
+            ? `<button type="button" class="btn btn-xs btn-purple btn-cli-sim-curate" data-moment-name="${escapeHtml(
+                m.moment_name
+              )}" title="Open Tagging & M200 Curation dialog (approve keepers ➜ Curated, Ignore/Skip rejects, delete ToBeCurated, export)">🎨 Curate</button>`
+            : '<span class="text-muted font-mono" style="font-size: 0.68rem;">—</span>';
           return `${divider}
             <tr>
               <td class="font-mono text-muted">${m.no}</td>
@@ -2236,6 +2262,7 @@ function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
               <td class="font-mono" style="white-space: nowrap;">${escapeHtml(m.curated_str)}</td>
               <td class="font-mono" style="white-space: nowrap;">${escapeHtml(m.published_str)}</td>
               <td class="font-mono" style="white-space: nowrap;" title="Last Published: ${escapeHtml(m.last_pub_str)}">${escapeHtml(m.can_publish_str)}</td>
+              <td style="white-space: nowrap;">${rowActionHtml}</td>
             </tr>
           `;
         })
@@ -2263,6 +2290,7 @@ function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
               <th>Curated?</th>
               <th>Published?</th>
               <th>Can Publish?</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody>${consoleBodyHtml}</tbody>
@@ -2309,6 +2337,13 @@ function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
     btn.addEventListener('click', () => {
       const momentName = btn.dataset.momentName || '';
       if (momentName) void openResolveDisjointModal(momentName, '', { isHistoricalMoment: true });
+    });
+  });
+
+  contentEl.querySelectorAll<HTMLButtonElement>('.btn-cli-sim-curate').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const momentName = btn.dataset.momentName || '';
+      if (momentName) void openResolveDisjointModal(momentName, '', { isHistoricalMoment: true, isCurateM200: true });
     });
   });
 }
@@ -4886,7 +4921,7 @@ function setResolveDisjointCompletedState(completed: boolean): void {
     btnCancel.disabled = false;
   }
   if (btnLegacy) {
-    btnLegacy.style.display = completed ? 'none' : '';
+    btnLegacy.style.display = completed || resolveDisjointIsCurateM200 ? 'none' : '';
     btnLegacy.disabled = false;
   }
   if (btnSkip) {
@@ -4911,11 +4946,19 @@ function setResolveDisjointCompletedState(completed: boolean): void {
 
 function updateResolveDisjointSelectionSummary(): void {
   const pill = document.getElementById('resolve-disjoint-selected-pill');
+  const selectedCount = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
+  const unselectedCount = Math.max(0, resolveDisjointAssets.length - selectedCount);
   if (pill) {
-    const selectedCount = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
     pill.textContent = `${selectedCount} / ${resolveDisjointAssets.length} selected`;
   }
+  const curateCountsEl = document.getElementById('curate-m200-counts-summary');
+  if (curateCountsEl) {
+    curateCountsEl.textContent = `${selectedCount} keepers ➜ Curated · ${unselectedCount} unselected`;
+  }
   renderResolveDisjointCombineTray();
+  if (resolveDisjointIsCurateM200 && !resolveDisjointCompleted) {
+    updateResolveDisjointTargetPreview();
+  }
 }
 
 function renderResolveDisjointAssets(): void {
@@ -6016,7 +6059,15 @@ function updateResolveDisjointTargetPreview(): void {
   }
 
   if (btnSubmit && !resolveDisjointCompleted) {
-    if (existingInfo.exists) {
+    if (resolveDisjointIsCurateM200) {
+      const selCount = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
+      const exportChecked = (document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null)?.checked ?? true;
+      btnSubmit.textContent = exportChecked
+        ? `✅ Approve Curated & Export (${selCount})`
+        : `✅ Approve into Curated (${selCount})`;
+      btnSubmit.title =
+        'Move selected keepers into Curated/[Target] (+Moments), handle unselected via Ignore/SkipPublishing, delete ToBeCurated album, and export to LaCie if checked';
+    } else if (existingInfo.exists) {
       btnSubmit.textContent = '➕ Add Missing Assets & Tag Existing';
       btnSubmit.title = 'Destination folder already exists — copy only missing assets, update DB tags, and delete disjoint source(s) if checked';
     } else {
@@ -6029,14 +6080,16 @@ function updateResolveDisjointTargetPreview(): void {
 export async function openResolveDisjointModal(
   momentName: string,
   suggestedTarget = '',
-  options?: { assetIds?: string[]; isUnassignedCluster?: boolean; isHistoricalMoment?: boolean }
+  options?: { assetIds?: string[]; isUnassignedCluster?: boolean; isHistoricalMoment?: boolean; isCurateM200?: boolean }
 ): Promise<void> {
   const isUnassigned = Boolean(options?.isUnassignedCluster);
   const isHistorical = Boolean(options?.isHistoricalMoment);
+  const isCurateM200 = Boolean(options?.isCurateM200);
   const explicitIds = (options?.assetIds || []).map(s => (s || '').trim()).filter(Boolean);
   resolveDisjointMomentName = momentName;
   resolveDisjointIsUnassignedCluster = isUnassigned;
   resolveDisjointIsHistoricalMoment = isHistorical;
+  resolveDisjointIsCurateM200 = isCurateM200;
   resolveDisjointExplicitAssetIds = explicitIds;
   resolveDisjointAssets = [];
   resolveDisjointSelectedIds.clear();
@@ -6090,23 +6143,43 @@ export async function openResolveDisjointModal(
   const statusEl = document.getElementById('resolve-disjoint-status');
 
   if (titleEl) {
-    titleEl.textContent = isUnassigned
-      ? `🏷️ Tag & Consolidate Unassigned Group · ${momentName}`
-      : isHistorical
-        ? `🏷️ Tag Historical Moment (All Assets) · ${momentName}`
-        : `🏷️ Tag & Consolidate Moment · ${momentName}`;
+    titleEl.textContent = isCurateM200
+      ? `🎨 Curate M200 Moment (Tag & Approve ➜ Curated) · ${momentName}`
+      : isUnassigned
+        ? `🏷️ Tag & Consolidate Unassigned Group · ${momentName}`
+        : isHistorical
+          ? `🏷️ Tag Historical Moment (All Assets) · ${momentName}`
+          : `🏷️ Tag & Consolidate Moment · ${momentName}`;
   }
   if (badgeEl) badgeEl.textContent = 'loading...';
   if (summaryEl) {
-    summaryEl.innerHTML = isUnassigned
-      ? '<div class="spinner-sm"></div><span>Inspecting unassigned group assets, duplicates, DB tags, and nearby Moment candidates...</span>'
-      : '<div class="spinner-sm"></div><span>Inspecting Moment assets, DB tags, and consolidation candidates...</span>';
+    summaryEl.innerHTML = isCurateM200
+      ? '<div class="spinner-sm"></div><span>Inspecting proposed ToBeCurated Moment assets, DB tags, and Curated destination...</span>'
+      : isUnassigned
+        ? '<div class="spinner-sm"></div><span>Inspecting unassigned group assets, duplicates, DB tags, and nearby Moment candidates...</span>'
+        : '<div class="spinner-sm"></div><span>Inspecting Moment assets, DB tags, and consolidation candidates...</span>';
   }
+  const curateBoxEl = document.getElementById('resolve-disjoint-curate-box');
+  const delSrcRowEl = document.getElementById('resolve-disjoint-delete-source-row');
+  const handleUnselCb = document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null;
+  const unselActionSel = document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null;
+  const delTbcCb = document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null;
+  const exportLacieCb = document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null;
+  if (curateBoxEl) curateBoxEl.style.display = isCurateM200 ? 'flex' : 'none';
+  if (delSrcRowEl) delSrcRowEl.style.display = isCurateM200 ? 'none' : 'flex';
+  if (handleUnselCb) handleUnselCb.checked = true;
+  if (unselActionSel) unselActionSel.value = 'ignore';
+  if (delTbcCb) delTbcCb.checked = true;
+  if (exportLacieCb) exportLacieCb.checked = true;
+
   if (albumsBarEl) albumsBarEl.style.display = 'none';
   if (listEl) listEl.innerHTML = '';
   if (chipsEl) chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">Searching nearby Moments...</span>';
   if (targetInp) targetInp.value = '';
-  if (parentSel) parentSel.value = 'Moments';
+  if (parentSel) {
+    parentSel.value = isCurateM200 ? 'Curated' : 'Moments';
+    parentSel.disabled = isCurateM200;
+  }
   if (delSrcCb) delSrcCb.checked = true;
   if (savePerSrcCb) savePerSrcCb.checked = true;
   if (shareDisjointCb) shareDisjointCb.checked = false;
@@ -6266,7 +6339,7 @@ export async function openResolveDisjointModal(
   }
 }
 
-type ResolveDisjointAction = 'merge_new' | 'merge_legacy' | 'skip_publishing' | 'ignore';
+type ResolveDisjointAction = 'merge_new' | 'merge_legacy' | 'skip_publishing' | 'ignore' | 'curate';
 let pendingResolveConfirmAction: ResolveDisjointAction | null = null;
 
 function addPreviewedCandidateToCombined(): boolean {
@@ -6311,6 +6384,7 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
   const statusEl = document.getElementById('resolve-disjoint-status');
 
   const isMerge = action === 'merge_new' || action === 'merge_legacy';
+  const isCurate = action === 'curate';
   const targetMoment = (targetInp?.value || '').trim();
   const resolvedParent = parentSel?.value || 'Moments';
   const assetIds = Array.from(resolveDisjointSelectedIds);
@@ -6332,10 +6406,17 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     }
   }
 
-  if (isMerge && !targetMoment) {
+  if ((isMerge || isCurate) && !targetMoment) {
     if (statusEl) {
       statusEl.style.display = 'flex';
-      statusEl.innerHTML = '<span class="text-red">❌ Enter or compose a Target Moment Album Name before merging.</span>';
+      statusEl.innerHTML = '<span class="text-red">❌ Enter or compose a Target Moment Album Name first.</span>';
+    }
+    return;
+  }
+  if (isCurate && !assetIds.length) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">❌ Select at least 1 keeper asset to approve into Curated (or use Ignore / Skip Publishing).</span>';
     }
     return;
   }
@@ -6359,7 +6440,63 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
   }
 
   const stepsHtml: string[] = [];
-  if (isMerge) {
+  if (isCurate) {
+    const unselectedAssets = resolveDisjointAssets.filter(a => !resolveDisjointSelectedIds.has(a.asset_id));
+    const handleUnsel = (document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null)?.checked ?? true;
+    const unselMode = (document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null)?.value || 'ignore';
+    const delTbc = (document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null)?.checked ?? true;
+    const exportLacie = (document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null)?.checked ?? true;
+    const isRenamed = targetMoment.toLowerCase() !== resolveDisjointMomentName.toLowerCase();
+
+    titleEl.textContent = '🎨 Confirm M200 Curation Plan';
+    subEl.innerHTML = `Curate <code>${escapeHtml(resolveDisjointMomentName)}</code> ➜ <code>Media Organizer on LaCie / Curated / ${escapeHtml(targetMoment)}</code>`;
+
+    stepsHtml.push(
+      `<strong>Approve ${assetIds.length} keeper asset(s) to Curated:</strong> Copy selected keepers to <code>Media Organizer on LaCie / Curated / ${escapeHtml(
+        targetMoment
+      )}</code> (and ensure <code>Moments / ${escapeHtml(targetMoment)}</code> exists so CLI stays aligned).`
+    );
+    if (isRenamed) {
+      stepsHtml.push(
+        `<strong>Rename &amp; reset Moment Status:</strong> Delete old source Moment albums for <code>${escapeHtml(
+          resolveDisjointMomentName
+        )}</code>, mark old <code>curated_moments.memory_stage</code> as <code>Deleted</code>, reassign kept assets, and initialize <code>${escapeHtml(
+          targetMoment
+        )}</code> stage to <code>M300</code>${exportLacie ? ' ➜ <code>M400</code>' : ''}.`
+      );
+    }
+    if (unselectedAssets.length > 0 && handleUnsel) {
+      stepsHtml.push(
+        unselMode === 'skip_publishing'
+          ? `<strong>Move ${unselectedAssets.length} unselected asset(s) to SkipPublishing:</strong> Add unselected items to <code>Moments / SkipPublishing</code> (excluded from publishing recommendations) and detach from source Moment.`
+          : `<strong>Add ${unselectedAssets.length} unselected asset(s) to Ignore:</strong> Run <code>dedup_ignore --apply</code> for unselected items (marked ignored in Apple Photos &amp; excluded from Mode [M]) and detach from source Moment.`
+      );
+    }
+    if (delTbc) {
+      stepsHtml.push(
+        `<strong>Delete <code>ToBeCurated</code> album cleanly:</strong> Remove <code>ToBeCurated / ${escapeHtml(
+          resolveDisjointMomentName
+        )}</code> in Apple Photos &amp; local DB so curated queues clear.`
+      );
+    }
+    if (sourceTagState.tags.length > 0) {
+      stepsHtml.push(
+        `<strong>Persist DB tags:</strong> Save ${sourceTagState.tags.length} tag(s) onto <code>${escapeHtml(targetMoment)}</code> and its curated assets.`
+      );
+    }
+    if (exportLacie) {
+      stepsHtml.push(
+        `<strong>Final Step — Export to LaCie (Option [2]):</strong> Run <code>export_curated_album.py "${escapeHtml(
+          targetMoment
+        )}"</code> to export originals into <code>/Volumes/LaCie/Media Organizer/Curated/${escapeHtml(
+          targetMoment
+        )}</code>, deduplicate, and promote stage to <code>M400</code>.`
+      );
+    }
+    noteEl.innerHTML = '✅ Selected keepers stay in Curated; rejected items will not reappear in future ToBeCurated syncs.';
+    proceedBtn.className = 'btn btn-purple';
+    proceedBtn.textContent = exportLacie ? '✅ Confirm Curate & Export' : '✅ Confirm Curate into Curated';
+  } else if (isMerge) {
     const existingInfo = getExistingTargetAlbumInfo(resolvedParent, targetMoment);
     const fullTargetPath = `Media Organizer on LaCie / ${resolvedParent} / ${targetMoment}`;
     const extraEntries = Array.from(combinedExtraMoments.values());
@@ -6568,18 +6705,24 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
   const btnIgnore = document.getElementById('btn-resolve-disjoint-ignore') as HTMLButtonElement | null;
 
   const isMerge = action === 'merge_new' || action === 'merge_legacy';
+  const isCurate = action === 'curate';
   const targetMoment = (targetInp?.value || '').trim();
-  if (isMerge && !targetMoment) {
+  if ((isMerge || isCurate) && !targetMoment) {
     if (statusEl) {
       statusEl.style.display = 'flex';
-      statusEl.innerHTML = '<span class="text-red">❌ Enter or compose a Target Moment Album Name before merging.</span>';
+      statusEl.innerHTML = '<span class="text-red">❌ Enter or compose a Target Moment Album Name first.</span>';
     }
     return;
   }
 
   const resolvedParent = parentSel?.value || 'Moments';
-  const assetIds = Array.from(resolveDisjointSelectedIds);
-  if ((action === 'skip_publishing' || action === 'ignore') && !assetIds.length) {
+  const assetIds = resolveDisjointAssets
+    .filter(a => resolveDisjointSelectedIds.has(a.asset_id))
+    .map(a => a.asset_id);
+  const unselectedIds = resolveDisjointAssets
+    .filter(a => !resolveDisjointSelectedIds.has(a.asset_id))
+    .map(a => a.asset_id);
+  if ((action === 'skip_publishing' || action === 'ignore' || isCurate) && !assetIds.length) {
     if (statusEl) {
       statusEl.style.display = 'flex';
       statusEl.innerHTML = '<span class="text-red">❌ Select at least 1 asset first.</span>';
@@ -6599,7 +6742,7 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
     tags.map(t => ({ category: t.category, tag_value: t.tag_value, include_in_name: t.include_in_name }));
 
   const momentTagGroups: Array<{ moment_name: string; asset_ids: string[]; tags: Array<{ category: string; tag_value: string; include_in_name: boolean }> }> = [];
-  if (action === 'merge_new' && savePerSource) {
+  if ((action === 'merge_new' || isCurate) && savePerSource) {
     if (sourceTagState.tags.length && assetIds.length) {
       momentTagGroups.push({
         moment_name: resolveDisjointMomentName,
@@ -6619,7 +6762,7 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
   }
 
   const applyTags =
-    action === 'merge_new' && shareDisjoint ? toCleanTags(sourceTagState.tags) : [];
+    (action === 'merge_new' || isCurate) && (shareDisjoint || isCurate) ? toCleanTags(sourceTagState.tags) : [];
 
   isSubmittingResolveDisjoint = true;
   if (btnSubmit) btnSubmit.disabled = true;
@@ -6627,8 +6770,9 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
   if (btnSkip) btnSkip.disabled = true;
   if (btnIgnore) btnIgnore.disabled = true;
 
-  const actionLabel =
-    action === 'merge_new'
+  const actionLabel = isCurate
+    ? `Curating "${resolveDisjointMomentName}" -> Curated/${targetMoment}...`
+    : action === 'merge_new'
       ? `Consolidating ${1 + additionalMoments.length} Moment(s) & tagging into "${resolvedParent}/${targetMoment}"...`
       : action === 'merge_legacy'
         ? `Merging into existing target "${resolvedParent}/${targetMoment}" via AppleScript...`
@@ -6644,23 +6788,48 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
 
   let succeeded = false;
   try {
-    const res = await fetch('/api/media/memories/resolve-disjoint', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        source_moment: resolveDisjointMomentName,
-        action: isMerge ? 'merge' : action,
-        target_moment: isMerge ? targetMoment : null,
-        target_parent_folder: resolvedParent,
-        asset_ids: assetIds,
-        additional_moments: additionalMoments,
-        additional_asset_ids: additionalAssetIds,
-        apply_tags: applyTags,
-        moment_tag_groups: momentTagGroups,
-        delete_source_albums: Boolean(delSrcCb?.checked ?? true),
-        is_unassigned_cluster: resolveDisjointIsUnassignedCluster
-      })
-    });
+    let res: Response;
+    if (isCurate) {
+      const handleUnsel = (document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null)?.checked ?? true;
+      const unselAction = handleUnsel
+        ? ((document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null)?.value || 'ignore')
+        : 'none';
+      const delTbc = (document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null)?.checked ?? true;
+      const exportLacie = (document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null)?.checked ?? true;
+      res = await fetch('/api/media/memories/curate-moment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_moment: resolveDisjointMomentName,
+          target_moment: targetMoment,
+          selected_asset_ids: assetIds,
+          unselected_asset_ids: unselectedIds,
+          unselected_action: unselAction,
+          delete_tbc_album: delTbc,
+          export_to_lacie: exportLacie,
+          apply_tags: applyTags,
+          moment_tag_groups: momentTagGroups
+        })
+      });
+    } else {
+      res = await fetch('/api/media/memories/resolve-disjoint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_moment: resolveDisjointMomentName,
+          action: isMerge ? 'merge' : action,
+          target_moment: isMerge ? targetMoment : null,
+          target_parent_folder: resolvedParent,
+          asset_ids: assetIds,
+          additional_moments: additionalMoments,
+          additional_asset_ids: additionalAssetIds,
+          apply_tags: applyTags,
+          moment_tag_groups: momentTagGroups,
+          delete_source_albums: Boolean(delSrcCb?.checked ?? true),
+          is_unassigned_cluster: resolveDisjointIsUnassignedCluster
+        })
+      });
+    }
     const rawText = await res.text();
     let data: ResolveDisjointResponse;
     try {
@@ -6680,6 +6849,13 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
         statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
       }
       return;
+    }
+
+    if (isCurate && ((data as any).export_error || (data as any).unselected_error)) {
+      const warnParts: string[] = [];
+      if ((data as any).unselected_error) warnParts.push(`Unselected step: ${(data as any).unselected_error}`);
+      if ((data as any).export_error) warnParts.push(`LaCie export step: ${(data as any).export_error}`);
+      alert(`Apple Photos curation saved, with warning:\n${warnParts.join('\n')}`);
     }
 
     if (resolveDisjointIsUnassignedCluster) {

@@ -2650,12 +2650,39 @@
                   style="font-size: 0.74rem; font-weight: 500; white-space: nowrap;"></span>
               </div>
             </div>
-            <label
+            <label id="resolve-disjoint-delete-source-row"
               style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem; cursor: pointer; color: var(--text-secondary);">
               <input type="checkbox" id="resolve-disjoint-delete-source" checked />
               <span>Delete disjoint / source album(s) if they exist &amp; migrate all DB Moment assignments to
                 target</span>
             </label>
+
+            <div id="resolve-disjoint-curate-box"
+              style="display: none; padding: 0.6rem 0.75rem; border-radius: 8px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.32); flex-direction: column; gap: 0.45rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                <strong style="font-size: 0.77rem; color: #a7f3d0;">🎨 M200 Curation Workflow (ToBeCurated ➜ Curated ➜ Export)</strong>
+                <span id="curate-m200-counts-summary" class="badge badge-xs badge-green font-mono">0 keepers · 0 unselected</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; font-size: 0.74rem; color: var(--text-secondary);">
+                <label style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+                  <input type="checkbox" id="curate-m200-handle-unselected" checked />
+                  <span>For unselected items:</span>
+                </label>
+                <select id="curate-m200-unselected-action" class="form-control"
+                  style="width: auto; min-width: 240px; font-size: 0.72rem; padding: 0.2rem 0.45rem;">
+                  <option value="ignore" selected>🗑️ Add to Ignore folder (not needed / exclude)</option>
+                  <option value="skip_publishing">⏭️ Move to SkipPublishing (similar exists / personal judgment)</option>
+                </select>
+              </div>
+              <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
+                <input type="checkbox" id="curate-m200-delete-tbc" checked />
+                <span>Delete source <code>ToBeCurated</code> album in Apple Photos cleanly (and old Moment folder on rename)</span>
+              </label>
+              <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
+                <input type="checkbox" id="curate-m200-export-lacie" checked />
+                <span>Run final step: export <code>Curated / Target</code> to LaCie &amp; promote stage to <code>M400</code> (Option [2])</span>
+              </label>
+            </div>
           </div>
 
           <div id="resolve-disjoint-status" class="dedup-status-banner" style="display: none; font-size: 0.76rem;">
