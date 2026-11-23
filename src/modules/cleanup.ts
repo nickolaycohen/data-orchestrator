@@ -29,6 +29,9 @@ export interface PreviewGroupContext {
   groupLabel?: string;
   hideMarkRemoved?: boolean;
   onRemoveFromGroup?: (assetId: string) => Promise<boolean | void>;
+  selectedIds?: Set<string>;
+  selectableAssetIds?: Set<string>;
+  onSelectionChange?: (assetId: string, selected: boolean, selectedIds: Set<string>) => void;
 }
 
 let pendingRemovalAssetIds: string[] = [];
@@ -38,6 +41,9 @@ let previewGroupIndex = -1;
 let previewGroupLabel: string | null = null;
 let previewHideMarkRemoved = false;
 let previewRemoveFromGroupCb: ((assetId: string) => Promise<boolean | void>) | null = null;
+let previewSelectedIds: Set<string> | null = null;
+let previewSelectableIds: Set<string> | null = null;
+let previewSelectionChangeCb: ((assetId: string, selected: boolean, selectedIds: Set<string>) => void) | null = null;
 let previewSortMode: 'timestamp' | 'score' = 'timestamp';
 let isFetchingCleanupDevices = false;
 let isFetchingCleanupCandidates = false;
@@ -239,6 +245,10 @@ export function setupMediaCleanup(): void {
     openCleanupConfirmModal([aid]);
   });
 
+  document.getElementById('btn-preview-toggle-select')?.addEventListener('click', () => {
+    togglePreviewAssetSelection();
+  });
+
   document.getElementById('btn-preview-remove-from-group')?.addEventListener('click', async () => {
     if (!previewModalAssetId || !previewRemoveFromGroupCb) return;
     const btn = document.getElementById('btn-preview-remove-from-group') as HTMLButtonElement | null;
@@ -301,8 +311,9 @@ export function setupMediaCleanup(): void {
     const modal = document.getElementById('modal-cleanup-preview');
     if (!modal?.classList.contains('open')) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    const targetTag = (e.target as HTMLElement)?.tagName;
-    if (targetTag === 'INPUT' || targetTag === 'TEXTAREA') return;
+    const targetEl = e.target as HTMLElement | null;
+    const targetTag = targetEl?.tagName;
+    if (targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT') return;
 
     if (e.key === 'ArrowLeft') {
       e.preventDefault();
@@ -310,6 +321,15 @@ export function setupMediaCleanup(): void {
     } else if (e.key === 'ArrowRight') {
       e.preventDefault();
       navigateCleanupPreview(1);
+    } else if ((e.key === ' ' || e.code === 'Space') && previewSelectedIds) {
+      if (
+        targetTag === 'VIDEO' ||
+        targetEl?.closest('.modal-footer button, .cleanup-preview-sort-btn, .btn-close-modal')
+      ) {
+        return;
+      }
+      e.preventDefault();
+      togglePreviewAssetSelection();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       closeCleanupPreviewModal();
@@ -848,7 +868,10 @@ function renderCleanupIphoneGrid(): void {
       const groupLabel = selectedCleanupDevice
         ? `${selectedCleanupDevice.device_name || selectedCleanupDevice.camera_model || 'Cleanup'} (Current Page)`
         : 'Cleanup Candidates (Current Page)';
-      openCleanupPreviewModal(aid, { assetIds: pageAssetIds, groupLabel });
+      openCleanupPreviewModal(
+        aid,
+        pageAssetIds.length ? buildCleanupPagePreviewContext(groupLabel) : { ...buildCleanupPagePreviewContext(groupLabel), assetIds: [aid] }
+      );
     });
   });
 }
@@ -1123,11 +1146,10 @@ export async function fetchCleanupCandidates(): Promise<void> {
         e.stopPropagation();
         const aid = el.dataset.previewAssetId || el.dataset.assetId;
         if (!aid) return;
-        const pageAssetIds = currentCandidateList.map(item => item.asset_id).filter(Boolean);
         const groupLabel = selectedCleanupDevice
           ? `${selectedCleanupDevice.device_name || selectedCleanupDevice.camera_model || 'Cleanup'} (Current Page)`
           : 'Cleanup Candidates (Current Page)';
-        openCleanupPreviewModal(aid, { assetIds: pageAssetIds, groupLabel });
+        openCleanupPreviewModal(aid, buildCleanupPagePreviewContext(groupLabel));
       });
     });
 
@@ -1238,6 +1260,94 @@ function formatSeriesFilenamesSummary(assetIds: string[]): string | null {
   return `${sortedNames[0]} … ${sortedNames[sortedNames.length - 1]}`;
 }
 
+function syncCleanupSelectionDOM(assetId: string, checked: boolean): void {
+  const escId = CSS.escape(assetId);
+  const gridCb = document.querySelector<HTMLInputElement>(`.cleanup-grid-checkbox[data-asset-id="${escId}"]`);
+  if (gridCb) {
+    gridCb.checked = checked;
+    gridCb.closest('.cleanup-iphone-tile')?.classList.toggle('selected', checked);
+  }
+  const tableCb = document.querySelector<HTMLInputElement>(`.cleanup-asset-checkbox[data-asset-id="${escId}"]`);
+  if (tableCb) {
+    tableCb.checked = checked;
+    tableCb.closest('tr')?.classList.toggle('selected', checked);
+  }
+  updateCleanupSelectionBar();
+}
+
+function buildCleanupPagePreviewContext(groupLabel: string): PreviewGroupContext {
+  const pageAssetIds = currentCandidateList.map(item => item.asset_id).filter(Boolean);
+  return {
+    assetIds: pageAssetIds,
+    groupLabel,
+    selectedIds: selectedCandidateAssetIds,
+    onSelectionChange: (changedId, checked) => syncCleanupSelectionDOM(changedId, checked)
+  };
+}
+
+function isPreviewAssetSelectable(assetId: string | null): boolean {
+  if (!assetId || !previewSelectedIds) return false;
+  if (previewSelectableIds && !previewSelectableIds.has(assetId)) return false;
+  return true;
+}
+
+function syncPreviewSelectionControls(): void {
+  const btnToggle = document.getElementById('btn-preview-toggle-select') as HTMLButtonElement | null;
+  const selectableIds = previewSelectableIds
+    ? previewGroupAssetIds.filter(id => previewSelectableIds!.has(id))
+    : previewGroupAssetIds;
+  const totalCount = selectableIds.length || (previewModalAssetId ? 1 : 0);
+  const selectedCount = previewSelectedIds
+    ? selectableIds.filter(id => previewSelectedIds!.has(id)).length
+    : 0;
+
+  if (btnToggle) {
+    if (previewSelectedIds && isPreviewAssetSelectable(previewModalAssetId)) {
+      const isSelected = previewSelectedIds.has(previewModalAssetId!);
+      btnToggle.style.display = 'inline-flex';
+      btnToggle.classList.toggle('is-selected', isSelected);
+      btnToggle.classList.toggle('is-unselected', !isSelected);
+      const countSuffix = totalCount > 1 ? ` · ${selectedCount}/${totalCount}` : '';
+      btnToggle.textContent = `${isSelected ? '☑ Selected' : '☐ Unselected'}${countSuffix}`;
+      btnToggle.title = isSelected
+        ? 'Selected in parent list — click or press Space to unselect'
+        : 'Unselected in parent list — click or press Space to select';
+    } else {
+      btnToggle.style.display = 'none';
+      btnToggle.classList.remove('is-selected', 'is-unselected');
+    }
+  }
+
+  const strip = document.getElementById('cleanup-preview-filmstrip');
+  if (strip) {
+    strip.querySelectorAll<HTMLElement>('.cleanup-preview-thumb-item').forEach(item => {
+      const aid = item.dataset.assetId || '';
+      const selectable = isPreviewAssetSelectable(aid);
+      const isSelected = Boolean(selectable && previewSelectedIds?.has(aid));
+      item.classList.toggle('has-selection-mode', selectable);
+      item.classList.toggle('is-selected', selectable && isSelected);
+      item.classList.toggle('is-unselected', selectable && !isSelected);
+      const selBadge = item.querySelector<HTMLElement>('.cleanup-preview-thumb-sel');
+      if (selBadge) {
+        selBadge.classList.toggle('is-selected', isSelected);
+        selBadge.classList.toggle('is-unselected', !isSelected);
+        selBadge.textContent = isSelected ? '✓' : '☐';
+        selBadge.title = isSelected ? 'Selected (click to unselect)' : 'Unselected (click to select)';
+      }
+    });
+  }
+}
+
+function togglePreviewAssetSelection(targetAssetId?: string | null): void {
+  const aid = targetAssetId || previewModalAssetId;
+  if (!aid || !previewSelectedIds || !isPreviewAssetSelectable(aid)) return;
+  const nextSelected = !previewSelectedIds.has(aid);
+  if (nextSelected) previewSelectedIds.add(aid);
+  else previewSelectedIds.delete(aid);
+  syncPreviewSelectionControls();
+  previewSelectionChangeCb?.(aid, nextSelected, previewSelectedIds);
+}
+
 function renderPreviewFilmstrip(): void {
   const stripWrap = document.getElementById('cleanup-preview-filmstrip-wrap');
   const strip = document.getElementById('cleanup-preview-filmstrip');
@@ -1289,11 +1399,18 @@ function renderPreviewFilmstrip(): void {
           ? `★ ${scoreVal}${shortTs !== '—' ? ` · ${shortTs.slice(5, 16)}` : ''}`
           : shortTs;
       const tooltipParts = [`#${idx + 1} ${filename}`, captureTs, scoreLabel, isDupCopy ? '· ♻️ Photos Dup Copy' : ''].filter(Boolean).join(' ');
+      const selectable = isPreviewAssetSelectable(aid);
+      const isSelected = Boolean(selectable && previewSelectedIds?.has(aid));
+      const selCls = selectable ? ` has-selection-mode ${isSelected ? 'is-selected' : 'is-unselected'}` : '';
+      const selBadgeHtml = selectable
+        ? `<span class="cleanup-preview-thumb-sel ${isSelected ? 'is-selected' : 'is-unselected'}" data-toggle-preview-select="${escapeHtml(aid)}" title="${isSelected ? 'Selected (click to unselect)' : 'Unselected (click to select)'}">${isSelected ? '✓' : '☐'}</span>`
+        : '';
       return `
-        <button type="button" class="cleanup-preview-thumb-item${idx === previewGroupIndex ? ' active' : ''}${isDupCopy ? ' is-dup-copy' : ''}" data-preview-index="${idx}" title="${escapeHtml(tooltipParts)}">
+        <button type="button" class="cleanup-preview-thumb-item${idx === previewGroupIndex ? ' active' : ''}${isDupCopy ? ' is-dup-copy' : ''}${selCls}" data-preview-index="${idx}" data-asset-id="${escapeHtml(aid)}" title="${escapeHtml(tooltipParts)}">
           <div class="cleanup-preview-thumb-media">
             <img src="${thumbUrl}" loading="lazy" alt="${escapeHtml(filename)}" onerror="this.style.display='none'" />
             <span class="cleanup-preview-thumb-idx">#${idx + 1}${isDupCopy ? ' ♻️' : ''}</span>
+            ${selBadgeHtml}
             ${isVideo ? '<span class="cleanup-preview-thumb-play">▶</span>' : ''}
           </div>
           <span class="cleanup-preview-thumb-caption">${escapeHtml(filename)}</span>
@@ -1302,6 +1419,15 @@ function renderPreviewFilmstrip(): void {
       `;
     })
     .join('');
+
+  strip.querySelectorAll<HTMLElement>('.cleanup-preview-thumb-sel').forEach(badge => {
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const targetId = badge.dataset.togglePreviewSelect;
+      if (targetId) togglePreviewAssetSelection(targetId);
+    });
+  });
 
   strip.querySelectorAll<HTMLElement>('.cleanup-preview-thumb-item').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1496,6 +1622,7 @@ function renderCleanupPreviewAsset(assetId: string): void {
         });
     }
   }
+  syncPreviewSelectionControls();
 }
 
 function getAssetCaptureSortValue(assetId: string): { epochMs: number; rawTs: string; filename: string } {
@@ -1590,10 +1717,14 @@ export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupC
   previewGroupLabel = context?.groupLabel || null;
   previewHideMarkRemoved = Boolean(context?.hideMarkRemoved || context?.onRemoveFromGroup);
   previewRemoveFromGroupCb = context?.onRemoveFromGroup || null;
+  previewSelectedIds = context?.selectedIds || null;
+  previewSelectableIds = context?.selectableAssetIds || null;
+  previewSelectionChangeCb = context?.onSelectionChange || null;
 
   renderCleanupPreviewAsset(assetId);
   applyPreviewSortOrder();
   syncPreviewFooterActionButtons();
+  syncPreviewSelectionControls();
 
   modal.classList.add('open');
 }
@@ -1624,6 +1755,10 @@ export function closeCleanupPreviewModal(): void {
   previewGroupLabel = null;
   previewHideMarkRemoved = false;
   previewRemoveFromGroupCb = null;
+  previewSelectedIds = null;
+  previewSelectableIds = null;
+  previewSelectionChangeCb = null;
+  syncPreviewSelectionControls();
   syncPreviewFooterActionButtons();
 }
 

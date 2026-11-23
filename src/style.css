@@ -2957,6 +2957,60 @@ body {
   background: rgba(124, 92, 255, 0.28);
 }
 
+.cleanup-preview-thumb-item.has-selection-mode.is-unselected {
+  opacity: 0.42;
+}
+
+.cleanup-preview-thumb-item.has-selection-mode.is-unselected:hover {
+  opacity: 0.85;
+}
+
+.cleanup-preview-thumb-item.has-selection-mode.is-selected:not(.active) {
+  border-color: rgba(16, 185, 129, 0.55);
+}
+
+.cleanup-preview-thumb-sel {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  width: 17px;
+  height: 17px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.cleanup-preview-thumb-sel.is-selected {
+  background: rgba(16, 185, 129, 0.92);
+  border: 1px solid rgba(110, 231, 183, 0.9);
+  color: #052e16;
+}
+
+.cleanup-preview-thumb-sel.is-unselected {
+  background: rgba(5, 7, 12, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  color: #94a3b8;
+}
+
+.cleanup-preview-select-btn.is-selected {
+  background: rgba(16, 185, 129, 0.16);
+  border-color: rgba(16, 185, 129, 0.65);
+  color: #6ee7b7;
+}
+
+.cleanup-preview-select-btn.is-unselected {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(148, 163, 184, 0.4);
+  color: var(--text-secondary);
+}
+
 .cleanup-preview-thumb-idx {
   position: absolute;
   top: 2px;

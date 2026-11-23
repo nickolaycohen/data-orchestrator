@@ -3506,6 +3506,25 @@ function renderUnassignedClustersList(): void {
       const cardEl = el.closest<HTMLElement>('.unassigned-cluster-card');
       const folder = cardEl?.dataset.clusterFolder;
       const groupAssetIds = folder ? clusterPreviewAssetIds.get(folder) : undefined;
+      if (folder && !clusterAssetSelection.has(folder)) {
+        clusterAssetSelection.set(folder, new Set());
+      }
+      const selSet = folder ? clusterAssetSelection.get(folder) : undefined;
+      const onSelectionChange =
+        folder && cardEl && selSet
+          ? (changedId: string, checked: boolean) => {
+              const cb = cardEl.querySelector<HTMLInputElement>(
+                `.cluster-asset-checkbox[data-asset-id="${CSS.escape(changedId)}"]`
+              );
+              if (cb) cb.checked = checked;
+              const masterCb = cardEl.querySelector<HTMLInputElement>('.cluster-select-all-checkbox');
+              if (masterCb) {
+                const allCbs = Array.from(cardEl.querySelectorAll<HTMLInputElement>('.cluster-asset-checkbox'));
+                masterCb.checked = allCbs.length > 0 && allCbs.every(item => item.checked);
+              }
+              syncClusterToolbarUI(cardEl, folder);
+            }
+          : undefined;
       openCleanupPreviewModal(
         aid,
         groupAssetIds && groupAssetIds.length > 0
@@ -3513,11 +3532,13 @@ function renderUnassignedClustersList(): void {
               assetIds: groupAssetIds,
               groupLabel: folder,
               hideMarkRemoved: true,
+              selectedIds: selSet,
+              onSelectionChange,
               onRemoveFromGroup:
                 groupAssetIds.length > 1 && folder
                   ? async (removingAid: string) => {
-                      const selSet = clusterAssetSelection.get(folder);
-                      if (selSet) selSet.delete(removingAid);
+                      const activeSet = clusterAssetSelection.get(folder);
+                      if (activeSet) activeSet.delete(removingAid);
                       return await updateGroupingRules({
                         split_asset_ids: [removingAid],
                         split_target_group: '__INDIVIDUAL__',
@@ -3526,7 +3547,7 @@ function renderUnassignedClustersList(): void {
                     }
                   : undefined
             }
-          : { assetIds: [aid], hideMarkRemoved: true }
+          : { assetIds: [aid], hideMarkRemoved: true, selectedIds: selSet, onSelectionChange }
       );
     });
   });
@@ -3803,7 +3824,23 @@ function renderDedupModalResults(data: ModeMDedupPreviewResponse): void {
         const aid = img.dataset.dedupPreview;
         const pairIds = (img.dataset.dedupPair || '').split(',').filter(Boolean);
         if (aid) {
-          openCleanupPreviewModal(aid, { assetIds: pairIds, groupLabel: 'Duplicate vs Keeper', hideMarkRemoved: true });
+          openCleanupPreviewModal(aid, {
+            assetIds: pairIds,
+            groupLabel: 'Duplicate vs Keeper',
+            hideMarkRemoved: true,
+            selectedIds: selectedDedupAssetIds,
+            selectableAssetIds: pairIds.length > 0 ? new Set([pairIds[0]]) : undefined,
+            onSelectionChange: (changedId, checked) => {
+              const cb = listEl.querySelector<HTMLInputElement>(
+                `.dedup-item-checkbox[data-dup-id="${CSS.escape(changedId)}"]`
+              );
+              if (cb) {
+                cb.checked = checked;
+                cb.closest('.dedup-pair-card')?.classList.toggle('selected', checked);
+              }
+              updateDedupSelectionUI();
+            }
+          });
         }
       });
     });
@@ -5052,7 +5089,15 @@ function renderResolveDisjointAssets(): void {
         openCleanupPreviewModal(aid, {
           assetIds: allAssetIds,
           groupLabel: resolveDisjointMomentName,
-          hideMarkRemoved: true
+          hideMarkRemoved: true,
+          selectedIds: resolveDisjointSelectedIds,
+          onSelectionChange: (changedId, checked) => {
+            const cb = listEl.querySelector<HTMLInputElement>(
+              `.resolve-disjoint-asset-cb[data-asset-id="${CSS.escape(changedId)}"]`
+            );
+            if (cb) cb.checked = checked;
+            updateResolveDisjointSelectionSummary();
+          }
         });
       }
     });
@@ -5409,7 +5454,14 @@ async function openCandidateMomentPreview(momentName: string): Promise<void> {
           openCleanupPreviewModal(aid, {
             assetIds: allIds,
             groupLabel: momentName,
-            hideMarkRemoved: true
+            hideMarkRemoved: true,
+            selectedIds: previewedCandidateSelectedIds,
+            onSelectionChange: (changedId, checked) => {
+              const cb = gridEl.querySelector<HTMLInputElement>(
+                `.candidate-preview-cb[data-asset-id="${CSS.escape(changedId)}"]`
+              );
+              if (cb) cb.checked = checked;
+            }
           });
         }
       });
