@@ -5830,8 +5830,32 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
     closeAllDropdowns(menuEl);
     const catMeta = cats.find(c => c.key === catKey);
     populateTagCategoryDropdownMenu(menuEl, state, catKey, catMeta?.label || catKey, filterVal);
+    menuEl.classList.remove('open-upward');
+    menuEl.style.maxHeight = '';
     menuEl.classList.add('open');
+
+    const anchorEl = menuEl.parentElement || menuEl;
+    const rect = anchorEl.getBoundingClientRect();
+    const clipEl = menuEl.closest<HTMLElement>('.modal-body');
+    const clipRect = clipEl ? clipEl.getBoundingClientRect() : null;
+    const visibleBottom = clipRect ? Math.min(window.innerHeight, clipRect.bottom) : window.innerHeight;
+    const visibleTop = clipRect ? Math.max(0, clipRect.top) : 0;
+    const spaceBelow = visibleBottom - rect.bottom - 10;
+    const spaceAbove = rect.top - visibleTop - 10;
+    if (spaceBelow < 180 && spaceAbove > spaceBelow) {
+      menuEl.classList.add('open-upward');
+      menuEl.style.maxHeight = `${Math.max(120, Math.min(280, Math.floor(spaceAbove)))}px`;
+    } else {
+      menuEl.style.maxHeight = `${Math.max(120, Math.min(280, Math.floor(spaceBelow)))}px`;
+    }
   };
+
+  mountEl.querySelectorAll<HTMLElement>('.tag-category-dropdown-menu').forEach(menuEl => {
+    menuEl.addEventListener('mousedown', (e) => {
+      // Prevent input blur when clicking or dragging the dropdown scrollbar
+      e.preventDefault();
+    });
+  });
 
   mountEl.querySelectorAll<HTMLButtonElement>('.tag-category-dropdown-toggle').forEach(btn => {
     btn.addEventListener('mousedown', (e) => {
