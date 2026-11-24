@@ -912,7 +912,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
       closeResolveDisjointModal();
       return;
     }
-    openResolveActionConfirmDialog(resolveDisjointIsCurateM200 ? 'curate' : 'merge_new');
+    openResolveActionConfirmDialog(isM200DirectCurateTarget() ? 'curate' : 'merge_new');
   });
   document.getElementById('curate-m200-export-lacie')?.addEventListener('change', () => {
     if (resolveDisjointIsCurateM200) updateResolveDisjointTargetPreview();
@@ -4990,7 +4990,13 @@ function updateResolveDisjointSelectionSummary(): void {
   }
   const curateCountsEl = document.getElementById('curate-m200-counts-summary');
   if (curateCountsEl) {
-    curateCountsEl.textContent = `${selectedCount} keepers ➜ Curated · ${unselectedCount} unselected`;
+    let extraSel = 0;
+    combinedExtraMoments.forEach(entry => {
+      extraSel += entry.assetIds.size;
+    });
+    const totalSel = selectedCount + extraSel;
+    const destLabel = isM200DirectCurateTarget() ? 'Curated' : 'Moments (M100)';
+    curateCountsEl.textContent = `${totalSel} selected ➜ ${destLabel} · ${unselectedCount} unselected`;
   }
   renderResolveDisjointCombineTray();
   if (resolveDisjointIsCurateM200 && !resolveDisjointCompleted) {
@@ -5252,6 +5258,7 @@ function renderResolveDisjointCombineTray(): void {
       renderResolveDisjointCombineTray();
       renderCandidateMomentChips(displayedCandidateMomentsList);
       renderPropagateTagsPreview();
+      updateResolveDisjointTargetPreview();
     });
   });
   updateSingleAssetWarningVisibility();
@@ -6099,14 +6106,81 @@ async function saveMomentTagsForState(state: TaggingEngineState, applyToFolderNa
   }
 }
 
+function isM200DirectCurateTarget(rawTarget?: string): boolean {
+  if (!resolveDisjointIsCurateM200) return false;
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  const targetName = (rawTarget !== undefined ? rawTarget : targetInp?.value || '').trim();
+  if (!targetName || !resolveDisjointMomentName) return false;
+  return targetName.toLowerCase() === resolveDisjointMomentName.toLowerCase();
+}
+
+function getCombinedSelectedAssetCount(): number {
+  let total = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
+  combinedExtraMoments.forEach(entry => {
+    total += entry.assetIds.size;
+  });
+  return total;
+}
+
 function updateResolveDisjointTargetPreview(): void {
   const previewEl = document.getElementById('resolve-disjoint-target-path-preview');
   const statusNoteEl = document.getElementById('resolve-disjoint-target-status-note');
   const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
   const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
   const btnSubmit = document.getElementById('btn-submit-resolve-disjoint') as HTMLButtonElement | null;
+  const rawTarget = (targetInp?.value || '').trim();
+  const targetName = rawTarget || '—';
+
+  const directCurate = isM200DirectCurateTarget(rawTarget);
+  const existingCurated = rawTarget ? getExistingTargetAlbumInfo('Curated', rawTarget).exists : false;
+
+  if (parentSel) {
+    const curatedOpt = parentSel.querySelector<HTMLOptionElement>('option[value="Curated"]');
+    if (curatedOpt) {
+      curatedOpt.disabled = !directCurate && !existingCurated;
+    }
+    if (resolveDisjointIsCurateM200) {
+      if (directCurate) {
+        parentSel.value = 'Curated';
+        parentSel.disabled = true;
+      } else {
+        if (parentSel.value === 'Curated') {
+          parentSel.value = 'Moments';
+        }
+        parentSel.disabled = false;
+      }
+    } else if (!existingCurated && parentSel.value === 'Curated') {
+      parentSel.value = 'Moments';
+    }
+  }
+
+  const delSrcRowEl = document.getElementById('resolve-disjoint-delete-source-row');
+  const delTbcRowEl = document.getElementById('curate-m200-delete-tbc-row');
+  const exportRowEl = document.getElementById('curate-m200-export-row');
+  const newFolderNoticeEl = document.getElementById('curate-m200-new-folder-notice');
+  const boxTitleEl = document.getElementById('curate-m200-box-title');
+  const curateCountsEl = document.getElementById('curate-m200-counts-summary');
+
+  if (resolveDisjointIsCurateM200) {
+    if (delSrcRowEl) delSrcRowEl.style.display = directCurate ? 'none' : 'flex';
+    if (delTbcRowEl) delTbcRowEl.style.display = directCurate ? 'flex' : 'none';
+    if (exportRowEl) exportRowEl.style.display = directCurate ? 'flex' : 'none';
+    if (newFolderNoticeEl) newFolderNoticeEl.style.display = directCurate ? 'none' : 'block';
+    if (boxTitleEl) {
+      boxTitleEl.textContent = directCurate
+        ? '🎨 M200 Curation Workflow (Same Name Kept: ToBeCurated ➜ Curated ➜ Export)'
+        : '🔀 New Folder Introduced — Consolidate into Moments (M100)';
+    }
+    if (curateCountsEl) {
+      const selPri = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
+      const unselPri = Math.max(0, resolveDisjointAssets.length - selPri);
+      const totalSel = getCombinedSelectedAssetCount();
+      curateCountsEl.className = `badge badge-xs ${directCurate ? 'badge-green' : 'badge-amber'} font-mono`;
+      curateCountsEl.textContent = `${totalSel} selected ➜ ${directCurate ? 'Curated' : 'Moments (M100)'} · ${unselPri} unselected`;
+    }
+  }
+
   const parentName = parentSel?.value || 'Moments';
-  const targetName = (targetInp?.value || '').trim() || '—';
   const existingInfo = targetName !== '—' ? getExistingTargetAlbumInfo(parentName, targetName) : { exists: false, assetCount: 0 };
 
   if (statusNoteEl) {
@@ -6133,13 +6207,21 @@ function updateResolveDisjointTargetPreview(): void {
 
   if (btnSubmit && !resolveDisjointCompleted) {
     if (resolveDisjointIsCurateM200) {
-      const selCount = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
-      const exportChecked = (document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null)?.checked ?? true;
-      btnSubmit.textContent = exportChecked
-        ? `✅ Approve Curated & Export (${selCount})`
-        : `✅ Approve into Curated (${selCount})`;
-      btnSubmit.title =
-        'Move selected keepers into Curated/[Target] (+Moments), handle unselected via Ignore/SkipPublishing, delete ToBeCurated album, and export to LaCie if checked';
+      const totalSelCount = getCombinedSelectedAssetCount();
+      if (directCurate) {
+        const exportChecked = (document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null)?.checked ?? true;
+        btnSubmit.textContent = exportChecked
+          ? `✅ Move to Curated & Export (${totalSelCount})`
+          : `✅ Move to Curated (${totalSelCount})`;
+        btnSubmit.title =
+          'Same folder name kept — move selected keepers into Curated/[Target] only, handle unselected via Ignore/SkipPublishing, delete ToBeCurated album, and export to LaCie if checked';
+      } else {
+        btnSubmit.textContent = existingInfo.exists
+          ? `➕ Consolidate into Moments (${totalSelCount})`
+          : `✨ Create & Consolidate in Moments (${totalSelCount})`;
+        btnSubmit.title =
+          'New folder name introduced — cannot copy directly to Curated; consolidates all selected Moments into Moments/[Target] (stage M100)';
+      }
     } else if (existingInfo.exists) {
       btnSubmit.textContent = '➕ Add Missing Assets & Tag Existing';
       btnSubmit.title = 'Destination folder already exists — copy only missing assets, update DB tags, and delete disjoint source(s) if checked';
@@ -6468,7 +6550,7 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
   const previewPanelEl = document.getElementById('resolve-disjoint-candidate-preview-panel');
   if (
     !skipAutoInclude &&
-    isMerge &&
+    (isMerge || isCurate) &&
     previewPanelEl &&
     previewPanelEl.style.display !== 'none' &&
     previewedCandidateMomentName &&
@@ -6515,28 +6597,32 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
 
   const stepsHtml: string[] = [];
   if (isCurate) {
+    const extraEntries = Array.from(combinedExtraMoments.values());
+    const extraAssetCount = extraEntries.reduce((acc, e) => acc + e.assetIds.size, 0);
+    const totalKeeperCount = assetIds.length + extraAssetCount;
     const unselectedAssets = resolveDisjointAssets.filter(a => !resolveDisjointSelectedIds.has(a.asset_id));
     const handleUnsel = (document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null)?.checked ?? true;
     const unselMode = (document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null)?.value || 'ignore';
     const delTbc = (document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null)?.checked ?? true;
     const exportLacie = (document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null)?.checked ?? true;
-    const isRenamed = targetMoment.toLowerCase() !== resolveDisjointMomentName.toLowerCase();
 
-    titleEl.textContent = '🎨 Confirm M200 Curation Plan';
-    subEl.innerHTML = `Curate <code>${escapeHtml(resolveDisjointMomentName)}</code> ➜ <code>Media Organizer on LaCie / Curated / ${escapeHtml(targetMoment)}</code>`;
+    titleEl.textContent = '🎨 Confirm M200 Curation Plan (Same Name Kept)';
+    subEl.innerHTML = `Move <code>${escapeHtml(resolveDisjointMomentName)}</code> ➜ <code>Media Organizer on LaCie / Curated / ${escapeHtml(targetMoment)}</code>`;
 
+    const srcParts = [
+      `<code>${escapeHtml(resolveDisjointMomentName)}</code> (${assetIds.length})`,
+      ...extraEntries.map(e => `<code>${escapeHtml(e.momentName)}</code> (${e.assetIds.size})`)
+    ];
     stepsHtml.push(
-      `<strong>Approve ${assetIds.length} keeper asset(s) to Curated:</strong> Copy selected keepers to <code>Media Organizer on LaCie / Curated / ${escapeHtml(
+      `<strong>Move ${totalKeeperCount} keeper asset(s) to Curated ONLY:</strong> Copy selected keepers from ${srcParts.join(' + ')} into <code>Media Organizer on LaCie / Curated / ${escapeHtml(
         targetMoment
-      )}</code> (and ensure <code>Moments / ${escapeHtml(targetMoment)}</code> exists so CLI stays aligned).`
+      )}</code> (does not duplicate/re-save <code>${escapeHtml(resolveDisjointMomentName)}</code> into <code>Moments</code>).`
     );
-    if (isRenamed) {
+    if (extraEntries.length > 0) {
       stepsHtml.push(
-        `<strong>Rename &amp; reset Moment Status:</strong> Delete old source Moment albums for <code>${escapeHtml(
-          resolveDisjointMomentName
-        )}</code>, mark old <code>curated_moments.memory_stage</code> as <code>Deleted</code>, reassign kept assets, and initialize <code>${escapeHtml(
-          targetMoment
-        )}</code> stage to <code>M300</code>${exportLacie ? ' ➜ <code>M400</code>' : ''}.`
+        `<strong>Absorb ${extraEntries.length} combined Moment(s):</strong> Merge ${extraAssetCount} asset(s) from ${extraEntries
+          .map(e => `<code>${escapeHtml(e.momentName)}</code>`)
+          .join(', ')} into <code>Moments / ${escapeHtml(targetMoment)}</code> and remove their obsolete prior album(s) (marking old rows <code>Deleted</code>).`
       );
     }
     if (unselectedAssets.length > 0 && handleUnsel) {
@@ -6553,9 +6639,9 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
         )}</code> in Apple Photos &amp; local DB so curated queues clear.`
       );
     }
-    if (sourceTagState.tags.length > 0) {
+    if (sourceTagState.tags.length > 0 || extraEntries.some(e => e.tags.length > 0)) {
       stepsHtml.push(
-        `<strong>Persist DB tags:</strong> Save ${sourceTagState.tags.length} tag(s) onto <code>${escapeHtml(targetMoment)}</code> and its curated assets.`
+        `<strong>Persist DB tags:</strong> Save Moment and asset tags onto <code>${escapeHtml(targetMoment)}</code> and its curated assets.`
       );
     }
     if (exportLacie) {
@@ -6567,9 +6653,9 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
         )}</code>, deduplicate, and promote stage to <code>M400</code>.`
       );
     }
-    noteEl.innerHTML = '✅ Selected keepers stay in Curated; rejected items will not reappear in future ToBeCurated syncs.';
+    noteEl.innerHTML = '✅ Original folder name kept: keepers move to Curated; rejected items will not reappear in future ToBeCurated syncs.';
     proceedBtn.className = 'btn btn-purple';
-    proceedBtn.textContent = exportLacie ? '✅ Confirm Curate & Export' : '✅ Confirm Curate into Curated';
+    proceedBtn.textContent = exportLacie ? '✅ Confirm Curate & Export' : '✅ Confirm Move into Curated';
   } else if (isMerge) {
     const existingInfo = getExistingTargetAlbumInfo(resolvedParent, targetMoment);
     const fullTargetPath = `Media Organizer on LaCie / ${resolvedParent} / ${targetMoment}`;
@@ -6804,9 +6890,9 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
     return;
   }
 
-  const additionalMoments = isMerge ? Array.from(combinedExtraMoments.keys()) : [];
+  const additionalMoments = isMerge || isCurate ? Array.from(combinedExtraMoments.keys()) : [];
   const additionalAssetIds: string[] = [];
-  if (isMerge) {
+  if (isMerge || isCurate) {
     combinedExtraMoments.forEach(entry => {
       entry.assetIds.forEach(aid => additionalAssetIds.push(aid));
     });
@@ -6863,11 +6949,11 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
   let succeeded = false;
   try {
     let res: Response;
+    const handleUnsel = (document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null)?.checked ?? true;
+    const unselAction = handleUnsel
+      ? ((document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null)?.value || 'ignore')
+      : 'none';
     if (isCurate) {
-      const handleUnsel = (document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null)?.checked ?? true;
-      const unselAction = handleUnsel
-        ? ((document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null)?.value || 'ignore')
-        : 'none';
       const delTbc = (document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null)?.checked ?? true;
       const exportLacie = (document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null)?.checked ?? true;
       res = await fetch('/api/media/memories/curate-moment', {
@@ -6877,6 +6963,8 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
           source_moment: resolveDisjointMomentName,
           target_moment: targetMoment,
           selected_asset_ids: assetIds,
+          additional_moments: additionalMoments,
+          additional_asset_ids: additionalAssetIds,
           unselected_asset_ids: unselectedIds,
           unselected_action: unselAction,
           delete_tbc_album: delTbc,
@@ -6897,6 +6985,8 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
           asset_ids: assetIds,
           additional_moments: additionalMoments,
           additional_asset_ids: additionalAssetIds,
+          unselected_asset_ids: isMerge && resolveDisjointIsCurateM200 ? unselectedIds : [],
+          unselected_action: isMerge && resolveDisjointIsCurateM200 ? unselAction : 'none',
           apply_tags: applyTags,
           moment_tag_groups: momentTagGroups,
           delete_source_albums: Boolean(delSrcCb?.checked ?? true),
@@ -6925,11 +7015,11 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
       return;
     }
 
-    if (isCurate && ((data as any).export_error || (data as any).unselected_error)) {
+    if ((isCurate || (isMerge && resolveDisjointIsCurateM200)) && ((data as any).export_error || (data as any).unselected_error)) {
       const warnParts: string[] = [];
       if ((data as any).unselected_error) warnParts.push(`Unselected step: ${(data as any).unselected_error}`);
       if ((data as any).export_error) warnParts.push(`LaCie export step: ${(data as any).export_error}`);
-      alert(`Apple Photos curation saved, with warning:\n${warnParts.join('\n')}`);
+      alert(`Apple Photos action saved, with warning:\n${warnParts.join('\n')}`);
     }
 
     if (resolveDisjointIsUnassignedCluster) {

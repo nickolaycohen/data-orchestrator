@@ -2671,8 +2671,12 @@
             <div id="resolve-disjoint-curate-box"
               style="display: none; padding: 0.6rem 0.75rem; border-radius: 8px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.32); flex-direction: column; gap: 0.45rem;">
               <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
-                <strong style="font-size: 0.77rem; color: #a7f3d0;">🎨 M200 Curation Workflow (ToBeCurated ➜ Curated ➜ Export)</strong>
+                <strong id="curate-m200-box-title" style="font-size: 0.77rem; color: #a7f3d0;">🎨 M200 Curation Workflow (ToBeCurated ➜ Curated ➜ Export)</strong>
                 <span id="curate-m200-counts-summary" class="badge badge-xs badge-green font-mono">0 keepers · 0 unselected</span>
+              </div>
+              <div id="curate-m200-new-folder-notice" class="font-mono"
+                style="display: none; font-size: 0.71rem; padding: 0.38rem 0.55rem; border-radius: 6px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.42); color: #fde68a;">
+                🔀 New folder name introduced — new folders cannot be copied directly to <code>Curated</code>. Submitting will consolidate all selected Moments into <code>Moments</code> (<code>M100</code>) and clean up prior <code>ToBeCurated</code> / source albums.
               </div>
               <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; font-size: 0.74rem; color: var(--text-secondary);">
                 <label style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
@@ -2685,11 +2689,11 @@
                   <option value="skip_publishing">⏭️ Move to SkipPublishing (similar exists / personal judgment)</option>
                 </select>
               </div>
-              <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
+              <label id="curate-m200-delete-tbc-row" style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
                 <input type="checkbox" id="curate-m200-delete-tbc" checked />
-                <span>Delete source <code>ToBeCurated</code> album in Apple Photos cleanly (and old Moment folder on rename)</span>
+                <span>Delete source <code>ToBeCurated</code> album in Apple Photos cleanly</span>
               </label>
-              <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
+              <label id="curate-m200-export-row" style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
                 <input type="checkbox" id="curate-m200-export-lacie" checked />
                 <span>Run final step: export <code>Curated / Target</code> to LaCie &amp; promote stage to <code>M400</code> (Option [2])</span>
               </label>

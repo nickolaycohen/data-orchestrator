@@ -6804,6 +6804,8 @@ class ResolveDisjointRequest(BaseModel):
     asset_ids: list[str] = []
     additional_moments: list[str] = []
     additional_asset_ids: list[str] = []
+    unselected_asset_ids: list[str] = []
+    unselected_action: str = "none"  # "ignore" | "skip_publishing" | "none"
     apply_tags: list[SaveMomentTagItem] = []
     moment_tag_groups: list[MomentAssetTagGroup] = []
     delete_source_albums: bool = True
@@ -6814,6 +6816,8 @@ class CurateMomentRequest(BaseModel):
     source_moment: str
     target_moment: str
     selected_asset_ids: list[str] = []
+    additional_moments: list[str] = []
+    additional_asset_ids: list[str] = []
     unselected_asset_ids: list[str] = []
     unselected_action: str = "ignore"  # "ignore" | "skip_publishing" | "none"
     delete_tbc_album: bool = True
@@ -6828,10 +6832,20 @@ on run argv
     set targetAlbumName to item 2 of argv
     set srcMomentName to item 3 of argv
     set deleteTbc to (item 4 of argv) is "1"
-    set deleteOldOnRename to (item 5 of argv) is "1"
+    set extraMomentCount to (item 5 of argv) as integer
+    set extraMomentNames to {}
+    if extraMomentCount > 0 then
+        set extraMomentNames to items 6 thru (5 + extraMomentCount) of argv
+    end if
+    set extraAssetCount to (item (6 + extraMomentCount) of argv) as integer
+    set extraAssetIds to {}
+    if extraAssetCount > 0 then
+        set extraAssetIds to items (7 + extraMomentCount) thru (6 + extraMomentCount + extraAssetCount) of argv
+    end if
+    set curatedStartIdx to 7 + extraMomentCount + extraAssetCount
     set assetIds to {}
-    if (count of argv) > 5 then
-        set assetIds to items 6 thru (count of argv) of argv
+    if (count of argv) >= curatedStartIdx then
+        set assetIds to items curatedStartIdx thru (count of argv) of argv
     end if
 
     tell application "Photos"
@@ -6845,11 +6859,6 @@ on run argv
         end if
         set curatedFolder to folder "Curated" of topFolder
 
-        if not (exists folder "Moments" of topFolder) then
-            make new folder named "Moments" at topFolder
-        end if
-        set momentsFolder to folder "Moments" of topFolder
-
         set targetAction to "created"
         if exists album targetAlbumName of curatedFolder then
             set curatedAlbum to album targetAlbumName of curatedFolder
@@ -6859,13 +6868,6 @@ on run argv
             set curatedAlbum to album targetAlbumName of curatedFolder
         end if
 
-        if exists album targetAlbumName of momentsFolder then
-            set momentsAlbum to album targetAlbumName of momentsFolder
-        else
-            make new album named targetAlbumName at momentsFolder
-            set momentsAlbum to album targetAlbumName of momentsFolder
-        end if
-
         set curatedExistingIds to {}
         try
             repeat with exItem in (every media item of curatedAlbum)
@@ -6873,15 +6875,7 @@ on run argv
             end repeat
         end try
 
-        set momentsExistingIds to {}
-        try
-            repeat with exItem in (every media item of momentsAlbum)
-                copy (id of exItem) to end of momentsExistingIds
-            end repeat
-        end try
-
         set addCurated to {}
-        set addMoments to {}
         repeat with anId in assetIds
             set matchedItem to missing value
             try
@@ -6907,18 +6901,6 @@ on run argv
                     copy matchedItem to end of addCurated
                     copy mIdStr to end of curatedExistingIds
                 end if
-
-                set inMoments to false
-                repeat with exId in momentsExistingIds
-                    if (exId as string) is mIdStr then
-                        set inMoments to true
-                        exit repeat
-                    end if
-                end repeat
-                if not inMoments then
-                    copy matchedItem to end of addMoments
-                    copy mIdStr to end of momentsExistingIds
-                end if
             end if
         end repeat
 
@@ -6926,8 +6908,56 @@ on run argv
         if addedCurated > 0 then
             add addCurated to curatedAlbum
         end if
-        if (count of addMoments) > 0 then
-            add addMoments to momentsAlbum
+
+        -- Only touch Moments/<target> if extra Moments were consolidated into the kept original name
+        if (count of extraAssetIds) > 0 then
+            if not (exists folder "Moments" of topFolder) then
+                make new folder named "Moments" at topFolder
+            end if
+            set momentsFolder to folder "Moments" of topFolder
+            if exists album targetAlbumName of momentsFolder then
+                set momentsAlbum to album targetAlbumName of momentsFolder
+            else
+                make new album named targetAlbumName at momentsFolder
+                set momentsAlbum to album targetAlbumName of momentsFolder
+            end if
+            set momentsExistingIds to {}
+            try
+                repeat with exItem in (every media item of momentsAlbum)
+                    copy (id of exItem) to end of momentsExistingIds
+                end repeat
+            end try
+            set addMoments to {}
+            repeat with exAid in extraAssetIds
+                set matchedExtra to missing value
+                try
+                    set matchedExtra to media item id (exAid & "/L0/001")
+                on error
+                    try
+                        set foundEx to (media items whose id contains exAid)
+                        if (count of foundEx) > 0 then
+                            set matchedExtra to item 1 of foundEx
+                        end if
+                    end try
+                end try
+                if matchedExtra is not missing value then
+                    set exIdStr to (id of matchedExtra) as string
+                    set alreadyInMoments to false
+                    repeat with mExId in momentsExistingIds
+                        if (mExId as string) is exIdStr then
+                            set alreadyInMoments to true
+                            exit repeat
+                        end if
+                    end repeat
+                    if not alreadyInMoments then
+                        copy matchedExtra to end of addMoments
+                        copy exIdStr to end of momentsExistingIds
+                    end if
+                end if
+            end repeat
+            if (count of addMoments) > 0 then
+                add addMoments to momentsAlbum
+            end if
         end if
 
         set deletedCount to 0
@@ -6939,27 +6969,26 @@ on run argv
                     set deletedCount to deletedCount + 1
                 end try
             end if
-            if targetAlbumName is not srcMomentName and (exists album targetAlbumName of tbcFolder) then
-                try
-                    delete album id (id of album targetAlbumName of tbcFolder)
-                    set deletedCount to deletedCount + 1
-                end try
-            end if
         end if
 
-        if deleteOldOnRename and srcMomentName is not "" and srcMomentName is not targetAlbumName then
-            repeat with fName in {"Moments", "Curated", "Generic Moments"}
-                if exists folder (fName as string) of topFolder then
-                    set subF to folder (fName as string) of topFolder
-                    if exists album srcMomentName of subF then
-                        set oldAlb to album srcMomentName of subF
-                        if (id of oldAlb) is not (id of curatedAlbum) and (id of oldAlb) is not (id of momentsAlbum) then
-                            try
-                                delete album id (id of oldAlb)
-                                set deletedCount to deletedCount + 1
-                            end try
+        if (count of extraMomentNames) > 0 then
+            repeat with extraName in extraMomentNames
+                set exNameStr to extraName as string
+                if exNameStr is not "" and exNameStr is not targetAlbumName then
+                    repeat with fName in {"Moments", "Curated", "ToBeCurated", "Generic Moments"}
+                        if exists folder (fName as string) of topFolder then
+                            set subF to folder (fName as string) of topFolder
+                            if exists album exNameStr of subF then
+                                set oldAlb to album exNameStr of subF
+                                if (id of oldAlb) is not (id of curatedAlbum) then
+                                    try
+                                        delete album id (id of oldAlb)
+                                        set deletedCount to deletedCount + 1
+                                    end try
+                                end if
+                            end if
                         end if
-                    end if
+                    end repeat
                 end if
             end repeat
         end if
@@ -9123,6 +9152,30 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
             return {"ok": False, "error": "Target Moment name is required to merge"}
         if "/" in target_moment or "/" in target_parent:
             return {"ok": False, "error": "Moment and folder names cannot contain '/'"}
+        if target_parent.lower() == "curated" and target_moment.lower() != src_moment.lower():
+            try:
+                conn_chk = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
+                try:
+                    cur_chk = conn_chk.cursor()
+                    cur_exists = cur_chk.execute(
+                        """
+                        SELECT 1 FROM media_organizer_albums
+                        WHERE is_folder = 0
+                          AND LOWER(COALESCE(parent_folder_name, '')) = 'curated'
+                          AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                        LIMIT 1
+                        """,
+                        (target_moment,),
+                    ).fetchone()
+                finally:
+                    conn_chk.close()
+            except Exception:
+                cur_exists = None
+            if not cur_exists:
+                return {
+                    "ok": False,
+                    "error": f"Cannot copy new folder '{target_moment}' directly to Curated — consolidate into Moments first.",
+                }
         has_extra_sources = any((rm or "").strip() and (rm or "").strip().lower() != target_moment.lower() for rm in (req.additional_moments or []))
         if target_moment.lower() == src_moment.lower() and target_parent.lower() == "moments" and not has_extra_sources and not (req.asset_ids or []):
             return {"ok": False, "error": "Select assets or combine another Moment to add into this existing folder"}
@@ -9330,6 +9383,59 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
     photos_added = int(parts[1] or 0) if len(parts) >= 2 and parts[1].isdigit() else 0
     albums_deleted = int(parts[2] or 0) if len(parts) >= 3 and parts[2].isdigit() else 0
 
+    # Optional unselected handling (e.g. when M200 Moment is consolidated into a new Moments folder)
+    unselected_action_m = (req.unselected_action or "none").strip().lower()
+    unselected_ids_m: list[str] = []
+    seen_unsel_m = set(seen_all_ids)
+    for raw_u in req.unselected_asset_ids or []:
+        su = (raw_u or "").strip()
+        if su and su not in seen_unsel_m:
+            seen_unsel_m.add(su)
+            unselected_ids_m.append(su)
+
+    unselected_count_done = 0
+    unselected_error = None
+    if unselected_ids_m and unselected_action_m == "ignore":
+        python_bin, script_path = _get_pipeline_python_and_dedup_script()
+        if script_path.exists():
+            try:
+                proc_ign = subprocess.run(
+                    [python_bin, str(script_path), "--apply", "--json", "--asset-ids", *unselected_ids_m],
+                    cwd=str(REPOS["media-organizer-pipeline"]),
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if proc_ign.returncode == 0:
+                    ign_data = json.loads(proc_ign.stdout) if proc_ign.stdout.strip() else {}
+                    unselected_count_done = int(
+                        ign_data.get("photos_added") or ign_data.get("db_updated") or len(unselected_ids_m)
+                    )
+                else:
+                    unselected_error = (
+                        proc_ign.stderr.strip() or proc_ign.stdout.strip() or f"dedup_ignore exited {proc_ign.returncode}"
+                    )
+            except Exception as e:
+                unselected_error = str(e)
+    elif unselected_ids_m and unselected_action_m == "skip_publishing":
+        try:
+            proc_skip = subprocess.run(
+                ["osascript", "-", top_folder, "Moments", "SkipPublishing", "1", *unselected_ids_m],
+                input=_MOMENTS_APPLESCRIPT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            skip_out = (proc_skip.stdout or "").strip()
+            if proc_skip.returncode == 0 and not skip_out.startswith("ERROR|"):
+                unselected_count_done = len(unselected_ids_m)
+            else:
+                unselected_error = (
+                    skip_out or (proc_skip.stderr or "").strip() or f"SkipPublishing exited {proc_skip.returncode}"
+                )
+        except Exception as e:
+            unselected_error = str(e)
+
     # Reflect merge + optional tag application across all combined assets in local DB immediately
     tag_session_id = None
     tags_applied_count = 0
@@ -9449,13 +9555,25 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 )
                 cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (src_moment,))
 
-            # Reset M status on the destination folder when a new folder is created (treat as new folder in Mode [M])
+            if unselected_ids_m:
+                ph_um = ",".join("?" for _ in unselected_ids_m)
+                cur.execute(
+                    f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_um})",
+                    unselected_ids_m,
+                )
+                if unselected_action_m == "skip_publishing":
+                    _upsert_album_and_assets_in_db(cur, "Moments", "SkipPublishing", unselected_ids_m)
+
+            # Reset M status on the destination folder when a new or newly consolidated folder is saved in Moments
             _reset_new_folder_curated_moment_stage(
                 cur,
                 target_moment,
                 target_parent,
                 asset_count=len(combined_asset_ids),
-                force=(target_action == "created"),
+                force=(
+                    target_action == "created"
+                    or (target_parent.lower() == "moments" and (bool(add_moments) or src_moment.lower() != target_moment.lower()))
+                ),
             )
 
             # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
@@ -9564,6 +9682,8 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
         "tags_applied": tags_applied_count,
         "moment_tags_union": moment_union_tags,
         "moment_paradigm_confirmed": bool(moment_union_tags),
+        "unselected_count": unselected_count_done,
+        "unselected_error": unselected_error,
     }
 
 
@@ -9616,7 +9736,7 @@ def _upsert_album_and_assets_in_db(
 
 @router.post("/memories/curate-moment")
 def curate_moment_action(req: CurateMomentRequest):
-    """Curate an M200/ToBeCurated Moment: move keepers to Curated (+Moments), Ignore/Skip unselected, delete ToBeCurated album, save tags, and export to LaCie."""
+    """Curate an M200/ToBeCurated Moment into Curated (only when original folder name is kept)."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"ok": False, "error": "Media database unavailable"}
 
@@ -9627,16 +9747,41 @@ def curate_moment_action(req: CurateMomentRequest):
         return {"ok": False, "error": "Both source_moment and target_moment are required"}
     if "/" in target_moment:
         return {"ok": False, "error": "Target Moment name cannot contain '/'"}
+    if target_moment.lower() != src_moment.lower():
+        return {
+            "ok": False,
+            "error": (
+                f"New folder '{target_moment}' cannot be copied directly to Curated. "
+                f"Keep original name '{src_moment}' to move to Curated, or consolidate into Moments for a new folder."
+            ),
+        }
     if unselected_action not in ("ignore", "skip_publishing", "none"):
         return {"ok": False, "error": f"Unsupported unselected_action: {unselected_action}"}
 
-    selected_ids: list[str] = []
+    primary_selected_ids: list[str] = []
     seen_sel: set[str] = set()
     for raw_aid in req.selected_asset_ids or []:
         s = (raw_aid or "").strip()
         if s and s not in seen_sel:
             seen_sel.add(s)
-            selected_ids.append(s)
+            primary_selected_ids.append(s)
+
+    extra_moments: list[str] = []
+    seen_m_lc = {src_moment.lower()}
+    for rm in req.additional_moments or []:
+        sm = (rm or "").strip()
+        if sm and sm.lower() not in seen_m_lc:
+            seen_m_lc.add(sm.lower())
+            extra_moments.append(sm)
+
+    extra_asset_ids: list[str] = []
+    for raw_aid in req.additional_asset_ids or []:
+        s = (raw_aid or "").strip()
+        if s and s not in seen_sel:
+            seen_sel.add(s)
+            extra_asset_ids.append(s)
+
+    selected_ids = [*primary_selected_ids, *extra_asset_ids]
     if not selected_ids:
         return {"ok": False, "error": "Select at least 1 keeper asset to approve into Curated"}
 
@@ -9648,17 +9793,18 @@ def curate_moment_action(req: CurateMomentRequest):
             seen_unsel.add(s)
             unselected_ids.append(s)
 
-    is_rename = target_moment.lower() != src_moment.lower()
     del_tbc_flag = "1" if req.delete_tbc_album else "0"
-    del_old_flag = "1" if (is_rename and req.delete_tbc_album) else "0"
 
-    # 1. AppleScript: populate Curated/<target>, ensure Moments/<target>, delete ToBeCurated/<src> (& old on rename)
+    # 1. AppleScript: populate Curated/<target> ONLY (do NOT copy source Moment to Moments), delete ToBeCurated/<src>
     argv = [
         "Media Organizer on LaCie",
         target_moment,
         src_moment,
         del_tbc_flag,
-        del_old_flag,
+        str(len(extra_moments)),
+        *extra_moments,
+        str(len(extra_asset_ids)),
+        *extra_asset_ids,
         *selected_ids,
     ]
     try:
@@ -9731,23 +9877,21 @@ def curate_moment_action(req: CurateMomentRequest):
             _ensure_moment_tag_tables(cur)
 
             _upsert_album_and_assets_in_db(cur, "Curated", target_moment, selected_ids)
-            _upsert_album_and_assets_in_db(cur, "Moments", target_moment, selected_ids)
+            if extra_asset_ids:
+                _upsert_album_and_assets_in_db(cur, "Moments", target_moment, extra_asset_ids)
 
-            m_exists = cur.execute(
-                "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
-                (target_moment,),
-            ).fetchone()
-            if not m_exists:
+            if primary_selected_ids:
+                ph_pri = ",".join("?" for _ in primary_selected_ids)
                 cur.execute(
-                    "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (NULL, ?, NULL, 'Moments')",
-                    (target_moment,),
+                    f"UPDATE assets SET curated_album = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_pri})",
+                    [target_moment, *primary_selected_ids],
                 )
-
-            ph_sel = ",".join("?" for _ in selected_ids)
-            cur.execute(
-                f"UPDATE assets SET MomentsAlbumName = ?, curated_album = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_sel})",
-                [target_moment, target_moment, *selected_ids],
-            )
+            if extra_asset_ids:
+                ph_ext = ",".join("?" for _ in extra_asset_ids)
+                cur.execute(
+                    f"UPDATE assets SET MomentsAlbumName = ?, curated_album = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_ext})",
+                    [target_moment, target_moment, *extra_asset_ids],
+                )
 
             if unselected_ids:
                 ph_unsel = ",".join("?" for _ in unselected_ids)
@@ -9767,9 +9911,9 @@ def curate_moment_action(req: CurateMomentRequest):
                         SELECT album_pk FROM media_organizer_albums
                         WHERE is_folder = 0
                           AND LOWER(COALESCE(parent_folder_name, '')) = 'tobecurated'
-                          AND TRIM(LOWER(album_name)) IN (TRIM(LOWER(?)), TRIM(LOWER(?)))
+                          AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
                         """,
-                        (src_moment, target_moment),
+                        (src_moment,),
                     ).fetchall()
                 ]
                 if tbc_pks:
@@ -9777,54 +9921,47 @@ def curate_moment_action(req: CurateMomentRequest):
                     cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_t})", tbc_pks)
                     cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_t})", tbc_pks)
 
-            if is_rename and req.delete_tbc_album:
+            for am in extra_moments:
                 cur.execute(
                     """
                     UPDATE OR IGNORE moment_tags
                     SET moment_name = ?, updated_at_utc = datetime('now')
                     WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
                     """,
-                    (target_moment, src_moment),
+                    (target_moment, am),
                 )
-                cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (src_moment,))
-                _delete_source_albums_from_db(cur, src_moment)
-                _reset_new_folder_curated_moment_stage(
-                    cur,
+                cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (am,))
+                _delete_source_albums_from_db(cur, am)
+
+            cm_row = cur.execute(
+                "SELECT COALESCE(memory_stage, '') FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+                (target_moment,),
+            ).fetchone()
+            cur_stage = (cm_row[0] if cm_row else "") or ""
+            next_stage = cur_stage if cur_stage in ("M400", "M450", "M500") else "M300"
+            cur.execute(
+                """
+                INSERT INTO curated_moments (
+                    moment_name, to_be_curated_count, curated_count, memory_stage,
+                    last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists
+                ) VALUES (?, 0, ?, ?, datetime('now'), 0, 1)
+                ON CONFLICT(moment_name) DO UPDATE SET
+                    to_be_curated_count = CASE WHEN ? = 1 THEN 0 ELSE curated_moments.to_be_curated_count END,
+                    photos_to_be_curated_exists = CASE WHEN ? = 1 THEN 0 ELSE curated_moments.photos_to_be_curated_exists END,
+                    curated_count = excluded.curated_count,
+                    photos_curated_exists = 1,
+                    memory_stage = ?,
+                    last_pipeline_sync = datetime('now')
+                """,
+                (
                     target_moment,
-                    "Curated",
-                    asset_count=len(selected_ids),
-                    force=True,
-                )
-            else:
-                cm_row = cur.execute(
-                    "SELECT COALESCE(memory_stage, '') FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
-                    (target_moment,),
-                ).fetchone()
-                cur_stage = (cm_row[0] if cm_row else "") or ""
-                next_stage = cur_stage if cur_stage in ("M400", "M450", "M500") else "M300"
-                cur.execute(
-                    """
-                    INSERT INTO curated_moments (
-                        moment_name, to_be_curated_count, curated_count, memory_stage,
-                        last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists
-                    ) VALUES (?, 0, ?, ?, datetime('now'), 0, 1)
-                    ON CONFLICT(moment_name) DO UPDATE SET
-                        to_be_curated_count = CASE WHEN ? = 1 THEN 0 ELSE curated_moments.to_be_curated_count END,
-                        photos_to_be_curated_exists = CASE WHEN ? = 1 THEN 0 ELSE curated_moments.photos_to_be_curated_exists END,
-                        curated_count = excluded.curated_count,
-                        photos_curated_exists = 1,
-                        memory_stage = ?,
-                        last_pipeline_sync = datetime('now')
-                    """,
-                    (
-                        target_moment,
-                        len(selected_ids),
-                        next_stage,
-                        1 if req.delete_tbc_album else 0,
-                        1 if req.delete_tbc_album else 0,
-                        next_stage,
-                    ),
-                )
+                    len(selected_ids),
+                    next_stage,
+                    1 if req.delete_tbc_album else 0,
+                    1 if req.delete_tbc_album else 0,
+                    next_stage,
+                ),
+            )
 
             # Save DB tags if present
             clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
@@ -9938,7 +10075,8 @@ def curate_moment_action(req: CurateMomentRequest):
         "action": "curate",
         "source_moment": src_moment,
         "target_moment": target_moment,
-        "renamed": is_rename,
+        "renamed": False,
+        "combined_moments": [src_moment, *extra_moments],
         "selected_count": len(selected_ids),
         "photos_added": photos_added,
         "albums_deleted": albums_deleted,
