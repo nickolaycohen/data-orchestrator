@@ -82,6 +82,11 @@ let isUpdatingGroupingRules = false;
 let publishMomentName = '';
 let publishMomentAssets: PublishMomentAssetItem[] = [];
 const publishSelectedAssetIds = new Set<string>();
+const publishSkippedAssetIds = new Set<string>();
+const publishAutoPromotedIds = new Set<string>();
+let publishInitialSelectedKey = '';
+let publishTargetBatchSize = 9;
+let isApplyingPublishCuration = false;
 let isSubmittingPublishMoment = false;
 let publishMomentCompleted = false;
 
@@ -826,16 +831,18 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   });
   document.getElementById('btn-publish-toggle-all')?.addEventListener('click', () => {
     if (!publishMomentAssets.length) return;
-    const allSelected = publishMomentAssets.every(a => publishSelectedAssetIds.has(a.asset_id));
-    if (allSelected) {
-      publishSelectedAssetIds.clear();
-    } else {
-      publishMomentAssets.forEach(a => publishSelectedAssetIds.add(a.asset_id));
-    }
+    resetPublishInitialTopSelection();
     renderPublishMomentAssets();
   });
-  document.getElementById('btn-publish-open-folder')?.addEventListener('click', () => {
+  document.getElementById('btn-publish-apply-curation')?.addEventListener('click', () => {
+    void applyPublishBatchCuration(true);
+  });
+  document.getElementById('btn-publish-open-folder')?.addEventListener('click', async () => {
     if (!publishMomentName) return;
+    if (isPublishCurationDirty()) {
+      const ok = await applyPublishBatchCuration(false);
+      if (!ok) return;
+    }
     void openCuratedFolderForPublish(publishMomentName, 'pub_rec');
   });
   document.getElementById('btn-publish-open-curated')?.addEventListener('click', () => {
@@ -4631,20 +4638,139 @@ function syncPublishOpenLinks(): void {
   }
 }
 
+function getPublishSelectedKey(): string {
+  return publishMomentAssets
+    .filter(a => publishSelectedAssetIds.has(a.asset_id))
+    .map(a => a.asset_id)
+    .join(',');
+}
+
+function isPublishCurationDirty(): boolean {
+  return publishSkippedAssetIds.size > 0 || getPublishSelectedKey() !== publishInitialSelectedKey;
+}
+
+function resetPublishInitialTopSelection(): void {
+  publishSelectedAssetIds.clear();
+  publishSkippedAssetIds.clear();
+  publishAutoPromotedIds.clear();
+  const targetN = Math.min(9, publishMomentAssets.length);
+  publishTargetBatchSize = targetN || 9;
+  publishMomentAssets.slice(0, targetN).forEach(a => publishSelectedAssetIds.add(a.asset_id));
+  publishInitialSelectedKey = getPublishSelectedKey();
+}
+
+function applyPublishAssetToggle(aid: string, nextChecked: boolean): void {
+  if (!aid) return;
+  const targetGoal = Math.min(9, publishMomentAssets.length);
+  if (!nextChecked) {
+    publishSelectedAssetIds.delete(aid);
+    publishAutoPromotedIds.delete(aid);
+    publishSkippedAssetIds.add(aid);
+    // Propose next available asset(s) from the ranked queue to stay at target (9)
+    for (const cand of publishMomentAssets) {
+      if (publishSelectedAssetIds.size >= targetGoal) break;
+      if (!publishSelectedAssetIds.has(cand.asset_id) && !publishSkippedAssetIds.has(cand.asset_id)) {
+        publishSelectedAssetIds.add(cand.asset_id);
+        publishAutoPromotedIds.add(cand.asset_id);
+      }
+    }
+  } else {
+    publishSkippedAssetIds.delete(aid);
+    publishSelectedAssetIds.add(aid);
+    // If restoring a higher-ranked asset pushed selection above 9, return the lowest-ranked auto-promoted item to standby queue
+    while (publishSelectedAssetIds.size > targetGoal && publishAutoPromotedIds.size > 0) {
+      let lowestPromotedId = '';
+      for (let i = publishMomentAssets.length - 1; i >= 0; i--) {
+        const candId = publishMomentAssets[i].asset_id;
+        if (candId !== aid && publishAutoPromotedIds.has(candId) && publishSelectedAssetIds.has(candId)) {
+          lowestPromotedId = candId;
+          break;
+        }
+      }
+      if (!lowestPromotedId) break;
+      publishSelectedAssetIds.delete(lowestPromotedId);
+      publishAutoPromotedIds.delete(lowestPromotedId);
+    }
+  }
+  renderPublishMomentAssets();
+}
+
 function updatePublishMomentSelectionSummary(): void {
+  const headingEl = document.getElementById('publish-moment-assets-heading');
   const pill = document.getElementById('publish-moment-selected-pill');
+  const skippedPill = document.getElementById('publish-moment-skipped-pill');
+  const queuePill = document.getElementById('publish-moment-queue-pill');
+  const applyCurBtn = document.getElementById('btn-publish-apply-curation') as HTMLButtonElement | null;
   const breakdownEl = document.getElementById('publish-moment-breakdown');
+
   const selected = publishMomentAssets.filter(a => publishSelectedAssetIds.has(a.asset_id));
+  const skippedCount = publishSkippedAssetIds.size;
+  const standbyCount = publishMomentAssets.filter(
+    a => !publishSelectedAssetIds.has(a.asset_id) && !publishSkippedAssetIds.has(a.asset_id)
+  ).length;
+  const targetGoal = Math.min(9, Math.max(0, publishMomentAssets.length - skippedCount));
+
+  if (headingEl) {
+    headingEl.textContent = `Curate Next Publishing Batch (Target: ${Math.min(9, publishMomentAssets.length || 9)} Assets)`;
+  }
   const photosCnt = selected.filter(a => a.media_type !== 'video').length;
   const videosCnt = selected.filter(a => a.media_type === 'video').length;
   if (pill) {
-    pill.textContent = `${selected.length} / ${publishMomentAssets.length} selected`;
+    pill.textContent = `${selected.length}${targetGoal > 0 ? ` / ${targetGoal}` : ''} selected`;
+  }
+  if (skippedPill) {
+    skippedPill.style.display = skippedCount > 0 ? 'inline-flex' : 'none';
+    skippedPill.textContent = `⏭️ ${skippedCount} ➜ SkipPublishing`;
+  }
+  if (queuePill) {
+    queuePill.style.display = standbyCount > 0 ? 'inline-flex' : 'none';
+    queuePill.textContent = `⏳ ${standbyCount} in queue`;
+  }
+  if (applyCurBtn) {
+    const dirty = isPublishCurationDirty();
+    applyCurBtn.style.display = dirty && !publishMomentCompleted ? 'inline-flex' : 'none';
+    applyCurBtn.disabled = isApplyingPublishCuration || isSubmittingPublishMoment;
+    if (!isApplyingPublishCuration) {
+      applyCurBtn.textContent =
+        skippedCount > 0
+          ? `✅ Apply Curation (${skippedCount} ➜ SkipPublishing)`
+          : '🔄 Sync Selected to Pub. Rec';
+    }
   }
   if (breakdownEl) {
+    const skipSuffix = skippedCount > 0 ? ` · ⏭️ ${skippedCount} unselected ➜ SkipPublishing` : '';
     breakdownEl.textContent = selected.length
-      ? `📷 ${photosCnt} Photo(s) → Shutterfly · 🎥 ${videosCnt} Video(s) → YouTube`
+      ? `📷 ${photosCnt} Photo(s) → Shutterfly · 🎥 ${videosCnt} Video(s) → YouTube${skipSuffix}`
       : 'Select at least 1 asset to record';
   }
+}
+
+function registerPublishAssetsForPreview(assets: PublishMomentAssetItem[], momentName: string): void {
+  assets.forEach(a => {
+    const bytes = a.file_size_bytes || 0;
+    candidateAssetMeta.set(a.asset_id, {
+      asset_id: a.asset_id,
+      filename: a.filename,
+      original_filename: a.filename,
+      camera_model: a.camera_model || 'Library',
+      primary_owner: a.primary_owner || '',
+      month: (a.date_created_utc || '').slice(0, 7),
+      date_created_utc: a.date_created_utc || '',
+      capture_timestamp: a.date_created_utc || '',
+      file_size_bytes: bytes,
+      bytes,
+      file_size_mb: bytes / (1024 * 1024),
+      score_normalized: a.score,
+      score_quartile: 'Curated',
+      assigned_moment: momentName,
+      asset_tags: a.asset_tags,
+      media_type: a.media_type,
+      duration_sec: a.duration || 0,
+      width: a.width || 0,
+      height: a.height || 0,
+      fps: 0
+    });
+  });
 }
 
 function renderPublishMomentAssets(): void {
@@ -4658,49 +4784,214 @@ function renderPublishMomentAssets(): void {
     return;
   }
 
-  listEl.innerHTML = publishMomentAssets
-    .map((a, idx) => {
-      const checked = publishSelectedAssetIds.has(a.asset_id);
-      const typeBadge =
-        a.media_type === 'video'
-          ? '<span class="badge badge-xs badge-purple font-mono">VIDEO</span>'
-          : '<span class="badge badge-xs badge-green font-mono">PHOTO</span>';
-      const localNote =
-        a.local_files && a.local_files.length > 0
-          ? `<span class="badge badge-xs badge-outline font-mono" title="Exported on LaCie: ${escapeHtml(a.local_files.join(', '))}">✓ LaCie</span>`
-          : '<span class="badge badge-xs badge-amber font-mono" title="Not yet exported in LaCie Curated folder">Not exported</span>';
-      return `
-        <div class="publish-asset-row">
-          <label class="publish-asset-left" style="cursor: pointer;">
-            <input type="checkbox" class="publish-asset-checkbox" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} />
-            <img class="publish-asset-thumb" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.filename)}" loading="lazy" />
-            <div style="min-width: 0; flex: 1;">
-              <div class="font-mono" style="font-size: 0.75rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                #${idx + 1} · ${escapeHtml(a.filename || a.asset_id)}
-              </div>
-              <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
-                ${typeBadge}
-                <span class="font-mono text-amber" style="font-size: 0.69rem;">Score ${a.score.toFixed(4)}</span>
-                ${localNote}
-              </div>
+  const allAssetIds = publishMomentAssets.map(a => a.asset_id);
+  const activeRows: Array<{ asset: PublishMomentAssetItem; idx: number }> = [];
+  const standbyRows: Array<{ asset: PublishMomentAssetItem; idx: number }> = [];
+
+  publishMomentAssets.forEach((a, idx) => {
+    if (publishSelectedAssetIds.has(a.asset_id) || publishSkippedAssetIds.has(a.asset_id)) {
+      activeRows.push({ asset: a, idx });
+    } else {
+      standbyRows.push({ asset: a, idx });
+    }
+  });
+
+  const renderRow = (a: PublishMomentAssetItem, idx: number, isStandby: boolean): string => {
+    const checked = publishSelectedAssetIds.has(a.asset_id);
+    const isSkipped = publishSkippedAssetIds.has(a.asset_id);
+    const isPromoted = checked && publishAutoPromotedIds.has(a.asset_id);
+    const rowCls = checked ? ' is-selected' : isSkipped ? ' is-skip-pending' : isStandby ? ' is-standby' : '';
+    const typeBadge =
+      a.media_type === 'video'
+        ? '<span class="badge badge-xs badge-purple font-mono">VIDEO</span>'
+        : '<span class="badge badge-xs badge-green font-mono">PHOTO</span>';
+    const localNote =
+      a.local_files && a.local_files.length > 0
+        ? `<span class="badge badge-xs badge-outline font-mono" title="Exported on LaCie: ${escapeHtml(a.local_files.join(', '))}">✓ LaCie</span>`
+        : '<span class="badge badge-xs badge-amber font-mono" title="Not yet exported in LaCie Curated folder">Not exported</span>';
+    const statusBadge = isSkipped
+      ? '<span class="badge badge-xs badge-amber font-mono" title="Unselected — will move to Moments / SkipPublishing">⏭️ ➜ SkipPublishing</span>'
+      : isPromoted
+        ? '<span class="badge badge-xs badge-purple font-mono" title="Auto-promoted from queue to keep 9 selected">✨ Promoted</span>'
+        : isStandby
+          ? '<span class="badge badge-xs badge-outline font-mono" title="Waiting in queue — auto-promotes if an asset above is unselected">⏳ Queue</span>'
+          : '';
+    const tagsHtml =
+      a.asset_tags && a.asset_tags.length > 0
+        ? `<div style="display: flex; align-items: center; gap: 0.25rem; margin-top: 0.16rem; flex-wrap: wrap;">${a.asset_tags
+            .map(
+              t =>
+                `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.6rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`
+            )
+            .join('')}</div>`
+        : '';
+    return `
+      <div class="publish-asset-row${rowCls}">
+        <div class="publish-asset-left">
+          <input type="checkbox" class="publish-asset-checkbox" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer;" />
+          <button type="button" class="disjoint-row-thumb-btn btn-preview-publish-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="Click to open full preview (press Space to toggle selection)" style="width: 40px; height: 40px;">
+            <img src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.filename)}" loading="lazy" />
+          </button>
+          <div style="min-width: 0; flex: 1;">
+            <div class="font-mono" style="font-size: 0.75rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              #${idx + 1} · ${escapeHtml(a.filename || a.asset_id)}
             </div>
-          </label>
+            <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
+              ${typeBadge}
+              <span class="font-mono text-amber" style="font-size: 0.69rem;">Score ${a.score.toFixed(4)}</span>
+              ${localNote}
+              ${statusBadge}
+            </div>
+            ${tagsHtml}
+          </div>
         </div>
-      `;
-    })
-    .join('');
+      </div>
+    `;
+  };
+
+  const activeHtml = activeRows.map(r => renderRow(r.asset, r.idx, false)).join('');
+  const standbyDivider =
+    standbyRows.length > 0
+      ? `<div class="publish-queue-divider">⏳ Next in Queue (${standbyRows.length} standby — next item auto-promotes when an asset above is unselected)</div>`
+      : '';
+  const standbyHtml = standbyRows.map(r => renderRow(r.asset, r.idx, true)).join('');
+
+  listEl.innerHTML = `${activeHtml}${standbyDivider}${standbyHtml}`;
 
   listEl.querySelectorAll<HTMLInputElement>('.publish-asset-checkbox').forEach(cb => {
     cb.addEventListener('change', () => {
       const aid = cb.dataset.assetId || '';
       if (!aid) return;
-      if (cb.checked) publishSelectedAssetIds.add(aid);
-      else publishSelectedAssetIds.delete(aid);
-      updatePublishMomentSelectionSummary();
+      applyPublishAssetToggle(aid, cb.checked);
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-preview-publish-asset').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const aid = btn.dataset.assetId || '';
+      if (!aid) return;
+      openCleanupPreviewModal(aid, {
+        assetIds: allAssetIds,
+        groupLabel: `${publishMomentName} · Publish Queue`,
+        hideMarkRemoved: true,
+        selectedIds: publishSelectedAssetIds,
+        onSelectionChange: (changedId, checked) => {
+          applyPublishAssetToggle(changedId, checked);
+        }
+      });
     });
   });
 
   updatePublishMomentSelectionSummary();
+}
+
+async function applyPublishBatchCuration(showStatusBanner = true): Promise<boolean> {
+  if (!publishMomentName || isApplyingPublishCuration) return false;
+  const selIds = publishMomentAssets
+    .filter(a => publishSelectedAssetIds.has(a.asset_id))
+    .map(a => a.asset_id);
+  const skipIds = Array.from(publishSkippedAssetIds);
+  const statusEl = document.getElementById('publish-moment-status');
+  const applyBtn = document.getElementById('btn-publish-apply-curation') as HTMLButtonElement | null;
+  const summaryEl = document.getElementById('publish-moment-summary-banner');
+  const stageBadgeEl = document.getElementById('publish-moment-stage-badge');
+  const openFolderBtn = document.getElementById('btn-publish-open-folder') as HTMLButtonElement | null;
+
+  isApplyingPublishCuration = true;
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Applying...';
+  }
+  if (statusEl) {
+    statusEl.style.display = 'flex';
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>${
+      skipIds.length > 0
+        ? `Moving ${skipIds.length} unselected asset(s) to SkipPublishing & syncing ${selIds.length} selected to Pub. Rec folder...`
+        : `Syncing ${selIds.length} selected asset(s) to Publishing Recommendation folder...`
+    }</span>`;
+  }
+
+  try {
+    const res = await fetch('/api/media/memories/curate-publish-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        moment_name: publishMomentName,
+        selected_asset_ids: selIds,
+        skip_publishing_asset_ids: skipIds
+      })
+    });
+    const data: PublishMomentInfoResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return false;
+    }
+
+    if (stageBadgeEl && data.memory_stage) stageBadgeEl.textContent = data.memory_stage;
+    if (openFolderBtn) openFolderBtn.disabled = !(data.pub_rec_dir_exists || data.curated_dir_exists);
+
+    const prevSelectedOrder = new Set(selIds);
+    publishMomentAssets = data.assets || [];
+    registerPublishAssetsForPreview(publishMomentAssets, publishMomentName);
+    publishSelectedAssetIds.clear();
+    publishSkippedAssetIds.clear();
+    publishAutoPromotedIds.clear();
+
+    publishMomentAssets.forEach(a => {
+      if (prevSelectedOrder.has(a.asset_id)) {
+        publishSelectedAssetIds.add(a.asset_id);
+      }
+    });
+    const goal = Math.min(9, publishMomentAssets.length);
+    for (const a of publishMomentAssets) {
+      if (publishSelectedAssetIds.size >= goal) break;
+      publishSelectedAssetIds.add(a.asset_id);
+    }
+    publishInitialSelectedKey = getPublishSelectedKey();
+    renderPublishMomentAssets();
+
+    if (summaryEl) {
+      const pubCount = data.published_count ?? 0;
+      const curCount = data.curated_count ?? 0;
+      const unpubCount = data.unpublished_count ?? 0;
+      const syncInfo = data.pub_rec_sync;
+      const syncNote = syncInfo?.synced
+        ? ` · <span class="text-green">✓ Pub. Rec Synced (${syncInfo.expected_files?.length ?? 0} files)</span>`
+        : '';
+      summaryEl.innerHTML = `
+        <span>
+          <strong>${pubCount > 0 ? '🔄 Republish' : '✨ First Publish'}</strong> ·
+          Curated: <strong>${curCount}</strong> ·
+          Already Published: <strong>${pubCount}</strong> ·
+          Remaining Queue: <strong>${unpubCount}</strong>${syncNote}
+        </span>
+      `;
+    }
+
+    if (statusEl && showStatusBanner) {
+      const movedMsg =
+        (data.skip_publishing_moved ?? 0) > 0
+          ? `Moved <strong>${data.skip_publishing_moved}</strong> unselected asset(s) to <code>Moments / SkipPublishing</code> · `
+          : '';
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-green">✅ ${movedMsg}Synced <strong>${publishSelectedAssetIds.size}</strong> curated asset(s) into Publishing Recommendation folder.</span>`;
+    }
+    void Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
+    if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
+    return true;
+  } catch (err: any) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+    return false;
+  } finally {
+    isApplyingPublishCuration = false;
+    updatePublishMomentSelectionSummary();
+  }
 }
 
 async function openCuratedFolderForPublish(
@@ -4739,6 +5030,10 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
   publishMomentName = momentName;
   publishMomentAssets = [];
   publishSelectedAssetIds.clear();
+  publishSkippedAssetIds.clear();
+  publishAutoPromotedIds.clear();
+  publishInitialSelectedKey = '';
+  publishTargetBatchSize = 9;
   publishTagsDirty = false;
   publishTagState.momentName = momentName;
   publishTagState.tags = [];
@@ -4801,7 +5096,7 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
           <strong>${isRepublish ? '🔄 Republish' : '✨ First Publish'}</strong> ·
           Curated: <strong>${curCount}</strong> ·
           Already Published: <strong>${pubCount}</strong> ·
-          Remaining Unpublished: <strong>${unpubCount}</strong>${syncNote}
+          Remaining Queue: <strong>${unpubCount}</strong>${syncNote}
         </span>
       `;
     }
@@ -4818,7 +5113,8 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
     }
 
     publishMomentAssets = data.assets || [];
-    publishMomentAssets.forEach(a => publishSelectedAssetIds.add(a.asset_id));
+    registerPublishAssetsForPreview(publishMomentAssets, momentName);
+    resetPublishInitialTopSelection();
     renderPublishMomentAssets();
 
     if (tagRes && tagRes.ok) {
@@ -4856,6 +5152,7 @@ async function submitPublishMoment(): Promise<void> {
   const assetIds = publishMomentAssets
     .filter(a => publishSelectedAssetIds.has(a.asset_id))
     .map(a => a.asset_id);
+  const skipIds = Array.from(publishSkippedAssetIds);
   const statusEl = document.getElementById('publish-moment-status');
   const btnCancel = document.getElementById('btn-cancel-publish-moment') as HTMLButtonElement | null;
   const btnSubmit = document.getElementById('btn-submit-publish-moment') as HTMLButtonElement | null;
@@ -4879,7 +5176,11 @@ async function submitPublishMoment(): Promise<void> {
   }
   if (statusEl) {
     statusEl.style.display = 'flex';
-    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Recording publication of ${assetIds.length} asset(s) for <code>${escapeHtml(publishMomentName)}</code>...</span>`;
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>${
+      skipIds.length > 0
+        ? `Moving ${skipIds.length} unselected asset(s) to SkipPublishing & recording publication of ${assetIds.length} asset(s)...`
+        : `Recording publication of ${assetIds.length} asset(s) for <code>${escapeHtml(publishMomentName)}</code>...`
+    }</span>`;
   }
 
   let succeeded = false;
@@ -4893,6 +5194,7 @@ async function submitPublishMoment(): Promise<void> {
       body: JSON.stringify({
         moment_name: publishMomentName,
         asset_ids: assetIds,
+        skip_publishing_asset_ids: skipIds,
         shutterfly_url: (sfInp?.value || '').trim() || null,
         youtube_url: (ytInp?.value || '').trim() || null,
         account: (accInp?.value || 'nickolay.cohen@gmail.com').trim() || 'nickolay.cohen@gmail.com'
@@ -4907,11 +5209,14 @@ async function submitPublishMoment(): Promise<void> {
       return;
     }
 
+    publishSkippedAssetIds.clear();
     await Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
     if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
 
     if (statusEl) {
       const syncInfo = data.pub_rec_sync;
+      const skipNote =
+        (data.skip_publishing_moved ?? 0) > 0 ? ` · ${data.skip_publishing_moved} unselected ➜ SkipPublishing` : '';
       const syncSuffix = syncInfo?.removed_folder
         ? ' · Pub. Rec folder removed (M500 complete)'
         : syncInfo?.synced
@@ -4922,7 +5227,7 @@ async function submitPublishMoment(): Promise<void> {
         <span class="text-green">
           ✅ Recorded <strong>${data.inserted_count ?? 0}</strong> asset(s) for
           <code>${escapeHtml(data.moment_name || publishMomentName)}</code>
-          (Stage: <strong>${escapeHtml(data.new_stage || 'M450')}</strong> · Total Published: ${data.total_published ?? 0}/${data.curated_total ?? 0}${escapeHtml(syncSuffix)}).
+          (Stage: <strong>${escapeHtml(data.new_stage || 'M450')}</strong> · Total Published: ${data.total_published ?? 0}/${data.curated_total ?? 0}${escapeHtml(skipNote)}${escapeHtml(syncSuffix)}).
         </span>
       `;
     }

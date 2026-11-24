@@ -528,6 +528,14 @@ export interface PublishMomentAssetItem {
   score: number;
   media_type: 'photo' | 'video';
   local_files?: string[];
+  date_created_utc?: string;
+  file_size_bytes?: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+  camera_model?: string;
+  primary_owner?: string;
+  asset_tags?: MomentTagItem[];
 }
 
 export interface PublishMomentInfoResponse {
@@ -540,6 +548,7 @@ export interface PublishMomentInfoResponse {
   curated_count?: number;
   published_count?: number;
   unpublished_count?: number;
+  target_batch_size?: number;
   curated_dir?: string;
   curated_dir_exists?: boolean;
   pub_rec_dir?: string;
@@ -553,6 +562,8 @@ export interface PublishMomentInfoResponse {
     expected_files?: string[];
   };
   assets?: PublishMomentAssetItem[];
+  skip_publishing_moved?: number;
+  skip_publishing_error?: string;
 }
 
 export interface PublishMomentResponse {
@@ -561,6 +572,8 @@ export interface PublishMomentResponse {
   moment_name?: string;
   inserted_count?: number;
   skipped_count?: number;
+  skip_publishing_moved?: number;
+  skip_publishing_error?: string;
   photos_count?: number;
   videos_count?: number;
   total_published?: number;

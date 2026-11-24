@@ -6262,10 +6262,17 @@ def create_moment_via_applescript(req: CreateMomentRequest):
 class PublishMomentRequest(BaseModel):
     moment_name: str
     asset_ids: list[str]
+    skip_publishing_asset_ids: list[str] = []
     shutterfly_url: Optional[str] = None
     youtube_url: Optional[str] = None
     account: Optional[str] = "nickolay.cohen@gmail.com"
     custom_platform: Optional[str] = None
+
+
+class CuratePublishBatchRequest(BaseModel):
+    moment_name: str
+    selected_asset_ids: list[str] = []
+    skip_publishing_asset_ids: list[str] = []
 
 
 class OpenCuratedFolderRequest(BaseModel):
@@ -6360,7 +6367,11 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
     return rows, moment_pub_aids
 
 
-def _sync_publishing_recommendation_for_moment(cur: sqlite3.Cursor, moment_name: str) -> dict:
+def _sync_publishing_recommendation_for_moment(
+    cur: sqlite3.Cursor,
+    moment_name: str,
+    selected_asset_ids: Optional[list[str]] = None,
+) -> dict:
     """Sync /Volumes/LaCie/Media Organizer/Publishing Recommendation/<moment> from Curated/<moment> matching CLI logic."""
     src_dir = CURATED_LACIE_DIR / moment_name
     dest_dir = PUBLISHING_RECOMMENDATION_DIR / moment_name
@@ -6378,7 +6389,11 @@ def _sync_publishing_recommendation_for_moment(cur: sqlite3.Cursor, moment_name:
 
     rows, _ = _get_curated_asset_rows_for_moment(cur, moment_name)
     unpublished_rows = [(aid, fn, sc) for aid, fn, sc, is_pub in rows if not is_pub]
-    top_batch = unpublished_rows[:9]
+    if selected_asset_ids is not None:
+        sel_set = {s.strip() for s in selected_asset_ids if s and s.strip()}
+        top_batch = [(aid, fn, sc) for aid, fn, sc in unpublished_rows if aid in sel_set]
+    else:
+        top_batch = unpublished_rows[:9]
 
     if not top_batch or len(rows) < 2:
         removed_folder = False
@@ -6477,9 +6492,143 @@ def _sync_publishing_recommendation_for_moment(cur: sqlite3.Cursor, moment_name:
     }
 
 
+def _enrich_publish_queue_assets(
+    cur: sqlite3.Cursor,
+    m_name: str,
+    unpublished_rows: list[tuple[str, str, float]],
+    local_by_base: dict[str, list[str]],
+) -> list[dict]:
+    """Attach optional preview metadata & individual DB tags onto unpublished queue items."""
+    meta_by_id: dict[str, dict] = {}
+    tags_by_id: dict[str, list[dict]] = {}
+    if unpublished_rows:
+        aids = [aid for aid, _, _ in unpublished_rows]
+        ph = ",".join("?" for _ in aids)
+        try:
+            cur.execute(
+                f"""
+                SELECT
+                    a.asset_id,
+                    COALESCE(a.date_created_utc, ''),
+                    ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
+                    COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
+                    COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
+                    COALESCE(aaa.ZORIGINALFILESIZE, 0),
+                    COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device, 'Library'),
+                    COALESCE(do.owner_name, '')
+                FROM assets a
+                LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+                LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+                LEFT JOIN device_owners do ON do.camera_model = COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device)
+                WHERE a.asset_id IN ({ph})
+                """,
+                aids,
+            )
+            for r in cur.fetchall():
+                meta_by_id[r[0]] = {
+                    "date_created_utc": r[1] or "",
+                    "duration": float(r[2] or 0.0),
+                    "width": int(r[3] or 0),
+                    "height": int(r[4] or 0),
+                    "file_size_bytes": int(r[5] or 0),
+                    "camera_model": r[6] or "Library",
+                    "primary_owner": r[7] or "",
+                }
+        except sqlite3.OperationalError:
+            try:
+                cur.execute(f"SELECT asset_id, COALESCE(date_created_utc, '') FROM assets WHERE asset_id IN ({ph})", aids)
+                for r in cur.fetchall():
+                    meta_by_id[r[0]] = {"date_created_utc": r[1] or ""}
+            except sqlite3.OperationalError:
+                pass
+
+        try:
+            _ensure_moment_tag_tables(cur)
+            cur.execute(
+                f"""
+                SELECT asset_id, category, tag_value, include_in_name
+                FROM moment_tags
+                WHERE asset_id IN ({ph})
+                ORDER BY id ASC
+                """,
+                aids,
+            )
+            seen_t: set[tuple[str, str]] = set()
+            for aid_t, cat_t, val_t, inc_t in cur.fetchall():
+                if not aid_t or not val_t:
+                    continue
+                tk = (aid_t, val_t.strip().lower())
+                if tk in seen_t:
+                    continue
+                seen_t.add(tk)
+                tags_by_id.setdefault(aid_t, []).append(
+                    {"category": cat_t, "tag_value": val_t, "include_in_name": bool(inc_t)}
+                )
+        except sqlite3.OperationalError:
+            pass
+
+    assets_out = []
+    for aid, fn, sc in unpublished_rows:
+        ext = os.path.splitext(fn or "")[1].lower()
+        base = os.path.splitext(fn or "")[0].lower()
+        m = meta_by_id.get(aid, {})
+        assets_out.append(
+            {
+                "asset_id": aid,
+                "filename": fn,
+                "score": round(sc, 4),
+                "media_type": "video" if ext in VIDEO_EXTENSIONS else "photo",
+                "local_files": local_by_base.get(base, []),
+                "date_created_utc": m.get("date_created_utc", ""),
+                "file_size_bytes": m.get("file_size_bytes", 0),
+                "duration": m.get("duration", 0.0),
+                "width": m.get("width", 0),
+                "height": m.get("height", 0),
+                "camera_model": m.get("camera_model", "Library"),
+                "primary_owner": m.get("primary_owner", ""),
+                "asset_tags": tags_by_id.get(aid, []),
+            }
+        )
+    return assets_out
+
+
+def _move_assets_to_skip_publishing(skip_ids: list[str], cur: sqlite3.Cursor) -> tuple[int, Optional[str]]:
+    """Add unselected publishing assets to Moments/SkipPublishing in Apple Photos and local DB."""
+    clean_skip: list[str] = []
+    seen: set[str] = set()
+    for raw_s in skip_ids or []:
+        s = (raw_s or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            clean_skip.append(s)
+    if not clean_skip:
+        return 0, None
+
+    err_msg: Optional[str] = None
+    try:
+        proc = subprocess.run(
+            ["osascript", "-", "Media Organizer on LaCie", "Moments", "SkipPublishing", "1", *clean_skip],
+            input=_MOMENTS_APPLESCRIPT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        out = (proc.stdout or "").strip()
+        if proc.returncode != 0 or out.startswith("ERROR|"):
+            err_msg = out or (proc.stderr or "").strip() or f"SkipPublishing AppleScript exited {proc.returncode}"
+    except Exception as e:
+        err_msg = str(e)
+
+    if err_msg is None:
+        _upsert_album_and_assets_in_db(cur, "Moments", "SkipPublishing", clean_skip)
+        return len(clean_skip), None
+    return 0, err_msg
+
+
 @router.get("/memories/publish-info")
 def get_moment_publish_info(moment_name: str):
-    """Return curated unpublished batch (top 9), existing URLs, and LaCie Curated / Publishing Recommendation status."""
+    """Return full ranked curated unpublished queue (default target 9), existing URLs, and LaCie folder status."""
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"ok": False, "error": "Media database unavailable"}
     m_name = (moment_name or "").strip()
@@ -6505,7 +6654,6 @@ def get_moment_publish_info(moment_name: str):
             rows, moment_pub_aids = _get_curated_asset_rows_for_moment(cur, m_name)
             curated_total = len(rows)
             unpublished_rows = [(aid, fn, sc) for aid, fn, sc, is_pub in rows if not is_pub]
-            top_batch = unpublished_rows[:9]
 
             moment_dir = CURATED_LACIE_DIR / m_name
             dir_exists = moment_dir.exists() and moment_dir.is_dir()
@@ -6519,19 +6667,7 @@ def get_moment_publish_info(moment_name: str):
                 except Exception:
                     pass
 
-            assets_out = []
-            for aid, fn, sc in top_batch:
-                ext = os.path.splitext(fn or "")[1].lower()
-                base = os.path.splitext(fn or "")[0].lower()
-                assets_out.append(
-                    {
-                        "asset_id": aid,
-                        "filename": fn,
-                        "score": round(sc, 4),
-                        "media_type": "video" if ext in VIDEO_EXTENSIONS else "photo",
-                        "local_files": local_by_base.get(base, []),
-                    }
-                )
+            assets_out = _enrich_publish_queue_assets(cur, m_name, unpublished_rows, local_by_base)
 
             pub_rec_dir = PUBLISHING_RECOMMENDATION_DIR / m_name
             return {
@@ -6543,12 +6679,109 @@ def get_moment_publish_info(moment_name: str):
                 "curated_count": curated_total,
                 "published_count": len(moment_pub_aids),
                 "unpublished_count": len(unpublished_rows),
+                "target_batch_size": min(9, len(unpublished_rows)),
                 "curated_dir": str(moment_dir),
                 "curated_dir_exists": dir_exists,
                 "pub_rec_dir": str(pub_rec_dir),
                 "pub_rec_dir_exists": pub_rec_dir.exists() and pub_rec_dir.is_dir(),
                 "pub_rec_sync": sync_res,
                 "assets": assets_out,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/memories/curate-publish-batch")
+def curate_publish_batch_action(req: CuratePublishBatchRequest):
+    """Move unselected publish candidates to Moments/SkipPublishing and sync selected batch to Publishing Recommendation folder."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    m_name = (req.moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+
+    sel_ids: list[str] = []
+    seen_sel: set[str] = set()
+    for raw_aid in req.selected_asset_ids or []:
+        s = (raw_aid or "").strip()
+        if s and s not in seen_sel:
+            seen_sel.add(s)
+            sel_ids.append(s)
+
+    skip_ids: list[str] = []
+    seen_skip = set(seen_sel)
+    for raw_aid in req.skip_publishing_asset_ids or []:
+        s = (raw_aid or "").strip()
+        if s and s not in seen_skip:
+            seen_skip.add(s)
+            skip_ids.append(s)
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            moved_cnt, skip_err = _move_assets_to_skip_publishing(skip_ids, cur)
+            if skip_err and moved_cnt == 0 and skip_ids:
+                return {"ok": False, "error": f"Failed moving unselected assets to SkipPublishing: {skip_err}"}
+            conn.commit()
+
+            rows, moment_pub_aids = _get_curated_asset_rows_for_moment(cur, m_name)
+            curated_total = len(rows)
+            unpublished_rows = [(aid, fn, sc) for aid, fn, sc, is_pub in rows if not is_pub]
+
+            # Update curated_moments stage if skipping remaining unpublished items completed M500
+            cm_row = cur.execute(
+                "SELECT COALESCE(memory_stage, 'M400') FROM curated_moments WHERE moment_name = ?",
+                (m_name,),
+            ).fetchone()
+            cur_stage = (cm_row[0] if cm_row and cm_row[0] else "M400")
+            if len(moment_pub_aids) > 0 and curated_total > 0 and len(moment_pub_aids) >= curated_total:
+                cur_stage = "M500"
+                cur.execute(
+                    "UPDATE curated_moments SET memory_stage = 'M500', last_pipeline_sync = datetime('now') WHERE moment_name = ?",
+                    (m_name,),
+                )
+                conn.commit()
+
+            sync_res = _sync_publishing_recommendation_for_moment(
+                cur,
+                m_name,
+                selected_asset_ids=sel_ids if sel_ids else None,
+            )
+
+            moment_dir = CURATED_LACIE_DIR / m_name
+            dir_exists = moment_dir.exists() and moment_dir.is_dir()
+            local_by_base: dict[str, list[str]] = {}
+            if dir_exists:
+                try:
+                    for entry in os.listdir(moment_dir):
+                        if not entry.startswith(".") and (moment_dir / entry).is_file():
+                            b = os.path.splitext(entry)[0].lower()
+                            local_by_base.setdefault(b, []).append(entry)
+                except Exception:
+                    pass
+
+            assets_out = _enrich_publish_queue_assets(cur, m_name, unpublished_rows, local_by_base)
+            pub_rec_dir = PUBLISHING_RECOMMENDATION_DIR / m_name
+            return {
+                "ok": True,
+                "moment_name": m_name,
+                "memory_stage": cur_stage,
+                "curated_count": curated_total,
+                "published_count": len(moment_pub_aids),
+                "unpublished_count": len(unpublished_rows),
+                "target_batch_size": min(9, len(unpublished_rows)),
+                "curated_dir": str(moment_dir),
+                "curated_dir_exists": dir_exists,
+                "pub_rec_dir": str(pub_rec_dir),
+                "pub_rec_dir_exists": pub_rec_dir.exists() and pub_rec_dir.is_dir(),
+                "pub_rec_sync": sync_res,
+                "assets": assets_out,
+                "skip_publishing_moved": moved_cnt,
+                "skip_publishing_error": skip_err,
             }
         finally:
             conn.close()
@@ -6665,6 +6898,13 @@ def publish_moment_assets(req: PublishMomentRequest):
         conn.execute("PRAGMA busy_timeout = 30000")
         try:
             cur = conn.cursor()
+            skip_candidates = [
+                s.strip()
+                for s in (req.skip_publishing_asset_ids or [])
+                if s and s.strip() and s.strip() not in seen
+            ]
+            skip_moved_cnt, skip_err = _move_assets_to_skip_publishing(skip_candidates, cur)
+
             cur.execute(
                 "SELECT shutterfly_url, youtube_url FROM curated_moments WHERE moment_name = ?",
                 (m_name,),
@@ -6763,6 +7003,8 @@ def publish_moment_assets(req: PublishMomentRequest):
                 "moment_name": m_name,
                 "inserted_count": len(pub_rows),
                 "skipped_count": skipped_count,
+                "skip_publishing_moved": skip_moved_cnt,
+                "skip_publishing_error": skip_err,
                 "photos_count": photos_cnt,
                 "videos_count": videos_cnt,
                 "total_published": total_pub_after,

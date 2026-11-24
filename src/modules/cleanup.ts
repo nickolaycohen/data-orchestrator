@@ -1344,8 +1344,8 @@ function togglePreviewAssetSelection(targetAssetId?: string | null): void {
   const nextSelected = !previewSelectedIds.has(aid);
   if (nextSelected) previewSelectedIds.add(aid);
   else previewSelectedIds.delete(aid);
-  syncPreviewSelectionControls();
   previewSelectionChangeCb?.(aid, nextSelected, previewSelectedIds);
+  syncPreviewSelectionControls();
 }
 
 function renderPreviewFilmstrip(): void {
