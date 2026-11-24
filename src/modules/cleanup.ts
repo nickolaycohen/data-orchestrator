@@ -31,6 +31,8 @@ export interface PreviewGroupContext {
   onRemoveFromGroup?: (assetId: string) => Promise<boolean | void>;
   selectedIds?: Set<string>;
   selectableAssetIds?: Set<string>;
+  targetSelectionCount?: number;
+  defaultSort?: 'timestamp' | 'score';
   onSelectionChange?: (assetId: string, selected: boolean, selectedIds: Set<string>) => void;
 }
 
@@ -43,8 +45,11 @@ let previewHideMarkRemoved = false;
 let previewRemoveFromGroupCb: ((assetId: string) => Promise<boolean | void>) | null = null;
 let previewSelectedIds: Set<string> | null = null;
 let previewSelectableIds: Set<string> | null = null;
+let previewTargetCount: number | null = null;
 let previewSelectionChangeCb: ((assetId: string, selected: boolean, selectedIds: Set<string>) => void) | null = null;
 let previewSortMode: 'timestamp' | 'score' = 'timestamp';
+let previewFilterMode: 'all' | 'selected' | 'unselected' = 'all';
+let previewDetailsExpanded = false;
 let isFetchingCleanupDevices = false;
 let isFetchingCleanupCandidates = false;
 
@@ -288,11 +293,22 @@ export function setupMediaCleanup(): void {
     navigateCleanupPreview(1);
   });
 
-  document.querySelectorAll<HTMLElement>('.cleanup-preview-sort-btn').forEach(btn => {
+  document.querySelectorAll<HTMLElement>('.cleanup-preview-sort-order-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       previewSortMode = btn.dataset.previewSort === 'score' ? 'score' : 'timestamp';
       applyPreviewSortOrder(true);
     });
+  });
+
+  document.querySelectorAll<HTMLElement>('.cleanup-preview-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.previewFilter;
+      setPreviewFilterMode(mode === 'selected' || mode === 'unselected' ? mode : 'all');
+    });
+  });
+
+  document.getElementById('btn-preview-toggle-details')?.addEventListener('click', () => {
+    togglePreviewDetailsExpanded();
   });
 
   document.getElementById('cleanup-preview-filmstrip')?.addEventListener(
@@ -324,12 +340,19 @@ export function setupMediaCleanup(): void {
     } else if ((e.key === ' ' || e.code === 'Space') && previewSelectedIds) {
       if (
         targetTag === 'VIDEO' ||
-        targetEl?.closest('.modal-footer button, .cleanup-preview-sort-btn, .btn-close-modal')
+        targetEl?.closest('.modal-footer button, .cleanup-preview-sort-btn, .btn-close-modal, #btn-preview-toggle-details')
       ) {
         return;
       }
       e.preventDefault();
       togglePreviewAssetSelection();
+    } else if ((e.key === 'f' || e.key === 'F') && previewSelectedIds && previewGroupAssetIds.length > 1) {
+      e.preventDefault();
+      const nextMode = previewFilterMode === 'all' ? 'selected' : previewFilterMode === 'selected' ? 'unselected' : 'all';
+      setPreviewFilterMode(nextMode);
+    } else if (e.key === 'i' || e.key === 'I') {
+      e.preventDefault();
+      togglePreviewDetailsExpanded();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       closeCleanupPreviewModal();
@@ -1213,11 +1236,56 @@ function stopPreviewMedia(): void {
   }
 }
 
+function getVisiblePreviewIndices(): number[] {
+  if (!previewSelectedIds || previewFilterMode === 'all') {
+    return previewGroupAssetIds.map((_, idx) => idx);
+  }
+  const indices: number[] = [];
+  previewGroupAssetIds.forEach((aid, idx) => {
+    const isSel = Boolean(isPreviewAssetSelectable(aid) && previewSelectedIds?.has(aid));
+    if (previewFilterMode === 'selected' && isSel) indices.push(idx);
+    else if (previewFilterMode === 'unselected' && !isSel) indices.push(idx);
+  });
+  return indices;
+}
+
+function setPreviewFilterMode(mode: 'all' | 'selected' | 'unselected'): void {
+  previewFilterMode = mode;
+  const visible = getVisiblePreviewIndices();
+  if (visible.length === 0 && mode !== 'all') {
+    previewFilterMode = 'all';
+  } else if (visible.length > 0 && !visible.includes(previewGroupIndex)) {
+    const nextMatch = visible.find(i => i > previewGroupIndex) ?? visible[0];
+    previewGroupIndex = nextMatch;
+    renderCleanupPreviewAsset(previewGroupAssetIds[previewGroupIndex]);
+  }
+  syncPreviewSelectionControls();
+  updatePreviewGroupControls();
+}
+
+function togglePreviewDetailsExpanded(forceVal?: boolean): void {
+  previewDetailsExpanded = forceVal !== undefined ? forceVal : !previewDetailsExpanded;
+  const gridEl = document.getElementById('cleanup-preview-meta-grid');
+  const seriesEl = document.getElementById('cleanup-preview-series-meta');
+  const btnEl = document.getElementById('btn-preview-toggle-details');
+  gridEl?.classList.toggle('collapsed', !previewDetailsExpanded);
+  if (seriesEl) {
+    seriesEl.style.display = previewDetailsExpanded && seriesEl.innerHTML ? 'flex' : 'none';
+  }
+  if (btnEl) {
+    btnEl.textContent = previewDetailsExpanded ? '▴ Hide Details' : 'ⓘ Details';
+    btnEl.classList.toggle('active', previewDetailsExpanded);
+  }
+}
+
 function navigateCleanupPreview(delta: number): void {
   if (previewGroupAssetIds.length <= 1) return;
-  const nextIdx = previewGroupIndex + delta;
-  if (nextIdx < 0 || nextIdx >= previewGroupAssetIds.length) return;
-  previewGroupIndex = nextIdx;
+  const visible = getVisiblePreviewIndices();
+  if (visible.length <= 1) return;
+  const pos = visible.indexOf(previewGroupIndex);
+  const nextPos = pos >= 0 ? pos + delta : delta > 0 ? 0 : visible.length - 1;
+  if (nextPos < 0 || nextPos >= visible.length) return;
+  previewGroupIndex = visible[nextPos];
   renderCleanupPreviewAsset(previewGroupAssetIds[previewGroupIndex]);
   updatePreviewGroupControls();
 }
@@ -1293,46 +1361,140 @@ function isPreviewAssetSelectable(assetId: string | null): boolean {
 
 function syncPreviewSelectionControls(): void {
   const btnToggle = document.getElementById('btn-preview-toggle-select') as HTMLButtonElement | null;
+  const curatedBadgeEl = document.getElementById('cleanup-preview-curated-badge');
+  const stageEl = document.getElementById('cleanup-preview-stage');
+  const stageRibbonEl = document.getElementById('cleanup-preview-stage-ribbon');
+  const filterGroupEl = document.getElementById('cleanup-preview-filter-group');
+
   const selectableIds = previewSelectableIds
     ? previewGroupAssetIds.filter(id => previewSelectableIds!.has(id))
     : previewGroupAssetIds;
   const totalCount = selectableIds.length || (previewModalAssetId ? 1 : 0);
-  const selectedCount = previewSelectedIds
-    ? selectableIds.filter(id => previewSelectedIds!.has(id)).length
-    : 0;
+  const selectedOrderedIds = previewSelectedIds
+    ? selectableIds.filter(id => previewSelectedIds!.has(id))
+    : [];
+  const selectedCount = selectedOrderedIds.length;
+  const unselectedCount = Math.max(0, totalCount - selectedCount);
+  const keeperRankMap = new Map<string, number>();
+  selectedOrderedIds.forEach((id, idx) => keeperRankMap.set(id, idx + 1));
+
+  const goalDenom =
+    previewTargetCount && previewTargetCount > 0 ? previewTargetCount : Math.max(1, selectedCount);
+  const activeSelectable = Boolean(previewSelectedIds && isPreviewAssetSelectable(previewModalAssetId));
+  const activeSelected = Boolean(activeSelectable && previewSelectedIds?.has(previewModalAssetId!));
+  const activeKeeperRank = previewModalAssetId ? keeperRankMap.get(previewModalAssetId) || 0 : 0;
+
+  if (curatedBadgeEl) {
+    if (activeSelectable) {
+      curatedBadgeEl.style.display = 'inline-flex';
+      if (activeSelected) {
+        curatedBadgeEl.className = 'badge badge-xs badge-green font-mono';
+        const extraTarget =
+          previewTargetCount && selectedCount !== previewTargetCount
+            ? ` (${selectedCount}/${previewTargetCount})`
+            : '';
+        curatedBadgeEl.textContent = `★ Keeper ${activeKeeperRank} / ${goalDenom}${extraTarget}`;
+      } else {
+        curatedBadgeEl.className = 'badge badge-xs badge-amber font-mono';
+        const denomLabel = previewTargetCount && previewTargetCount > 0 ? previewTargetCount : totalCount;
+        curatedBadgeEl.textContent = `⏭️ Excluded · ${selectedCount} / ${denomLabel} selected`;
+      }
+    } else {
+      curatedBadgeEl.style.display = 'none';
+    }
+  }
 
   if (btnToggle) {
-    if (previewSelectedIds && isPreviewAssetSelectable(previewModalAssetId)) {
-      const isSelected = previewSelectedIds.has(previewModalAssetId!);
+    if (activeSelectable) {
       btnToggle.style.display = 'inline-flex';
-      btnToggle.classList.toggle('is-selected', isSelected);
-      btnToggle.classList.toggle('is-unselected', !isSelected);
-      const countSuffix = totalCount > 1 ? ` · ${selectedCount}/${totalCount}` : '';
-      btnToggle.textContent = `${isSelected ? '☑ Selected' : '☐ Unselected'}${countSuffix}`;
-      btnToggle.title = isSelected
-        ? 'Selected in parent list — click or press Space to unselect'
-        : 'Unselected in parent list — click or press Space to select';
+      btnToggle.classList.toggle('is-selected', activeSelected);
+      btnToggle.classList.toggle('is-unselected', !activeSelected);
+      btnToggle.textContent = activeSelected ? '☑ Selected (Space)' : '☐ Unselected (Space)';
+      btnToggle.title = activeSelected
+        ? 'Curated keeper — click or press Space to unselect'
+        : 'Excluded — click or press Space to select as keeper';
     } else {
       btnToggle.style.display = 'none';
       btnToggle.classList.remove('is-selected', 'is-unselected');
     }
   }
 
+  if (stageEl) {
+    stageEl.classList.toggle('is-stage-selected', activeSelectable && activeSelected);
+    stageEl.classList.toggle('is-stage-unselected', activeSelectable && !activeSelected);
+  }
+
+  if (stageRibbonEl) {
+    if (activeSelectable) {
+      stageRibbonEl.style.display = 'inline-flex';
+      stageRibbonEl.classList.toggle('is-selected', activeSelected);
+      stageRibbonEl.classList.toggle('is-unselected', !activeSelected);
+      stageRibbonEl.textContent = activeSelected
+        ? `★ CURATED #${activeKeeperRank} / ${goalDenom}`
+        : '⏭️ UNSELECTED — Press Space to Keep';
+    } else {
+      stageRibbonEl.style.display = 'none';
+    }
+  }
+
+  if (filterGroupEl) {
+    if (previewSelectedIds && previewGroupAssetIds.length > 1) {
+      filterGroupEl.style.display = 'inline-flex';
+      filterGroupEl.querySelectorAll<HTMLButtonElement>('.cleanup-preview-filter-btn').forEach(btn => {
+        const m = btn.dataset.previewFilter || 'all';
+        btn.classList.toggle('active', m === previewFilterMode);
+        if (m === 'all') {
+          btn.textContent = `All (${previewGroupAssetIds.length})`;
+          btn.disabled = false;
+        } else if (m === 'selected') {
+          btn.textContent = `★ Curated (${selectedCount})`;
+          btn.disabled = selectedCount === 0;
+        } else if (m === 'unselected') {
+          btn.textContent = `⏭️ Unselected (${unselectedCount})`;
+          btn.disabled = unselectedCount === 0;
+        }
+      });
+    } else {
+      filterGroupEl.style.display = 'none';
+    }
+  }
+
   const strip = document.getElementById('cleanup-preview-filmstrip');
   if (strip) {
-    strip.querySelectorAll<HTMLElement>('.cleanup-preview-thumb-item').forEach(item => {
+    strip.querySelectorAll<HTMLElement>('.cleanup-preview-thumb-item').forEach((item, idx) => {
       const aid = item.dataset.assetId || '';
       const selectable = isPreviewAssetSelectable(aid);
       const isSelected = Boolean(selectable && previewSelectedIds?.has(aid));
+      const kRank = keeperRankMap.get(aid) || 0;
+      const isDup = item.classList.contains('is-dup-copy');
+
       item.classList.toggle('has-selection-mode', selectable);
       item.classList.toggle('is-selected', selectable && isSelected);
       item.classList.toggle('is-unselected', selectable && !isSelected);
+
+      const hideByFilter =
+        Boolean(previewSelectedIds) &&
+        ((previewFilterMode === 'selected' && !isSelected) ||
+          (previewFilterMode === 'unselected' && isSelected));
+      item.classList.toggle('filtered-hidden', hideByFilter);
+
+      const idxBadge = item.querySelector<HTMLElement>('.cleanup-preview-thumb-idx');
+      if (idxBadge) {
+        if (selectable && isSelected && kRank > 0) {
+          idxBadge.classList.add('is-keeper-rank');
+          idxBadge.textContent = `★ #${kRank}${isDup ? ' ♻️' : ''}`;
+        } else {
+          idxBadge.classList.remove('is-keeper-rank');
+          idxBadge.textContent = `#${idx + 1}${isDup ? ' ♻️' : ''}`;
+        }
+      }
+
       const selBadge = item.querySelector<HTMLElement>('.cleanup-preview-thumb-sel');
       if (selBadge) {
         selBadge.classList.toggle('is-selected', isSelected);
         selBadge.classList.toggle('is-unselected', !isSelected);
-        selBadge.textContent = isSelected ? '✓' : '☐';
-        selBadge.title = isSelected ? 'Selected (click to unselect)' : 'Unselected (click to select)';
+        selBadge.textContent = isSelected ? '✓' : '✕';
+        selBadge.title = isSelected ? 'Curated keeper (click to unselect)' : 'Unselected (click to keep)';
       }
     });
   }
@@ -1345,7 +1507,20 @@ function togglePreviewAssetSelection(targetAssetId?: string | null): void {
   if (nextSelected) previewSelectedIds.add(aid);
   else previewSelectedIds.delete(aid);
   previewSelectionChangeCb?.(aid, nextSelected, previewSelectedIds);
+
+  if (previewFilterMode !== 'all') {
+    const visible = getVisiblePreviewIndices();
+    if (visible.length === 0) {
+      previewFilterMode = 'all';
+    } else if (!visible.includes(previewGroupIndex)) {
+      const nextMatch = visible.find(i => i > previewGroupIndex) ?? visible[visible.length - 1];
+      previewGroupIndex = nextMatch;
+      renderCleanupPreviewAsset(previewGroupAssetIds[previewGroupIndex]);
+    }
+  }
+
   syncPreviewSelectionControls();
+  updatePreviewGroupControls();
 }
 
 function renderPreviewFilmstrip(): void {
@@ -1455,22 +1630,26 @@ function syncPreviewFooterActionButtons(): void {
 function updatePreviewGroupControls(): void {
   const total = previewGroupAssetIds.length;
   const hasGroup = total > 1;
+  const visible = getVisiblePreviewIndices();
+  const visPos = visible.indexOf(previewGroupIndex);
   const btnPrev = document.getElementById('btn-preview-prev') as HTMLButtonElement | null;
   const btnNext = document.getElementById('btn-preview-next') as HTMLButtonElement | null;
   const groupBadgeEl = document.getElementById('cleanup-preview-group-badge');
 
   if (btnPrev) {
-    btnPrev.style.display = hasGroup ? 'flex' : 'none';
-    btnPrev.disabled = previewGroupIndex <= 0;
+    btnPrev.style.display = hasGroup && visible.length > 1 ? 'flex' : 'none';
+    btnPrev.disabled = visPos <= 0;
   }
   if (btnNext) {
-    btnNext.style.display = hasGroup ? 'flex' : 'none';
-    btnNext.disabled = previewGroupIndex < 0 || previewGroupIndex >= total - 1;
+    btnNext.style.display = hasGroup && visible.length > 1 ? 'flex' : 'none';
+    btnNext.disabled = visPos < 0 || visPos >= visible.length - 1;
   }
   if (groupBadgeEl) {
     if (hasGroup && previewGroupIndex >= 0) {
       groupBadgeEl.style.display = 'inline-flex';
-      groupBadgeEl.textContent = `${previewGroupIndex + 1} / ${total}`;
+      groupBadgeEl.textContent = previewSelectedIds
+        ? `Queue ${previewGroupIndex + 1} / ${total}`
+        : `${previewGroupIndex + 1} / ${total}`;
     } else {
       groupBadgeEl.style.display = 'none';
     }
@@ -1507,11 +1686,13 @@ function previewTagBadgeClass(cat: string): string {
 }
 
 function renderPreviewAssetTagChips(container: HTMLElement, tags: MomentTagItem[]): void {
+  const compactTagsEl = document.getElementById('cleanup-preview-compact-tags');
   if (!tags.length) {
     container.innerHTML = '<span class="text-muted">No individual DB tags recorded for this asset yet.</span>';
+    if (compactTagsEl) compactTagsEl.innerHTML = '';
     return;
   }
-  container.innerHTML = tags
+  const chipsHtml = tags
     .map(
       t =>
         `<span class="badge badge-xs ${previewTagBadgeClass(t.category)} font-mono" title="Category: ${escapeHtml(
@@ -1519,6 +1700,17 @@ function renderPreviewAssetTagChips(container: HTMLElement, tags: MomentTagItem[
         )}">${escapeHtml(t.category)}: ${escapeHtml(t.tag_value)}</span>`
     )
     .join('');
+  container.innerHTML = chipsHtml;
+  if (compactTagsEl) {
+    compactTagsEl.innerHTML = tags
+      .map(
+        t =>
+          `<span class="badge badge-xs ${previewTagBadgeClass(t.category)} font-mono" style="font-size: 0.62rem;">🏷️ ${escapeHtml(
+            t.tag_value
+          )}</span>`
+      )
+      .join('');
+  }
 }
 
 function renderCleanupPreviewAsset(assetId: string): void {
@@ -1597,6 +1789,27 @@ function renderCleanupPreviewAsset(assetId: string): void {
   if (momEl) momEl.textContent = c.assigned_moment || '—';
   if (uuidEl) uuidEl.textContent = `Asset UUID: ${c.asset_id}`;
 
+  const compactSummaryEl = document.getElementById('cleanup-preview-compact-summary');
+  if (compactSummaryEl) {
+    const scoreStr = typeof c.score_normalized === 'number' ? `⭐ ${c.score_normalized.toFixed(4)}` : '';
+    const dateShort = tsParts.dateLine && tsParts.dateLine !== '—'
+      ? `📅 ${tsParts.dateLine}${tsParts.timeLine ? ` ${tsParts.timeLine.slice(0, 5)}` : ''}`
+      : '';
+    const resShort = c.width && c.height ? `📐 ${c.width}×${c.height}` : '';
+    const devShort =
+      c.camera_model && c.camera_model !== 'Library'
+        ? `📱 ${c.camera_model}${c.primary_owner ? ` (${c.primary_owner})` : ''}`
+        : c.primary_owner
+          ? `👤 ${c.primary_owner}`
+          : '';
+    const durShort = isVideo && c.duration_sec ? `⏱️ ${formatDuration(c.duration_sec)}` : '';
+    const compactParts = [dateShort, scoreStr, durShort, resShort, devShort].filter(Boolean);
+    compactSummaryEl.textContent = compactParts.join('  ·  ') || c.original_filename;
+  }
+
+  const compactTagsEl = document.getElementById('cleanup-preview-compact-tags');
+  if (compactTagsEl) compactTagsEl.innerHTML = '';
+
   const tagsEl = document.getElementById('cleanup-preview-tags');
   if (tagsEl) {
     if (Array.isArray(c.asset_tags)) {
@@ -1668,7 +1881,7 @@ function compareAssetsByScore(aId: string, bId: string): number {
 }
 
 function syncPreviewSortButtons(): void {
-  document.querySelectorAll<HTMLElement>('.cleanup-preview-sort-btn').forEach(btn => {
+  document.querySelectorAll<HTMLElement>('.cleanup-preview-sort-order-btn').forEach(btn => {
     btn.classList.toggle('active', (btn.dataset.previewSort || 'timestamp') === previewSortMode);
   });
 }
@@ -1719,7 +1932,13 @@ export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupC
   previewRemoveFromGroupCb = context?.onRemoveFromGroup || null;
   previewSelectedIds = context?.selectedIds || null;
   previewSelectableIds = context?.selectableAssetIds || null;
+  previewTargetCount = context?.targetSelectionCount ?? null;
   previewSelectionChangeCb = context?.onSelectionChange || null;
+  previewFilterMode = 'all';
+  if (context?.defaultSort) {
+    previewSortMode = context.defaultSort;
+  }
+  togglePreviewDetailsExpanded(false);
 
   renderCleanupPreviewAsset(assetId);
   applyPreviewSortOrder();
@@ -1743,6 +1962,7 @@ export function closeCleanupPreviewModal(): void {
   const seriesMetaEl = document.getElementById('cleanup-preview-series-meta');
   if (seriesMetaEl) {
     seriesMetaEl.innerHTML = '';
+    seriesMetaEl.style.display = 'none';
   }
   const stripWrap = document.getElementById('cleanup-preview-filmstrip-wrap');
   if (stripWrap) {
@@ -1757,7 +1977,10 @@ export function closeCleanupPreviewModal(): void {
   previewRemoveFromGroupCb = null;
   previewSelectedIds = null;
   previewSelectableIds = null;
+  previewTargetCount = null;
   previewSelectionChangeCb = null;
+  previewFilterMode = 'all';
+  togglePreviewDetailsExpanded(false);
   syncPreviewSelectionControls();
   syncPreviewFooterActionButtons();
 }

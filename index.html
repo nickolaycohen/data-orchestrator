@@ -2219,8 +2219,10 @@
             <h3 id="cleanup-preview-title" class="font-mono">IMG_0000.MOV</h3>
             <span class="badge badge-xs badge-purple" id="cleanup-preview-type-badge">VIDEO</span>
             <span class="badge badge-xs badge-amber font-mono" id="cleanup-preview-size-badge">0 MB</span>
+            <span class="badge badge-xs badge-green font-mono" id="cleanup-preview-curated-badge"
+              style="display: none; font-weight: 700;">★ Keeper 1 / 9</span>
             <span class="badge badge-xs badge-outline font-mono" id="cleanup-preview-group-badge"
-              style="display: none;">1 / 1</span>
+              style="display: none;">Queue 1 / 1</span>
             <button type="button" class="btn btn-xs btn-outline cleanup-preview-select-btn"
               id="btn-preview-toggle-select" style="display: none;" title="Toggle selection for this asset (Space)">
               ☐ Unselected
@@ -2231,6 +2233,7 @@
         <div class="modal-body cleanup-preview-body">
           <!-- Media Viewer Stage with Left/Right Group Navigation -->
           <div class="cleanup-preview-stage-wrap">
+            <div class="cleanup-preview-stage-ribbon" id="cleanup-preview-stage-ribbon" style="display: none;"></div>
             <button type="button" class="cleanup-preview-nav-btn prev" id="btn-preview-prev"
               title="Previous asset in group (←)" style="display: none;" aria-label="Previous asset">‹</button>
             <div class="cleanup-preview-stage" id="cleanup-preview-stage">
@@ -2244,23 +2247,40 @@
           <div class="cleanup-preview-filmstrip-wrap" id="cleanup-preview-filmstrip-wrap" style="display: none;">
             <div class="cleanup-preview-filmstrip-header">
               <span class="font-mono text-muted" id="cleanup-preview-group-label">Group Assets</span>
-              <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <div class="cleanup-filter-group" id="cleanup-preview-filter-group" style="display: none; padding: 0.12rem 0.25rem;"
+                  title="Filter filmstrip & arrow navigation (F key cycles)">
+                  <span class="cleanup-filter-label" style="font-size: 0.64rem;">View:</span>
+                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn active" data-preview-filter="all">All</button>
+                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn" data-preview-filter="selected">★ Curated</button>
+                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn" data-preview-filter="unselected">⏭️ Unselected</button>
+                </div>
                 <div class="cleanup-filter-group" id="cleanup-preview-sort-group" style="padding: 0.12rem 0.25rem;"
                   title="Reorder & renumber assets inside this dialog">
                   <span class="cleanup-filter-label" style="font-size: 0.64rem;">Sort:</span>
-                  <button type="button" class="cleanup-preview-sort-btn active" data-preview-sort="timestamp">🕒
+                  <button type="button" class="cleanup-preview-sort-order-btn cleanup-preview-sort-btn active" data-preview-sort="timestamp">🕒
                     Timestamp</button>
-                  <button type="button" class="cleanup-preview-sort-btn" data-preview-sort="score">⭐ Score</button>
+                  <button type="button" class="cleanup-preview-sort-order-btn cleanup-preview-sort-btn" data-preview-sort="score">⭐ Score</button>
                 </div>
-                <span class="font-mono text-muted" style="font-size: 0.68rem;">← / → keys or scroll strip</span>
+                <span class="font-mono text-muted" style="font-size: 0.66rem;">←/→ nav · Space keep · F filter</span>
               </div>
             </div>
-            <div class="cleanup-preview-series-meta" id="cleanup-preview-series-meta"></div>
+            <div class="cleanup-preview-series-meta" id="cleanup-preview-series-meta" style="display: none;"></div>
             <div class="cleanup-preview-filmstrip" id="cleanup-preview-filmstrip"></div>
           </div>
 
-          <!-- Device Identification Metadata Grid (to quickly locate on iPhone/Camera) -->
-          <div class="cleanup-preview-meta-grid">
+          <!-- Compact One-Line Metadata Bar (Expandable to Full Grid) -->
+          <div class="cleanup-preview-compact-meta" id="cleanup-preview-compact-meta">
+            <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; min-width: 0; flex: 1;">
+              <span class="font-mono" id="cleanup-preview-compact-summary">—</span>
+              <span id="cleanup-preview-compact-tags" class="font-mono" style="display: inline-flex; align-items: center; gap: 0.25rem; flex-wrap: wrap;"></span>
+            </div>
+            <button type="button" class="btn btn-xs btn-outline font-mono" id="btn-preview-toggle-details"
+              title="Toggle full device & EXIF details (I key)" style="flex-shrink: 0;">ⓘ Details</button>
+          </div>
+
+          <!-- Device Identification Metadata Grid (Collapsed by default to maximize image stage) -->
+          <div class="cleanup-preview-meta-grid collapsed" id="cleanup-preview-meta-grid">
             <div class="cleanup-preview-meta-item">
               <span class="meta-label">📅 Capture Date &amp; Time (On Device)</span>
               <strong class="font-mono text-primary" id="cleanup-preview-timestamp">—</strong>
@@ -2499,6 +2519,8 @@
                   title="Move unselected items to Moments/SkipPublishing in Apple Photos & sync selected batch into Publishing Recommendation folder">
                   ✅ Apply Curation &amp; Sync Folder
                 </button>
+                <button type="button" class="btn btn-xs btn-outline" id="btn-publish-hide-unselected"
+                  title="Filter list to show only selected curated keepers">👁️ Curated Only</button>
                 <button type="button" class="btn btn-xs btn-outline" id="btn-publish-toggle-all"
                   title="Reset proposed selection back to top 9 assets">↺ Reset Top 9</button>
               </div>
@@ -2584,8 +2606,12 @@
               <div
                 style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
                 <strong style="font-size: 0.8rem;">Assets in Disjoint Moment (click thumbnail to preview)</strong>
-                <span class="badge badge-xs badge-purple font-mono" id="resolve-disjoint-selected-pill">0
-                  selected</span>
+                <div style="display: flex; align-items: center; gap: 0.4rem;">
+                  <span class="badge badge-xs badge-purple font-mono" id="resolve-disjoint-selected-pill">0
+                    selected</span>
+                  <button type="button" class="btn btn-xs btn-outline" id="btn-disjoint-hide-unselected"
+                    title="Filter list to show only selected keepers">👁️ Curated Only</button>
+                </div>
               </div>
               <div class="publish-asset-list" id="resolve-disjoint-asset-list"></div>
             </div>

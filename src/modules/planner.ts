@@ -86,6 +86,8 @@ const publishSkippedAssetIds = new Set<string>();
 const publishAutoPromotedIds = new Set<string>();
 let publishInitialSelectedKey = '';
 let publishTargetBatchSize = 9;
+let publishFilterCuratedOnly = false;
+let disjointFilterCuratedOnly = false;
 let isApplyingPublishCuration = false;
 let isSubmittingPublishMoment = false;
 let publishMomentCompleted = false;
@@ -833,6 +835,14 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     if (!publishMomentAssets.length) return;
     resetPublishInitialTopSelection();
     renderPublishMomentAssets();
+  });
+  document.getElementById('btn-publish-hide-unselected')?.addEventListener('click', () => {
+    publishFilterCuratedOnly = !publishFilterCuratedOnly;
+    renderPublishMomentAssets();
+  });
+  document.getElementById('btn-disjoint-hide-unselected')?.addEventListener('click', () => {
+    disjointFilterCuratedOnly = !disjointFilterCuratedOnly;
+    renderResolveDisjointAssets();
   });
   document.getElementById('btn-publish-apply-curation')?.addEventListener('click', () => {
     void applyPublishBatchCuration(true);
@@ -4787,8 +4797,29 @@ function renderPublishMomentAssets(): void {
   const allAssetIds = publishMomentAssets.map(a => a.asset_id);
   const activeRows: Array<{ asset: PublishMomentAssetItem; idx: number }> = [];
   const standbyRows: Array<{ asset: PublishMomentAssetItem; idx: number }> = [];
+  const keeperRankMap = new Map<string, number>();
+  let kCounter = 0;
+  publishMomentAssets.forEach(a => {
+    if (publishSelectedAssetIds.has(a.asset_id)) {
+      kCounter += 1;
+      keeperRankMap.set(a.asset_id, kCounter);
+    }
+  });
+  const targetDenom = Math.min(9, Math.max(1, publishMomentAssets.length - publishSkippedAssetIds.size));
+
+  const filterBtn = document.getElementById('btn-publish-hide-unselected');
+  if (filterBtn) {
+    filterBtn.classList.toggle('btn-purple', publishFilterCuratedOnly);
+    filterBtn.classList.toggle('btn-outline', !publishFilterCuratedOnly);
+    filterBtn.textContent = publishFilterCuratedOnly
+      ? `★ Curated Only (${publishSelectedAssetIds.size})`
+      : '👁️ Curated Only';
+  }
 
   publishMomentAssets.forEach((a, idx) => {
+    if (publishFilterCuratedOnly && !publishSelectedAssetIds.has(a.asset_id)) {
+      return;
+    }
     if (publishSelectedAssetIds.has(a.asset_id) || publishSkippedAssetIds.has(a.asset_id)) {
       activeRows.push({ asset: a, idx });
     } else {
@@ -4800,7 +4831,11 @@ function renderPublishMomentAssets(): void {
     const checked = publishSelectedAssetIds.has(a.asset_id);
     const isSkipped = publishSkippedAssetIds.has(a.asset_id);
     const isPromoted = checked && publishAutoPromotedIds.has(a.asset_id);
+    const kRank = keeperRankMap.get(a.asset_id) || 0;
     const rowCls = checked ? ' is-selected' : isSkipped ? ' is-skip-pending' : isStandby ? ' is-standby' : '';
+    const keeperBadge = checked
+      ? `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Keeper ${kRank}/${targetDenom}</span>`
+      : '';
     const typeBadge =
       a.media_type === 'video'
         ? '<span class="badge badge-xs badge-purple font-mono">VIDEO</span>'
@@ -4829,7 +4864,7 @@ function renderPublishMomentAssets(): void {
       <div class="publish-asset-row${rowCls}">
         <div class="publish-asset-left">
           <input type="checkbox" class="publish-asset-checkbox" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer;" />
-          <button type="button" class="disjoint-row-thumb-btn btn-preview-publish-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="Click to open full preview (press Space to toggle selection)" style="width: 40px; height: 40px;">
+          <button type="button" class="disjoint-row-thumb-btn btn-preview-publish-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="Click to open Curation Lightbox (Space toggles selection)" style="width: 40px; height: 40px;">
             <img src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.filename)}" loading="lazy" />
           </button>
           <div style="min-width: 0; flex: 1;">
@@ -4837,6 +4872,7 @@ function renderPublishMomentAssets(): void {
               #${idx + 1} · ${escapeHtml(a.filename || a.asset_id)}
             </div>
             <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
+              ${keeperBadge}
               ${typeBadge}
               <span class="font-mono text-amber" style="font-size: 0.69rem;">Score ${a.score.toFixed(4)}</span>
               ${localNote}
@@ -4875,6 +4911,8 @@ function renderPublishMomentAssets(): void {
         groupLabel: `${publishMomentName} · Publish Queue`,
         hideMarkRemoved: true,
         selectedIds: publishSelectedAssetIds,
+        targetSelectionCount: Math.min(9, Math.max(1, publishMomentAssets.length - publishSkippedAssetIds.size)),
+        defaultSort: 'score',
         onSelectionChange: (changedId, checked) => {
           applyPublishAssetToggle(changedId, checked);
         }
@@ -5034,6 +5072,7 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
   publishAutoPromotedIds.clear();
   publishInitialSelectedKey = '';
   publishTargetBatchSize = 9;
+  publishFilterCuratedOnly = false;
   publishTagsDirty = false;
   publishTagState.momentName = momentName;
   publishTagState.tags = [];
@@ -5320,9 +5359,35 @@ function renderResolveDisjointAssets(): void {
   }
 
   const allAssetIds = resolveDisjointAssets.map(a => a.asset_id);
+  const keeperRankMap = new Map<string, number>();
+  let kCounter = 0;
+  resolveDisjointAssets.forEach(a => {
+    if (resolveDisjointSelectedIds.has(a.asset_id)) {
+      kCounter += 1;
+      keeperRankMap.set(a.asset_id, kCounter);
+    }
+  });
+  const totalSelected = keeperRankMap.size;
+
+  const disjFilterBtn = document.getElementById('btn-disjoint-hide-unselected');
+  if (disjFilterBtn) {
+    disjFilterBtn.classList.toggle('btn-purple', disjointFilterCuratedOnly);
+    disjFilterBtn.classList.toggle('btn-outline', !disjointFilterCuratedOnly);
+    disjFilterBtn.textContent = disjointFilterCuratedOnly
+      ? `★ Curated Only (${totalSelected})`
+      : '👁️ Curated Only';
+  }
+
   listEl.innerHTML = resolveDisjointAssets
     .map((a, idx) => {
       const checked = resolveDisjointSelectedIds.has(a.asset_id);
+      if (disjointFilterCuratedOnly && !checked) {
+        return '';
+      }
+      const kRank = keeperRankMap.get(a.asset_id) || 0;
+      const keeperBadge = checked
+        ? `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Keeper ${kRank}/${totalSelected}</span>`
+        : '<span class="badge badge-xs badge-amber font-mono">⏭️ Unselected</span>';
       const qualBadge = a.qualified
         ? '<span class="badge badge-xs badge-green font-mono">★ QUALIFIED</span>'
         : '<span class="badge badge-xs badge-outline font-mono">Below Threshold</span>';
@@ -5357,11 +5422,12 @@ function renderResolveDisjointAssets(): void {
               )
               .join('')}</div>`
           : '';
+      const rowStateCls = checked ? ' is-selected' : ' is-unselected-grey';
       return `
-        <div class="publish-asset-row${a.is_duplicate_copy ? ' is-dup-copy' : ''}" ${dupTip ? `title="${escapeHtml(dupTip)}"` : ''}>
+        <div class="publish-asset-row${rowStateCls}${a.is_duplicate_copy ? ' is-dup-copy' : ''}" ${dupTip ? `title="${escapeHtml(dupTip)}"` : ''}>
           <div class="publish-asset-left">
             <input type="checkbox" class="resolve-disjoint-asset-cb" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer;" />
-            <button type="button" class="disjoint-row-thumb-btn btn-preview-disjoint-modal-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="Open full preview" style="width: 40px; height: 40px;">
+            <button type="button" class="disjoint-row-thumb-btn btn-preview-disjoint-modal-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="Open Curation Lightbox (Space toggles selection)" style="width: 40px; height: 40px;">
               <img src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
             </button>
             <div style="min-width: 0; flex: 1;">
@@ -5369,6 +5435,7 @@ function renderResolveDisjointAssets(): void {
                 #${idx + 1} · ${escapeHtml(a.original_filename || a.asset_id)}
               </div>
               <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
+                ${keeperBadge}
                 ${qualBadge}
                 ${typeBadge}
                 ${dupBadge}
@@ -5389,6 +5456,7 @@ function renderResolveDisjointAssets(): void {
       if (!aid) return;
       if (cb.checked) resolveDisjointSelectedIds.add(aid);
       else resolveDisjointSelectedIds.delete(aid);
+      renderResolveDisjointAssets();
       updateResolveDisjointSelectionSummary();
     });
   });
@@ -5402,11 +5470,8 @@ function renderResolveDisjointAssets(): void {
           groupLabel: resolveDisjointMomentName,
           hideMarkRemoved: true,
           selectedIds: resolveDisjointSelectedIds,
-          onSelectionChange: (changedId, checked) => {
-            const cb = listEl.querySelector<HTMLInputElement>(
-              `.resolve-disjoint-asset-cb[data-asset-id="${CSS.escape(changedId)}"]`
-            );
-            if (cb) cb.checked = checked;
+          onSelectionChange: () => {
+            renderResolveDisjointAssets();
             updateResolveDisjointSelectionSummary();
           }
         });
@@ -6577,6 +6642,7 @@ export async function openResolveDisjointModal(
   resolveDisjointExplicitAssetIds = explicitIds;
   resolveDisjointAssets = [];
   resolveDisjointSelectedIds.clear();
+  disjointFilterCuratedOnly = false;
   sourceTagState.momentName = momentName;
   sourceTagState.tags = [];
   sourceTagState.removedTagValues.clear();
