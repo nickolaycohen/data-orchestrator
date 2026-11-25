@@ -812,6 +812,12 @@ export interface UnifiedGroupingBatchSummary {
   count: number;
 }
 
+export interface UnifiedGroupingPhotosFolder {
+  parent_folder: string;
+  full_path: string;
+  asset_count: number;
+}
+
 export interface UnifiedGroupingPreviewAsset {
   asset_id: string;
   filename: string;
@@ -856,12 +862,20 @@ export interface UnifiedGroupingItem {
   can_publish_str: string;
   can_publish_ok: boolean;
   parent_folders: string[];
+  photos_folders?: UnifiedGroupingPhotosFolder[];
+  curated_folder_exists?: boolean;
+  pub_rec_folder_exists?: boolean;
   total_assets: number;
   qualified_assets: number;
   unique_count: number;
   curated_count: number;
   to_be_curated_count: number;
   published_count: number;
+  shutterfly_count?: number;
+  youtube_count?: number;
+  shutterfly_url?: string;
+  youtube_url?: string;
+  published_at_local?: string;
   duplicate_count: number;
   avg_score: number;
   qualified_avg_score: number;

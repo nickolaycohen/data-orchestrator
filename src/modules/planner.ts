@@ -60,6 +60,7 @@ const expandedUnifiedGroupingIds = new Set<string>();
 const unifiedGroupingAssetsCache = new Map<string, UnifiedGroupingAssetItem[]>();
 const unifiedGroupingSelectedIds = new Map<string, Set<string>>();
 const unifiedGroupingCuratedOnly = new Set<string>();
+let editingUnifiedGroupingPubUrlId: string | null = null;
 let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
 const expandedUnassignedFolders = new Set<string>();
@@ -7938,6 +7939,9 @@ function renderAllUnifiedGroupings(): void {
         g.status_detail,
         g.tag_summary,
         g.rule_reason || '',
+        g.shutterfly_url || '',
+        g.youtube_url || '',
+        ...(g.photos_folders || []).map(pf => `${pf.parent_folder} ${pf.full_path}`),
         ...g.batches.map(b => `${b.month} ${b.status_code}`)
       ]
         .join(' ')
@@ -7994,9 +7998,70 @@ function renderAllUnifiedGroupings(): void {
               g.batches.map(b => `${b.month} [${b.status_code}] (${b.count})`).join(', ')
             )}">📅 ${escapeHtml(g.batches[0].month)}..${escapeHtml(g.batches[g.batches.length - 1].month)} (${g.batches.length} batches)</span>`;
 
-      const foldersNote = g.parent_folders.length
-        ? `<span class="text-muted">Folders: ${escapeHtml(g.parent_folders.join(' + '))}</span>`
-        : `<span class="text-muted">${escapeHtml(g.status_detail)}</span>`;
+      const photosFolders = g.photos_folders || [];
+      const primaryPhotosPath = photosFolders[0]?.full_path || '';
+      const sampleAid = g.preview_assets?.[0]?.asset_id || '';
+      const photosFolderPillHtml = photosFolders.length
+        ? `<button type="button" class="badge badge-xs badge-blue font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-full-path="${escapeHtml(primaryPhotosPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
+            `Linked Apple Photos album(s):\n${photosFolders.map(pf => `• ${pf.full_path}${pf.asset_count ? ` (${pf.asset_count})` : ''}`).join('\n')}\nClick to open in Apple Photos`
+          )}">📸 Photos: ${escapeHtml(
+            Array.from(new Set(photosFolders.map(pf => pf.parent_folder))).join(' + ')
+          )} ↗</button>`
+        : g.parent_folders.length
+          ? `<span class="badge badge-xs badge-outline font-mono" title="Apple Photos folder: ${escapeHtml(g.parent_folders.join(' + '))}">📸 Photos: ${escapeHtml(g.parent_folders.join(' + '))}</span>`
+          : '';
+
+      const curatedFinderPillHtml = g.curated_folder_exists
+        ? `<button type="button" class="badge badge-xs badge-outline font-mono pub-badge-link btn-ugrp-open-curated" data-moment-name="${escapeHtml(g.name)}" title="Open exported Curated folder on LaCie in Finder">📂 Curated ↗</button>`
+        : '';
+
+      const sfCnt = g.shutterfly_count || 0;
+      const ytCnt = g.youtube_count || 0;
+      const sfUrl = (g.shutterfly_url || '').trim();
+      const ytUrl = (g.youtube_url || '').trim();
+      const isPublishedOrLinked = g.published_count > 0 || Boolean(sfUrl) || Boolean(ytUrl);
+
+      let sfLinkHtml = '';
+      if (sfUrl) {
+        sfLinkHtml = `<a href="${escapeHtml(sfUrl)}" target="_blank" rel="noopener noreferrer" class="badge badge-xs badge-amber font-mono pub-badge-link" title="Open Shutterfly Album: ${escapeHtml(sfUrl)}">📷 Shutterfly${sfCnt > 0 ? `: ${sfCnt}` : ''} ↗</a>`;
+      } else if (sfCnt > 0) {
+        sfLinkHtml = `<button type="button" class="badge badge-xs badge-amber font-mono pub-badge-link pub-badge-unset btn-ugrp-edit-pub-urls" data-grouping-id="${escapeHtml(g.grouping_id)}" title="No Shutterfly Album URL saved yet — click to enter album link">📷 Shutterfly: ${sfCnt} +Link</button>`;
+      }
+
+      let ytLinkHtml = '';
+      if (ytUrl) {
+        ytLinkHtml = `<a href="${escapeHtml(ytUrl)}" target="_blank" rel="noopener noreferrer" class="badge badge-xs badge-purple font-mono pub-badge-link" title="Open YouTube Video: ${escapeHtml(ytUrl)}">🎥 YouTube${ytCnt > 0 ? `: ${ytCnt}` : ''} ↗</a>`;
+      } else if (ytCnt > 0) {
+        ytLinkHtml = `<button type="button" class="badge badge-xs badge-purple font-mono pub-badge-link pub-badge-unset btn-ugrp-edit-pub-urls" data-grouping-id="${escapeHtml(g.grouping_id)}" title="No YouTube Video URL saved yet — click to enter video link">🎥 YouTube: ${ytCnt} +Link</button>`;
+      }
+
+      const editPubLinksBtnHtml = isPublishedOrLinked
+        ? `<button type="button" class="pub-edit-url-btn btn-ugrp-edit-pub-urls" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Set or Edit Shutterfly Album / YouTube Video URLs">🔗</button>`
+        : '';
+
+      const isEditingUrls = editingUnifiedGroupingPubUrlId === g.grouping_id;
+      const pubUrlEditorHtml = isEditingUrls
+        ? `
+          <div class="pub-url-editor" data-ugrp-url-editor="${escapeHtml(g.grouping_id)}" style="padding: 0.55rem 0.85rem 0.65rem; margin-top: 0; background: rgba(15, 23, 42, 0.92);">
+            <div class="pub-url-row">
+              <span class="pub-url-label">📷 Shutterfly:</span>
+              <input type="url" class="pub-url-input" data-ugrp-sf-input="${escapeHtml(g.grouping_id)}" placeholder="https://photos.shutterfly.com/album/..." value="${escapeHtml(sfUrl)}" />
+              <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-outline" title="Open Shutterfly to copy album link">Open ↗</a>
+            </div>
+            <div class="pub-url-row">
+              <span class="pub-url-label">🎥 YouTube:</span>
+              <input type="url" class="pub-url-input" data-ugrp-yt-input="${escapeHtml(g.grouping_id)}" placeholder="https://youtu.be/... or https://www.youtube.com/watch?v=..." value="${escapeHtml(ytUrl)}" />
+              <a href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-outline" title="Open YouTube Studio to copy video link">Studio ↗</a>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.15rem;">
+              <button type="button" class="btn btn-xs btn-outline btn-ugrp-cancel-pub-urls" data-grouping-id="${escapeHtml(g.grouping_id)}">Cancel</button>
+              <button type="button" class="btn btn-xs btn-green btn-ugrp-save-pub-urls" data-grouping-id="${escapeHtml(g.grouping_id)}">Save Links</button>
+            </div>
+          </div>
+        `
+        : '';
+
+      const statusDetailNote = `<span class="text-muted">${escapeHtml(g.status_detail)}</span>`;
 
       const countsParts: string[] = [
         `<strong>${g.total_assets}</strong> total`,
@@ -8044,11 +8109,16 @@ function renderAllUnifiedGroupings(): void {
                   ${disjHtml}
                   ${batchesHtml}
                   ${taggedHtml}
+                  ${photosFolderPillHtml}
+                  ${curatedFinderPillHtml}
+                  ${sfLinkHtml}
+                  ${ytLinkHtml}
+                  ${editPubLinksBtnHtml}
                 </div>
                 <div class="unified-grouping-metrics" style="margin-top: 0.24rem; color: var(--text-secondary);">
                   <span>${countsParts.join(' · ')}</span>
                   <span>·</span>
-                  ${foldersNote}
+                  ${statusDetailNote}
                   <span>·</span>
                   <span class="text-muted">${escapeHtml(g.date_range)}</span>
                 </div>
@@ -8068,6 +8138,7 @@ function renderAllUnifiedGroupings(): void {
               ${quickActionHtml}
             </div>
           </div>
+          ${pubUrlEditorHtml}
           <div class="unified-grouping-body" data-grouping-body-id="${escapeHtml(g.grouping_id)}">${bodyInnerHtml}</div>
         </div>
       `;
@@ -8088,7 +8159,13 @@ function renderAllUnifiedGroupings(): void {
 
   listEl.querySelectorAll<HTMLElement>('[data-toggle-grouping-id]').forEach(hdrEl => {
     hdrEl.addEventListener('click', async e => {
-      if ((e.target as HTMLElement).closest('.btn-ugrp-row-action, .ugrp-inline-thumb')) return;
+      if (
+        (e.target as HTMLElement).closest(
+          '.btn-ugrp-row-action, .ugrp-inline-thumb, .pub-badge-link, .btn-ugrp-edit-pub-urls, .btn-ugrp-open-photos, .btn-ugrp-open-curated, a'
+        )
+      ) {
+        return;
+      }
       const gid = hdrEl.dataset.toggleGroupingId || '';
       const g = itemById.get(gid);
       if (!g) return;
@@ -8173,6 +8250,108 @@ function renderAllUnifiedGroupings(): void {
         void openPublishMomentModal(g.name);
       } else {
         void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true });
+      }
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-open-photos').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const gid = btn.dataset.groupingId || '';
+      const g = itemById.get(gid);
+      if (!g) return;
+      const fullPath = btn.dataset.fullPath || '';
+      const sampleAid = btn.dataset.sampleAid || '';
+      btn.disabled = true;
+      try {
+        await fetch('/api/media/memories/open-photos-album', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            album_name: g.name,
+            full_path: fullPath,
+            sample_asset_id: sampleAid
+          })
+        });
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-open-curated').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const mName = btn.dataset.momentName || '';
+      if (!mName) return;
+      btn.disabled = true;
+      try {
+        await fetch('/api/media/memories/open-curated-folder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ moment_name: mName, folder_kind: 'curated' })
+        });
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-edit-pub-urls').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const gid = btn.dataset.groupingId || '';
+      if (!gid) return;
+      editingUnifiedGroupingPubUrlId = editingUnifiedGroupingPubUrlId === gid ? null : gid;
+      renderAllUnifiedGroupings();
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-cancel-pub-urls').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      editingUnifiedGroupingPubUrlId = null;
+      renderAllUnifiedGroupings();
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-save-pub-urls').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const gid = btn.dataset.groupingId || '';
+      const g = itemById.get(gid);
+      if (!g) return;
+      const sfInp = listEl.querySelector<HTMLInputElement>(`[data-ugrp-sf-input="${CSS.escape(gid)}"]`);
+      const ytInp = listEl.querySelector<HTMLInputElement>(`[data-ugrp-yt-input="${CSS.escape(gid)}"]`);
+      const sfVal = (sfInp?.value || '').trim();
+      const ytVal = (ytInp?.value || '').trim();
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      try {
+        const res = await fetch('/api/media/published-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            moment_name: g.name,
+            shutterfly_url: sfVal,
+            youtube_url: ytVal
+          })
+        });
+        const out = await res.json();
+        if (!res.ok || !out.ok) {
+          alert(`Failed to save URL: ${out.error || `HTTP ${res.status}`}`);
+          btn.disabled = false;
+          btn.textContent = 'Save Links';
+          return;
+        }
+        g.shutterfly_url = sfVal;
+        g.youtube_url = ytVal;
+        editingUnifiedGroupingPubUrlId = null;
+        renderAllUnifiedGroupings();
+      } catch (err: any) {
+        alert(`Error saving URL: ${err?.message || 'Unknown error'}`);
+        btn.disabled = false;
+        btn.textContent = 'Save Links';
       }
     });
   });

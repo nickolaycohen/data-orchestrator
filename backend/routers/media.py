@@ -10374,21 +10374,24 @@ def get_all_unified_groupings():
             except sqlite3.OperationalError:
                 pass
 
-            # 3. Album memberships across Moments / ToBeCurated / Curated / Generic Moments
+            # 3. Album memberships across Apple Photos (Moments / Memories / ToBeCurated / Curated / Generic Moments / etc.)
             album_parents_by_lc: dict[str, set[str]] = {}
+            photos_folders_by_lc: dict[str, dict[str, dict]] = {}
             canonical_name_by_lc: dict[str, str] = {}
             tbc_aids_by_lc: dict[str, set[str]] = {}
             cur_aids_by_lc: dict[str, set[str]] = {}
             album_aids_by_lc: dict[str, set[str]] = {}
             try:
-                for alb_name, par_name, aid in cur.execute(
-                    """
-                    SELECT moa.album_name, COALESCE(moa.parent_folder_name, 'Moments'), moaa.asset_id
+                moa_cols = {r[1] for r in cur.execute("PRAGMA table_info(media_organizer_albums)").fetchall()}
+                fp_expr = "COALESCE(moa.full_path, '')" if "full_path" in moa_cols else "''"
+                ac_expr = "COALESCE(moa.asset_count, 0)" if "asset_count" in moa_cols else "0"
+                for alb_name, par_name, full_p, ac_cnt, aid in cur.execute(
+                    f"""
+                    SELECT moa.album_name, COALESCE(moa.parent_folder_name, ''), {fp_expr}, {ac_expr}, moaa.asset_id
                     FROM media_organizer_albums moa
                     LEFT JOIN media_organizer_album_assets moaa ON moaa.album_pk = moa.album_pk
                     WHERE moa.is_folder = 0
-                      AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('moments', 'tobecurated', 'curated', 'generic moments')
-                      AND LOWER(TRIM(moa.album_name)) NOT IN ('ignore', 'skippublishing', 'topscore excluded')
+                      AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded')
                     """
                 ).fetchall():
                     nm = (alb_name or "").strip()
@@ -10396,9 +10399,22 @@ def get_all_unified_groupings():
                         continue
                     lc = nm.lower()
                     canonical_name_by_lc.setdefault(lc, nm)
-                    par_clean = (par_name or "Moments").strip()
+                    par_clean = (par_name or "").strip()
+                    if not par_clean and full_p and "/" in full_p:
+                        parts_fp = [p.strip() for p in str(full_p).split("/") if p.strip()]
+                        if len(parts_fp) >= 2:
+                            par_clean = parts_fp[-2]
+                    if not par_clean:
+                        par_clean = "Photos"
+                    fp_clean = (full_p or "").strip() or f"{par_clean}/{nm}"
                     album_parents_by_lc.setdefault(lc, set()).add(par_clean)
+                    f_bucket = photos_folders_by_lc.setdefault(lc, {})
+                    entry = f_bucket.setdefault(
+                        fp_clean.lower(),
+                        {"parent_folder": par_clean, "full_path": fp_clean, "asset_count": int(ac_cnt or 0), "_aids": set()},
+                    )
                     if aid and aid not in excluded_aids:
+                        entry["_aids"].add(aid)
                         album_aids_by_lc.setdefault(lc, set()).add(aid)
                         par_lc = par_clean.lower()
                         if par_lc == "tobecurated":
@@ -10408,14 +10424,43 @@ def get_all_unified_groupings():
             except sqlite3.OperationalError:
                 pass
 
-            # 4. Curated moments stage & Publications
+            # Also check synced Apple Photos albums/moments tables for linked folders outside media_organizer_albums
+            for aux_tbl in ("moments", "albums"):
+                try:
+                    aux_cols = {r[1] for r in cur.execute(f"PRAGMA table_info({aux_tbl})").fetchall()}
+                    if "album_name" in aux_cols and "parent_folder_name" in aux_cols:
+                        for alb_nm, par_nm in cur.execute(
+                            f"SELECT album_name, COALESCE(parent_folder_name, '') FROM {aux_tbl} WHERE TRIM(COALESCE(album_name, '')) != ''"
+                        ).fetchall():
+                            nm = (alb_nm or "").strip()
+                            par_clean = (par_nm or "").strip()
+                            if not nm or not par_clean or nm.lower() in ("ignore", "skippublishing", "topscore excluded"):
+                                continue
+                            lc = nm.lower()
+                            if lc not in photos_folders_by_lc:
+                                fp_clean = f"{par_clean}/{nm}"
+                                album_parents_by_lc.setdefault(lc, set()).add(par_clean)
+                                photos_folders_by_lc.setdefault(lc, {})[fp_clean.lower()] = {
+                                    "parent_folder": par_clean,
+                                    "full_path": fp_clean,
+                                    "asset_count": 0,
+                                    "_aids": set(),
+                                }
+                except sqlite3.OperationalError:
+                    pass
+
+            # 4. Curated moments stage, URLs & Publications
             cm_by_lc: dict[str, dict] = {}
             deleted_lc: set[str] = set()
             try:
-                for m_nm, stg, cur_cnt, tbc_ex, cur_ex in cur.execute(
-                    """
+                cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+                sf_col_expr = "COALESCE(shutterfly_url, '')" if "shutterfly_url" in cm_cols else "''"
+                yt_col_expr = "COALESCE(youtube_url, '')" if "youtube_url" in cm_cols else "''"
+                for m_nm, stg, cur_cnt, tbc_ex, cur_ex, sf_u, yt_u in cur.execute(
+                    f"""
                     SELECT moment_name, COALESCE(memory_stage, ''), COALESCE(curated_count, 0),
-                           COALESCE(photos_to_be_curated_exists, 0), COALESCE(photos_curated_exists, 0)
+                           COALESCE(photos_to_be_curated_exists, 0), COALESCE(photos_curated_exists, 0),
+                           {sf_col_expr}, {yt_col_expr}
                     FROM curated_moments
                     """
                 ).fetchall():
@@ -10432,15 +10477,25 @@ def get_all_unified_groupings():
                         "curated_count": int(cur_cnt or 0),
                         "tbc_exists": bool(tbc_ex),
                         "curated_exists": bool(cur_ex),
+                        "shutterfly_url": (sf_u or "").strip(),
+                        "youtube_url": (yt_u or "").strip(),
                     }
             except sqlite3.OperationalError:
                 pass
 
             pub_aids_by_lc: dict[str, set[str]] = {}
+            pub_sf_aids_by_lc: dict[str, set[str]] = {}
+            pub_yt_aids_by_lc: dict[str, set[str]] = {}
+            pub_sf_url_by_lc: dict[str, str] = {}
+            pub_yt_url_by_lc: dict[str, str] = {}
             last_pub_by_lc: dict[str, str] = {}
             try:
-                for aid_p, m_nm, pub_utc in cur.execute(
-                    "SELECT asset_uuid, moment_name, COALESCE(published_at_utc, '') FROM publications"
+                pub_cols = {r[1] for r in cur.execute("PRAGMA table_info(publications)").fetchall()}
+                plat_expr = "COALESCE(platform, '')" if "platform" in pub_cols else "''"
+                fn_expr = "COALESCE(filename, '')" if "filename" in pub_cols else "''"
+                purl_expr = "COALESCE(published_url, '')" if "published_url" in pub_cols else "''"
+                for aid_p, m_nm, pub_utc, plat_raw, fn_raw, purl_raw in cur.execute(
+                    f"SELECT asset_uuid, moment_name, COALESCE(published_at_utc, ''), {plat_expr}, {fn_expr}, {purl_expr} FROM publications"
                 ).fetchall():
                     nm = (m_nm or "").strip()
                     if not nm:
@@ -10449,8 +10504,22 @@ def get_all_unified_groupings():
                     if lc in deleted_lc:
                         continue
                     canonical_name_by_lc.setdefault(lc, nm)
+                    plat_lc = (plat_raw or "").strip().lower()
+                    fn_lc = (fn_raw or "").strip().lower()
+                    purl_clean = (purl_raw or "").strip()
+                    is_yt = "youtube" in plat_lc or fn_lc.endswith((".mov", ".mp4", ".m4v"))
+                    is_sf = "shutterfly" in plat_lc or (not is_yt)
                     if aid_p:
                         pub_aids_by_lc.setdefault(lc, set()).add(aid_p)
+                        if is_yt:
+                            pub_yt_aids_by_lc.setdefault(lc, set()).add(aid_p)
+                        elif is_sf:
+                            pub_sf_aids_by_lc.setdefault(lc, set()).add(aid_p)
+                    if purl_clean:
+                        if is_yt and not pub_yt_url_by_lc.get(lc):
+                            pub_yt_url_by_lc[lc] = purl_clean
+                        elif is_sf and not pub_sf_url_by_lc.get(lc):
+                            pub_sf_url_by_lc[lc] = purl_clean
                     if pub_utc and pub_utc > last_pub_by_lc.get(lc, ""):
                         last_pub_by_lc[lc] = pub_utc
             except sqlite3.OperationalError:
@@ -10547,13 +10616,28 @@ def get_all_unified_groupings():
                 pub_set = pub_aids_by_lc.get(lc, set())
                 pub_cnt = len(pub_set)
                 fs_curated_exists = bool(lacie_mounted and (CURATED_LACIE_DIR / name).is_dir())
+                fs_pub_rec_exists = bool(lacie_mounted and (PUBLISHING_RECOMMENDATION_DIR / name).is_dir())
                 cur_exists = bool(cm.get("curated_exists") or cur_set or cm.get("curated_count", 0) > 0)
                 tbc_exists = bool(tbc_cnt > 0 or cm.get("tbc_exists"))
                 cur_cnt = max(len(cur_set), cm.get("curated_count", 0))
 
+                raw_f_bucket = photos_folders_by_lc.get(lc, {})
+                photos_folders_list = [
+                    {
+                        "parent_folder": fv["parent_folder"],
+                        "full_path": fv["full_path"],
+                        "asset_count": max(int(fv["asset_count"] or 0), len(fv["_aids"])),
+                    }
+                    for fv in sorted(raw_f_bucket.values(), key=lambda x: x["full_path"].lower())
+                ]
                 parents_sorted = sorted(album_parents_by_lc.get(lc, set()))
-                if not parents_sorted and lc in moments_col_aids_by_lc:
-                    parents_sorted = ["Moments"]
+
+                sf_url_final = cm.get("shutterfly_url") or pub_sf_url_by_lc.get(lc, "")
+                yt_url_final = cm.get("youtube_url") or pub_yt_url_by_lc.get(lc, "")
+                sf_cnt = len(pub_sf_aids_by_lc.get(lc, set()))
+                yt_cnt = len(pub_yt_aids_by_lc.get(lc, set()))
+                last_pub_raw = last_pub_by_lc.get(lc, "")
+                pub_local_str = last_pub_raw[:10] if last_pub_raw else ""
 
                 if raw_stage == "M500" or (pub_cnt > 0 and qual_cnt > 0 and pub_cnt >= max(qual_cnt, cur_cnt)):
                     m_status = "M500"
@@ -10579,7 +10663,6 @@ def get_all_unified_groupings():
 
                 too_recent = False
                 days_rem = 0
-                last_pub_raw = last_pub_by_lc.get(lc, "")
                 if last_pub_raw:
                     p_dt = _parse_utc_dt(last_pub_raw)
                     if p_dt and (now_local - p_dt).days < 30:
@@ -10649,12 +10732,20 @@ def get_all_unified_groupings():
                         "can_publish_str": can_pub_str,
                         "can_publish_ok": can_pub_ok,
                         "parent_folders": parents_sorted,
+                        "photos_folders": photos_folders_list,
+                        "curated_folder_exists": fs_curated_exists,
+                        "pub_rec_folder_exists": fs_pub_rec_exists,
                         "total_assets": total_cnt,
                         "qualified_assets": qual_cnt,
                         "unique_count": total_cnt,
                         "curated_count": cur_cnt,
                         "to_be_curated_count": tbc_cnt,
                         "published_count": pub_cnt,
+                        "shutterfly_count": sf_cnt,
+                        "youtube_count": yt_cnt,
+                        "shutterfly_url": sf_url_final,
+                        "youtube_url": yt_url_final,
+                        "published_at_local": pub_local_str,
                         "duplicate_count": 0,
                         "avg_score": round(avg_sc, 4),
                         "qualified_avg_score": round(qual_avg_sc, 4),
@@ -10819,6 +10910,86 @@ def get_all_unified_groupings():
             }
         finally:
             conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+class OpenPhotosAlbumRequest(BaseModel):
+    album_name: str
+    full_path: Optional[str] = None
+    sample_asset_id: Optional[str] = None
+
+
+@router.post("/memories/open-photos-album")
+def open_photos_album_in_app(req: OpenPhotosAlbumRequest):
+    """Activate Apple Photos and spotlight the requested album or sample asset."""
+    alb_name = (req.album_name or "").strip()
+    full_path = (req.full_path or "").strip()
+    sample_id = (req.sample_asset_id or "").strip()
+    if not alb_name and not sample_id:
+        return {"ok": False, "error": "album_name or sample_asset_id is required"}
+
+    script = """
+on run argv
+    set targetAlbum to item 1 of argv
+    set fullPath to item 2 of argv
+    set sampleUuid to item 3 of argv
+    tell application "Photos"
+        activate
+        if targetAlbum is not "" then
+            try
+                if fullPath is not "" then
+                    set pathParts to my splitPath(fullPath)
+                    if (count of pathParts) >= 2 then
+                        set curFolder to folder (item 1 of pathParts)
+                        repeat with idx from 2 to ((count of pathParts) - 1)
+                            set curFolder to folder (item idx of pathParts) of curFolder
+                        end repeat
+                        set matchedAlb to album targetAlbum of curFolder
+                        spotlight matchedAlb
+                        return "OK|album_path"
+                    end if
+                end if
+            end try
+            try
+                set matchedAlb2 to first album whose name is targetAlbum
+                spotlight matchedAlb2
+                return "OK|album_name"
+            end try
+        end if
+        if sampleUuid is not "" then
+            try
+                spotlight (media item id sampleUuid)
+                return "OK|asset"
+            end try
+        end if
+        return "OK|activated"
+    end tell
+end run
+
+on splitPath(theText)
+    set AppleScript's text item delimiters to "/"
+    set parts to text items of theText
+    set AppleScript's text item delimiters to ""
+    set cleanParts to {}
+    repeat with p in parts
+        set s to p as text
+        if s is not "" then set end of cleanParts to s
+    end repeat
+    return cleanParts
+end splitPath
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-", alb_name, full_path, sample_id],
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+        if proc.returncode != 0:
+            return {"ok": False, "error": (proc.stderr or proc.stdout or "AppleScript error").strip()}
+        return {"ok": True, "result": (proc.stdout or "OK").strip()}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
