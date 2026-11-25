@@ -300,6 +300,17 @@ let latestBgSyncStateInfo: {
 } = { isRunning: false, syncState: 'UNKNOWN', latestRefreshUtc: '' };
 
 const POST_APPLE_RELOAD_STORAGE_KEY = 'agy_post_apple_reload_state';
+const ACTIVE_PLANNER_MODE_STORAGE_KEY = 'agy_active_planner_mode_view';
+
+function loadSavedPlannerModeView(): 'b' | 'm' | 'g' | 'c' {
+  try {
+    const v = window.localStorage.getItem(ACTIVE_PLANNER_MODE_STORAGE_KEY);
+    if (v === 'm' || v === 'g' || v === 'c' || v === 'b') return v;
+  } catch {
+    // ignore storage errors
+  }
+  return 'b';
+}
 
 function savePostAppleReloadState(): void {
   try {
@@ -550,6 +561,11 @@ export function updateClustersBgSyncStatus(bg: {
 
 function applyPlannerModeView(view: 'b' | 'm' | 'g' | 'c'): void {
   activePlannerModeView = view;
+  try {
+    window.localStorage.setItem(ACTIVE_PLANNER_MODE_STORAGE_KEY, view);
+  } catch {
+    // ignore storage errors
+  }
 
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(t => {
     t.classList.toggle('active', t.dataset.modeView === view);
@@ -637,9 +653,9 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     });
   });
 
-  // Restore planner branch view after post-Apple-Photos reload if applicable
+  // Restore planner branch view after post-Apple-Photos reload or last saved localStorage selection
   const restoredReload = consumePostAppleReloadState();
-  applyPlannerModeView(restoredReload ? restoredReload.modeView : 'b');
+  applyPlannerModeView(restoredReload ? restoredReload.modeView : loadSavedPlannerModeView());
 
   // Unassigned High-Rank Assets cluster sort buttons
   document.querySelectorAll<HTMLElement>('.unassigned-sort-btn').forEach(btn => {
@@ -1378,8 +1394,10 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     }
   });
 
-  // Load initial Mode [B] Batch Management overview only (Mode [M] & Intake Dedup load when [M] is opened)
-  void fetchPlannerOverview(false, 'b');
+  // Load initial Mode [B] Batch Management overview only when starting on [B]
+  if (activePlannerModeView === 'b' && !modeBLoaded) {
+    void fetchPlannerOverview(false, 'b');
+  }
 }
 
 const queuedPlannerFetchByMode: Partial<Record<PlannerModeTarget, Promise<void>>> = {};

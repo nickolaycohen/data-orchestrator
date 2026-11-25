@@ -34,6 +34,8 @@ let mediaMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let lastObservedBgRefreshUtc: string | null = null;
 let lastObservedBgSyncState: string | null = null;
 
+const ACTIVE_NAV_TAB_STORAGE_KEY = 'agy_active_nav_tab';
+
 // Initialize on DOM load
 document.addEventListener('DOMContentLoaded', () => {
   setupTabs();
@@ -45,9 +47,19 @@ document.addEventListener('DOMContentLoaded', () => {
   setupPlannerOverview(fetchExecutorMonitor, fetchMediaMetrics);
 
   const restoredReload = consumePostAppleReloadState();
-  if (restoredReload?.tab) {
-    const targetTabBtn = document.querySelector<HTMLElement>(`.nav-tab[data-tab="${restoredReload.tab}"]`);
-    targetTabBtn?.click();
+  let initialTab = restoredReload?.tab || '';
+  if (!initialTab) {
+    try {
+      initialTab = window.localStorage.getItem(ACTIVE_NAV_TAB_STORAGE_KEY) || '';
+    } catch {
+      initialTab = '';
+    }
+  }
+  if (initialTab) {
+    const targetTabBtn = document.querySelector<HTMLElement>(`.nav-tab[data-tab="${CSS.escape(initialTab)}"]`);
+    if (targetTabBtn && !targetTabBtn.classList.contains('active')) {
+      targetTabBtn.click();
+    }
   }
 
   // Initial data loading
@@ -96,6 +108,13 @@ function setupTabs(): void {
       const targetPanel = document.getElementById(`tab-${tab.dataset.tab}`);
       if (targetPanel) {
         targetPanel.classList.add('active');
+      }
+      if (tab.dataset.tab) {
+        try {
+          window.localStorage.setItem(ACTIVE_NAV_TAB_STORAGE_KEY, tab.dataset.tab);
+        } catch {
+          // ignore storage errors
+        }
       }
 
       setMediaStatsVisibility(tab.dataset.tab === 'media', true);
