@@ -827,6 +827,15 @@ export interface OrganizerTargetFolderRef {
   matched_count: number;
 }
 
+export interface SourceAllMediaFolderRef {
+  album_name: string;
+  parent_folder: string;
+  full_path: string;
+  matched_count: number;
+  source_total_count: number;
+  all_migrated: boolean;
+}
+
 export interface PhotosLibrariesStatus {
   ok: boolean;
   source_library_path: string;
@@ -889,6 +898,7 @@ export interface UnifiedGroupingItem {
   parent_folders: string[];
   photos_folders?: UnifiedGroupingPhotosFolder[];
   organizer_target_folders?: OrganizerTargetFolderRef[];
+  source_all_media_folders?: SourceAllMediaFolderRef[];
   in_organizer_library?: boolean;
   organizer_mapped_count?: number;
   curated_folder_exists?: boolean;

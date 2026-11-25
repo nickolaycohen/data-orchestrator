@@ -945,7 +945,12 @@
                 <span class="badge badge-xs badge-blue" id="organizer-lib-status-badge">⚡ Target: Checking Media Organizer.photoslibrary...</span>
                 <span class="text-muted" id="organizer-lib-counts-note" style="font-size: 0.68rem;"></span>
               </div>
-              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;">
+                <label style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.71rem; cursor: pointer; color: var(--text-secondary);" class="font-mono"
+                  title="Optionally display read-only links to legacy All-Media folders on migrated Moments so you can inspect or manually delete them in Apple Photos">
+                  <input type="checkbox" id="chk-show-all-media-links" checked />
+                  <span>🔗 Link All-Media Sources</span>
+                </label>
                 <button type="button" class="btn btn-xs btn-cyan" id="btn-activate-organizer-library"
                   title="Open ~/Pictures/Media Organizer.photoslibrary in Photos.app (or launch Photos Library Chooser to create it if absent)">
                   ⚡ Open / Create Media Organizer Library
@@ -2842,11 +2847,14 @@
                   style="font-size: 0.74rem; font-weight: 500; white-space: nowrap;"></span>
               </div>
             </div>
+            <div id="resolve-disjoint-readonly-source-note" class="font-mono"
+              style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.71rem; padding: 0.34rem 0.55rem; border-radius: 6px; background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.28); color: #bae6fd;">
+              🔒 <strong>All-Media is read-only:</strong> Source folders in <code>All-Media</code> are never deleted from UI — migrated assets/moments are omitted from the queue automatically (you can optionally open &amp; delete legacy folders manually in Photos).
+            </div>
             <label id="resolve-disjoint-delete-source-row"
-              style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem; cursor: pointer; color: var(--text-secondary);">
+              style="display: none; align-items: center; gap: 0.45rem; font-size: 0.75rem; cursor: pointer; color: var(--text-secondary);">
               <input type="checkbox" id="resolve-disjoint-delete-source" checked />
-              <span>Delete disjoint / source album(s) if they exist &amp; migrate all DB Moment assignments to
-                target</span>
+              <span>Clean up superseded album inside <code>Media Organizer</code> library (<code>All-Media</code> is never modified)</span>
             </label>
 
             <div id="resolve-disjoint-curate-box"
@@ -2880,7 +2888,7 @@
               <label id="curate-m200-delete-tbc-row"
                 style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
                 <input type="checkbox" id="curate-m200-delete-tbc" checked />
-                <span>Delete source <code>ToBeCurated</code> album in Apple Photos cleanly</span>
+                <span>Clean up <code>ToBeCurated</code> staging album inside <code>Media Organizer</code> library (<code>All-Media</code> is never modified)</span>
               </label>
               <label id="curate-m200-export-row"
                 style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">

@@ -6803,15 +6803,19 @@ export async function openResolveDisjointModal(
   }
   const curateBoxEl = document.getElementById('resolve-disjoint-curate-box');
   const delSrcRowEl = document.getElementById('resolve-disjoint-delete-source-row');
+  const roSrcNoteEl = document.getElementById('resolve-disjoint-readonly-source-note');
   const handleUnselCb = document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null;
   const unselActionSel = document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null;
   const delTbcCb = document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null;
   const exportLacieCb = document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null;
+  const srcGrouping = allGroupingsData?.groupings.find(g => g.name.toLowerCase() === momentName.trim().toLowerCase());
+  const srcIsOrganizerAlbum = Boolean(srcGrouping?.in_organizer_library);
   if (curateBoxEl) curateBoxEl.style.display = isCurateM200 ? 'flex' : 'none';
-  if (delSrcRowEl) delSrcRowEl.style.display = isCurateM200 ? 'none' : 'flex';
+  if (delSrcRowEl) delSrcRowEl.style.display = !isCurateM200 && srcIsOrganizerAlbum ? 'flex' : 'none';
+  if (roSrcNoteEl) roSrcNoteEl.style.display = !isCurateM200 && !srcIsOrganizerAlbum ? 'flex' : 'none';
   if (handleUnselCb) handleUnselCb.checked = true;
   if (unselActionSel) unselActionSel.value = 'ignore';
-  if (delTbcCb) delTbcCb.checked = true;
+  if (delTbcCb) delTbcCb.checked = srcIsOrganizerAlbum;
   if (exportLacieCb) exportLacieCb.checked = true;
 
   if (albumsBarEl) albumsBarEl.style.display = 'none';
@@ -7207,29 +7211,22 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
       ...realExtraMoments.map(e => e.momentName)
     ].filter(s => s.toLowerCase() !== targetMoment.toLowerCase());
 
-    if (delSrc) {
-      if (priorAlbumsToRemove.length) {
-        const albumBadges = priorAlbumsToRemove
-          .map(al => `<code>${escapeHtml(`Media Organizer on LaCie / ${al.parent_folder_name} / ${al.album_name}`)}</code>`)
-          .join(', ');
-        stepsHtml.push(
-          `<strong>Remove prior Moment albums &amp; mark status Deleted:</strong> Once non-duplicate assets are copied, delete pre-merge album(s) ${albumBadges} in Apple Photos, clear stale <code>moment_exports</code> rows, and set old <code>curated_moments.memory_stage</code> to <code>Deleted</code> (preserving historical <code>publications</code> URLs/records).`
-        );
-      } else if (deletableSources.length) {
-        stepsHtml.push(
-          `<strong>Remove prior Moment albums &amp; mark status Deleted:</strong> Once non-duplicate assets are copied, delete obsolete source album(s) ${deletableSources.map(s => `<code>${escapeHtml(s)}</code>`).join(', ')} in Apple Photos (across Moments/ToBeCurated/Curated), clear stale <code>moment_exports</code> rows, and mark old <code>curated_moments.memory_stage</code> as <code>Deleted</code>.`
-        );
-      } else if (resolveDisjointIsUnassignedCluster) {
-        stepsHtml.push(
-          `<strong>Remove group from Unassigned Clusters:</strong> Group <code>${escapeHtml(resolveDisjointMomentName)}</code> has no prior Photos album to delete; selected assets will be assigned to <code>${escapeHtml(targetMoment)}</code> and cleared from unassigned staging.`
-        );
-      } else {
-        stepsHtml.push(
-          `<strong>Preserve destination &amp; clean duplicate album copies:</strong> Keep target album <code>${escapeHtml(targetMoment)}</code> and remove any prior album copies in other folders with a different album ID (if any exist).`
-        );
-      }
+    const organizerSourcesToClean = deletableSources.filter(s =>
+      Boolean(allGroupingsData?.groupings.find(g => g.name.toLowerCase() === s.toLowerCase())?.in_organizer_library)
+    );
+
+    if (delSrc && organizerSourcesToClean.length) {
+      stepsHtml.push(
+        `<strong>Clean up superseded Media Organizer album(s):</strong> Remove obsolete <code>Media Organizer.photoslibrary</code> album(s) ${organizerSourcesToClean.map(s => `<code>${escapeHtml(s)}</code>`).join(', ')} after copying keeper assets (<code>All-Media</code> remains 100% read-only).`
+      );
+    } else if (resolveDisjointIsUnassignedCluster) {
+      stepsHtml.push(
+        `<strong>Omit migrated Unassigned Cluster:</strong> Selected assets will be imported into <code>Media Organizer.photoslibrary / ${escapeHtml(resolvedParent)} / ${escapeHtml(targetMoment)}</code> and omitted from unassigned staging.`
+      );
     } else {
-      stepsHtml.push('<strong>Keep prior albums:</strong> Leave all pre-merge source albums intact in Apple Photos.');
+      stepsHtml.push(
+        `<strong>Preserve All-Media read-only &amp; omit migrated source item:</strong> <code>All-Media.photoslibrary</code> is never modified or deleted from UI. Once migrated into <code>Media Organizer.photoslibrary</code>, source items are automatically omitted as separate line items (and optionally linked to <code>All-Media</code> if you ever wish to delete them manually in Photos).`
+      );
     }
 
     const parentLcForStage = resolvedParent.trim().toLowerCase();
@@ -7307,22 +7304,19 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     titleEl.textContent = '⏭️ Confirm SkipPublishing Action';
     subEl.innerHTML = `Source Moment: <code>${escapeHtml(resolveDisjointMomentName)}</code>`;
     stepsHtml.push(
-      `<strong>Move to SkipPublishing:</strong> Add ${assetIds.length} selected asset(s) to <code>Media Organizer on LaCie / Moments / SkipPublishing</code> in Apple Photos (skipping any already there).`
+      `<strong>Mark SkipPublishing in DB:</strong> Record ${assetIds.length} selected asset(s) under <code>Moments / SkipPublishing</code> in <code>media_organizer.db</code> without modifying <code>All-Media.photoslibrary</code>.`
     );
-    stepsHtml.push('<strong>Sync DB &amp; folders:</strong> Record asset links in <code>media_organizer_album_assets</code> and remove any local recommendation export folder if present.');
-    noteEl.innerHTML = 'ℹ️ Assets stay in your library but are excluded from Publishing Recommendations.';
+    stepsHtml.push('<strong>Sync DB &amp; folders:</strong> Exclude these assets from Publishing Recommendations and remove any local recommendation export folder if present.');
+    noteEl.innerHTML = 'ℹ️ All-Media.photoslibrary remains untouched (read-only); assets are excluded from Publishing Recommendations.';
     proceedBtn.className = 'btn btn-purple';
     proceedBtn.textContent = '⏭️ Confirm SkipPublishing';
   } else {
     titleEl.textContent = '🗑️ Confirm Ignore Selected Action';
     subEl.innerHTML = `Source Moment: <code>${escapeHtml(resolveDisjointMomentName)}</code>`;
     stepsHtml.push(
-      `<strong>Ignore assets:</strong> Run dedup ignore pipeline (<code>--apply --asset-ids</code>) for ${assetIds.length} selected asset(s).`
+      `<strong>Ignore assets in DB:</strong> Mark ${assetIds.length} selected asset(s) as <code>Ignore</code> in <code>media_organizer.db</code> (<code>All-Media.photoslibrary</code> remains 100% read-only).`
     );
-    if (delSrc) {
-      stepsHtml.push(`<strong>Delete source album rows &amp; mark Deleted:</strong> Remove obsolete album rows for <code>${escapeHtml(resolveDisjointMomentName)}</code> in <code>media_organizer.db</code> and mark its <code>curated_moments.memory_stage</code> as <code>Deleted</code>.`);
-    }
-    noteEl.innerHTML = '⚠️ Selected assets will be marked ignored and excluded from the Media Organizer.';
+    noteEl.innerHTML = '⚠️ Selected assets will be marked ignored and omitted from the Media Organizer queue (All-Media is never modified).';
     proceedBtn.className = 'btn btn-purple';
     proceedBtn.textContent = '🗑️ Confirm Ignore Selected';
   }
@@ -7558,7 +7552,23 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
 // Mode [G]: Unified All Groupings Explorer (Moments + Unassigned Clusters)
 // ==========================================================================
 
+let showAllMediaSourceLinks = localStorage.getItem('agy_show_all_media_source_links') !== '0';
+
 function setupAllGroupingsListeners(): void {
+  const showAmChk = document.getElementById('chk-show-all-media-links') as HTMLInputElement | null;
+  if (showAmChk) {
+    showAmChk.checked = showAllMediaSourceLinks;
+    showAmChk.addEventListener('change', () => {
+      showAllMediaSourceLinks = showAmChk.checked;
+      try {
+        localStorage.setItem('agy_show_all_media_source_links', showAllMediaSourceLinks ? '1' : '0');
+      } catch {
+        // ignore storage quota errors
+      }
+      renderAllUnifiedGroupings();
+    });
+  }
+
   document.getElementById('btn-refresh-all-groupings')?.addEventListener('click', () => {
     unifiedGroupingAssetsCache.clear();
     void fetchAllUnifiedGroupings(true);
@@ -7887,20 +7897,40 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
     .join('');
 
   const orgTargets = g.organizer_target_folders || [];
+  const srcAllMedia = g.source_all_media_folders || [];
   const sampleAidExp = assets[0]?.asset_id || g.preview_assets?.[0]?.asset_id || '';
   const orgSummaryBannerHtml =
-    orgTargets.length > 0
-      ? `<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; padding: 0.42rem 0.65rem; margin-bottom: 0.45rem; border-radius: 6px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.35);">
-          <div class="font-mono" style="font-size: 0.72rem; color: #6ee7b7; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
-            <strong>⚡ Media Organizer Library:</strong>
-            ${orgTargets
-              .map(
-                ot =>
-                  `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-exp-open-photos" data-album-name="${escapeHtml(ot.album_name)}" data-full-path="${escapeHtml(ot.full_path)}" data-sample-aid="${escapeHtml(sampleAidExp)}" title="Click to spotlight ${escapeHtml(ot.full_path)} in Media Organizer.photoslibrary">📁 ${escapeHtml(ot.full_path)} (${ot.matched_count}/${g.total_assets}) ↗</button>`
-              )
-              .join('')}
-          </div>
-          <span class="font-mono text-muted" style="font-size: 0.68rem;">~/Pictures/Media Organizer.photoslibrary</span>
+    orgTargets.length > 0 || srcAllMedia.length > 0
+      ? `<div style="display: flex; flex-direction: column; gap: 0.35rem; padding: 0.45rem 0.65rem; margin-bottom: 0.45rem; border-radius: 6px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.32);">
+          ${
+            orgTargets.length > 0
+              ? `<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                  <div class="font-mono" style="font-size: 0.72rem; color: #6ee7b7; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                    <strong>⚡ Media Organizer Library:</strong>
+                    ${orgTargets
+                      .map(
+                        ot =>
+                          `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-exp-open-photos" data-library-scope="organizer" data-album-name="${escapeHtml(ot.album_name)}" data-full-path="${escapeHtml(ot.full_path)}" data-sample-aid="${escapeHtml(sampleAidExp)}" title="Spotlight ${escapeHtml(ot.full_path)} in Media Organizer.photoslibrary">📁 ${escapeHtml(ot.full_path)} (${ot.matched_count}/${g.total_assets}) ↗</button>`
+                      )
+                      .join('')}
+                  </div>
+                  <span class="font-mono text-muted" style="font-size: 0.67rem;">~/Pictures/Media Organizer.photoslibrary</span>
+                </div>`
+              : ''
+          }
+          ${
+            showAllMediaSourceLinks && srcAllMedia.length > 0
+              ? `<div class="font-mono" style="font-size: 0.69rem; color: var(--text-secondary); display: flex; align-items: center; gap: 0.38rem; flex-wrap: wrap; padding-top: 0.2rem; border-top: 1px dashed rgba(148, 163, 184, 0.2);">
+                  <span class="text-muted">📀 Legacy in All-Media (read-only — delete manually in Photos):</span>
+                  ${srcAllMedia
+                    .map(
+                      am =>
+                        `<button type="button" class="badge badge-xs badge-outline font-mono pub-badge-link btn-ugrp-exp-open-photos" data-library-scope="all_media" data-album-name="${escapeHtml(am.album_name)}" data-full-path="${escapeHtml(am.full_path)}" data-sample-aid="${escapeHtml(sampleAidExp)}" title="Read-only spotlight in All-Media.photoslibrary: ${escapeHtml(am.full_path)} (${am.all_migrated ? 'all active assets migrated — safe to delete manually in Photos' : `${am.matched_count}/${am.source_total_count} migrated`})">📀 ${escapeHtml(am.parent_folder)}/${escapeHtml(am.album_name)}${am.all_migrated ? ' ✓' : ` (${am.matched_count}/${am.source_total_count})`} ↗</button>`
+                    )
+                    .join('')}
+                </div>`
+              : ''
+          }
         </div>`
       : '';
 
@@ -7997,6 +8027,15 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
       const albName = btn.dataset.albumName || g.name;
       const fullPath = btn.dataset.fullPath || '';
       const sampleAid = btn.dataset.sampleAid || '';
+      const libScope = btn.dataset.libraryScope || 'organizer';
+      if (
+        libScope === 'all_media' &&
+        !window.confirm(
+          `Switch Apple Photos to All-Media.photoslibrary (Read-Only) and spotlight "${albName}"?\n\nData Orchestrator never modifies All-Media — you can inspect or manually delete the legacy album in Photos, then switch back to Media Organizer when ready.`
+        )
+      ) {
+        return;
+      }
       btn.disabled = true;
       try {
         await fetch('/api/media/memories/open-photos-album', {
@@ -8005,7 +8044,8 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
           body: JSON.stringify({
             album_name: albName,
             full_path: fullPath,
-            sample_asset_id: sampleAid
+            sample_asset_id: sampleAid,
+            library_scope: libScope
           })
         });
       } finally {
@@ -8133,6 +8173,7 @@ function renderAllUnifiedGroupings(): void {
         g.youtube_url || '',
         ...(g.photos_folders || []).map(pf => `${pf.parent_folder} ${pf.full_path}`),
         ...(g.organizer_target_folders || []).map(ot => `${ot.album_name} ${ot.full_path}`),
+        ...(g.source_all_media_folders || []).map(am => `${am.album_name} ${am.parent_folder} ${am.full_path}`),
         ...g.batches.map(b => `${b.month} ${b.status_code}`)
       ]
         .join(' ')
@@ -8193,6 +8234,7 @@ function renderAllUnifiedGroupings(): void {
       const orgFolders = photosFolders.filter(pf => pf.library_scope === 'organizer');
       const legacyFolders = photosFolders.filter(pf => pf.library_scope !== 'organizer');
       const orgTargets = g.organizer_target_folders || [];
+      const srcAllMedia = g.source_all_media_folders || [];
       const sampleAid = g.preview_assets?.[0]?.asset_id || '';
       let photosFolderPillHtml = '';
       if (orgFolders.length > 0) {
@@ -8200,9 +8242,17 @@ function renderAllUnifiedGroupings(): void {
         const primaryOrgPath = primaryOrg?.full_path || '';
         const primaryOrgAlbum = primaryOrg?.album_name || g.name;
         const pathLabel = orgFolders.map(pf => pf.full_path).join(' + ');
-        photosFolderPillHtml = `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-album-name="${escapeHtml(primaryOrgAlbum)}" data-full-path="${escapeHtml(primaryOrgPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
+        photosFolderPillHtml = `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-library-scope="organizer" data-album-name="${escapeHtml(primaryOrgAlbum)}" data-full-path="${escapeHtml(primaryOrgPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
           `In Media Organizer.photoslibrary:\n${orgFolders.map(pf => `• ${pf.full_path}${pf.asset_count ? ` (${pf.asset_count})` : ''}`).join('\n')}\nClick to open in Media Organizer Photos`
         )}">⚡ Media Organizer: ${escapeHtml(pathLabel)} ↗</button>`;
+        if (showAllMediaSourceLinks && srcAllMedia.length > 0) {
+          const topSrc = srcAllMedia[0];
+          const extraSrcCnt = srcAllMedia.length - 1;
+          const srcLabel = `${topSrc.parent_folder}/${topSrc.album_name}${topSrc.all_migrated ? ' ✓' : ` (${topSrc.matched_count}/${topSrc.source_total_count})`}${extraSrcCnt > 0 ? ` +${extraSrcCnt}` : ''}`;
+          photosFolderPillHtml += ` <button type="button" class="badge badge-xs badge-outline font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-library-scope="all_media" data-album-name="${escapeHtml(topSrc.album_name)}" data-full-path="${escapeHtml(topSrc.full_path)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
+            `Legacy source folder(s) still in All-Media.photoslibrary (Read-Only):\n${srcAllMedia.map(am => `• ${am.parent_folder}/${am.album_name} — ${am.all_migrated ? 'all active assets migrated (can be manually deleted in Photos)' : `${am.matched_count}/${am.source_total_count} migrated`}`).join('\n')}\nClick to spotlight in All-Media Photos if you want to delete manually`
+          )}">📀 All-Media: ${escapeHtml(srcLabel)} ↗</button>`;
+        }
       } else {
         if (legacyFolders.length > 0) {
           photosFolderPillHtml = `<span class="badge badge-xs badge-outline font-mono" title="${escapeHtml(
@@ -8217,7 +8267,7 @@ function renderAllUnifiedGroupings(): void {
           const topTarget = orgTargets[0];
           const extraTargetsCnt = orgTargets.length - 1;
           const targetSummary = `${topTarget.full_path} (${topTarget.matched_count}/${g.total_assets})${extraTargetsCnt > 0 ? ` +${extraTargetsCnt}` : ''}`;
-          photosFolderPillHtml += `${photosFolderPillHtml ? ' ' : ''}<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-album-name="${escapeHtml(topTarget.album_name)}" data-full-path="${escapeHtml(topTarget.full_path)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
+          photosFolderPillHtml += `${photosFolderPillHtml ? ' ' : ''}<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-library-scope="organizer" data-album-name="${escapeHtml(topTarget.album_name)}" data-full-path="${escapeHtml(topTarget.full_path)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
             `Asset(s) copied into Media Organizer.photoslibrary:\n${orgTargets.map(ot => `• ${ot.full_path} (${ot.matched_count}/${g.total_assets})`).join('\n')}\nClick to open folder in Media Organizer Photos`
           )}">⚡ Media Organizer → ${escapeHtml(targetSummary)} ↗</button>`;
         }
@@ -8481,6 +8531,15 @@ function renderAllUnifiedGroupings(): void {
       const albName = btn.dataset.albumName || g.name;
       const fullPath = btn.dataset.fullPath || '';
       const sampleAid = btn.dataset.sampleAid || '';
+      const libScope = btn.dataset.libraryScope || 'organizer';
+      if (
+        libScope === 'all_media' &&
+        !window.confirm(
+          `Switch Apple Photos to All-Media.photoslibrary (Read-Only) and spotlight "${albName}"?\n\nData Orchestrator never modifies All-Media — you can inspect or manually delete the legacy album in Photos, then switch back to Media Organizer when ready.`
+        )
+      ) {
+        return;
+      }
       btn.disabled = true;
       try {
         await fetch('/api/media/memories/open-photos-album', {
@@ -8489,7 +8548,8 @@ function renderAllUnifiedGroupings(): void {
           body: JSON.stringify({
             album_name: albName,
             full_path: fullPath,
-            sample_asset_id: sampleAid
+            sample_asset_id: sampleAid,
+            library_scope: libScope
           })
         });
       } finally {
