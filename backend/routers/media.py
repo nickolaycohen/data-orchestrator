@@ -6016,14 +6016,19 @@ def query_memories_folders(
         return {"connected": False, "error": str(e), "items": []}
 
 
+def _is_valid_photos_library(path: Path) -> bool:
+    """Return True only when the .photoslibrary bundle has been initialized by Apple Photos (Photos.sqlite present)."""
+    try:
+        return path.is_dir() and (path / "database" / "Photos.sqlite").is_file()
+    except OSError:
+        return False
+
+
 def _resolve_organizer_library_path() -> Path:
     """Return the active or target Media Organizer.photoslibrary path on the internal SSD."""
     for cand in ORGANIZER_PHOTOS_LIBRARY_CANDIDATES:
-        try:
-            if cand.exists():
-                return cand
-        except OSError:
-            continue
+        if _is_valid_photos_library(cand):
+            return cand
     return ORGANIZER_PHOTOS_LIBRARY_CANDIDATES[0]
 
 
@@ -6078,14 +6083,8 @@ def _detect_active_photos_app_libraries() -> tuple[bool, list[str]]:
 def _get_photos_libraries_status(cur_opt: Optional[sqlite3.Cursor] = None) -> dict:
     """Return dual-library status (All-Media read-only source vs Media Organizer writable target)."""
     org_path = _resolve_organizer_library_path()
-    try:
-        src_online = APPLE_PHOTOS_LIBRARY_PATH.exists()
-    except OSError:
-        src_online = False
-    try:
-        org_exists = org_path.exists()
-    except OSError:
-        org_exists = False
+    src_online = _is_valid_photos_library(APPLE_PHOTOS_LIBRARY_PATH)
+    org_exists = _is_valid_photos_library(org_path)
 
     photos_running, open_libs = _detect_active_photos_app_libraries()
     active_lib = open_libs[0] if open_libs else ""
@@ -6134,10 +6133,7 @@ def _get_photos_libraries_status(cur_opt: Optional[sqlite3.Cursor] = None) -> di
 def _ensure_organizer_library_active_in_photos() -> tuple[bool, Optional[str], Path]:
     """Guarantee Photos.app is open on Media Organizer.photoslibrary and NEVER on All-Media.photoslibrary."""
     org_path = _resolve_organizer_library_path()
-    try:
-        exists_flag = org_path.exists()
-    except OSError as e:
-        return False, f"Cannot access {org_path}: {e}", org_path
+    exists_flag = _is_valid_photos_library(org_path)
 
     if not exists_flag:
         return (
@@ -6707,7 +6703,7 @@ def get_photos_libraries_status_endpoint():
 def activate_or_create_organizer_library():
     """Activate Media Organizer.photoslibrary in Photos.app (or launch Photos Library Chooser if not created yet)."""
     org_path = _resolve_organizer_library_path()
-    if not org_path.exists():
+    if not _is_valid_photos_library(org_path):
         try:
             photos_running, _ = _detect_active_photos_app_libraries()
             if photos_running:
