@@ -6387,6 +6387,223 @@ def _resolve_source_originals_map(cur: sqlite3.Cursor, asset_ids: list[str]) -> 
     return out
 
 
+def _reconcile_organizer_albums_from_photos_db(
+    cur: sqlite3.Cursor,
+) -> tuple[set[str], dict[str, list[dict]]]:
+    """Read live folders/albums from Media Organizer.photoslibrary/database/Photos.sqlite (read-only),
+    self-heal any missing 'organizer'-scoped rows in media_organizer.db, and return
+    (mapped_source_asset_ids, source_asset_id -> list of Media Organizer folder dicts).
+    """
+    _ensure_organizer_library_tables(cur)
+    org_to_src: dict[str, str] = {}
+    mapped_src_aids: set[str] = set()
+    for src_id, org_uuid in cur.execute(
+        "SELECT source_asset_id, organizer_asset_uuid FROM organizer_asset_map"
+    ).fetchall():
+        if src_id and org_uuid:
+            clean_u = str(org_uuid).strip().split("/")[0]
+            org_to_src[clean_u] = str(src_id).strip()
+            mapped_src_aids.add(str(src_id).strip())
+
+    org_path = _resolve_organizer_library_path()
+    org_db = org_path / "database" / "Photos.sqlite"
+    dirty_db = False
+
+    if _is_valid_photos_library(org_path) and org_db.is_file():
+        try:
+            c_org = sqlite3.connect(f"file:{org_db}?mode=ro", uri=True, timeout=5)
+            try:
+                # Auto-recover any unmapped assets in Media Organizer.photoslibrary by (original_filename, date_created_utc)
+                try:
+                    org_assets_rows = c_org.execute(
+                        """
+                        SELECT z.ZUUID, COALESCE(aaa.ZORIGINALFILENAME, z.ZFILENAME, ''),
+                               datetime(z.ZDATECREATED + 978307200, 'unixepoch')
+                        FROM ZASSET z
+                        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = z.Z_PK
+                        WHERE COALESCE(z.ZTRASHEDSTATE, 0) = 0 AND z.ZUUID IS NOT NULL
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    org_assets_rows = []
+
+                for z_uuid, orig_fn, dt_utc in org_assets_rows:
+                    clean_u = str(z_uuid).strip().split("/")[0]
+                    if not clean_u or clean_u in org_to_src:
+                        continue
+                    if orig_fn and dt_utc:
+                        try:
+                            m_row = cur.execute(
+                                """
+                                SELECT asset_id FROM assets
+                                WHERE LOWER(COALESCE(original_filename, '')) = LOWER(?)
+                                  AND substr(COALESCE(date_created_utc, ''), 1, 16) = substr(?, 1, 16)
+                                LIMIT 1
+                                """,
+                                (orig_fn, dt_utc),
+                            ).fetchone()
+                            if m_row and m_row[0]:
+                                s_id = str(m_row[0]).strip()
+                                cur.execute(
+                                    """
+                                    INSERT OR IGNORE INTO organizer_asset_map
+                                        (source_asset_id, organizer_asset_uuid, original_filename, imported_at_utc)
+                                    VALUES (?, ?, ?, datetime('now'))
+                                    """,
+                                    (s_id, clean_u, orig_fn),
+                                )
+                                org_to_src[clean_u] = s_id
+                                mapped_src_aids.add(s_id)
+                                dirty_db = True
+                        except sqlite3.OperationalError:
+                            pass
+
+                # Inspect folder + user album hierarchy in Media Organizer.photoslibrary
+                album_rows = c_org.execute(
+                    """
+                    WITH RECURSIVE org_tree AS (
+                        SELECT a.Z_PK, a.ZTITLE, a.ZPARENTFOLDER, a.ZKIND, 1 AS depth, CAST(a.ZTITLE AS TEXT) AS full_path
+                        FROM ZGENERICALBUM a
+                        WHERE COALESCE(a.ZTRASHEDSTATE, 0) = 0
+                          AND a.ZTITLE IS NOT NULL AND TRIM(a.ZTITLE) != ''
+                          AND a.ZKIND IN (2, 4000)
+                          AND (a.ZPARENTFOLDER IS NULL OR a.ZPARENTFOLDER NOT IN (
+                              SELECT Z_PK FROM ZGENERICALBUM
+                              WHERE COALESCE(ZTRASHEDSTATE, 0) = 0 AND ZTITLE IS NOT NULL AND TRIM(ZTITLE) != '' AND ZKIND IN (2, 4000)
+                          ))
+                        UNION ALL
+                        SELECT ch.Z_PK, ch.ZTITLE, ch.ZPARENTFOLDER, ch.ZKIND, t.depth + 1, t.full_path || '/' || ch.ZTITLE
+                        FROM ZGENERICALBUM ch
+                        JOIN org_tree t ON ch.ZPARENTFOLDER = t.Z_PK
+                        WHERE COALESCE(ch.ZTRASHEDSTATE, 0) = 0
+                          AND ch.ZTITLE IS NOT NULL AND TRIM(ch.ZTITLE) != ''
+                          AND ch.ZKIND IN (2, 4000)
+                    )
+                    SELECT t.Z_PK, t.ZTITLE,
+                           CASE WHEN p.ZKIND = 4000 THEN COALESCE(p.ZTITLE, '') ELSE '' END AS parent_title,
+                           t.full_path, t.ZKIND, t.depth
+                    FROM org_tree t
+                    LEFT JOIN ZGENERICALBUM p ON t.ZPARENTFOLDER = p.Z_PK
+                    ORDER BY t.depth ASC, t.full_path ASC
+                    """
+                ).fetchall()
+
+                # Discover Z_<N>ASSETS join table dynamically
+                join_tbl = None
+                alb_col = None
+                ast_col = None
+                for (t_nm,) in c_org.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Z_%ASSETS' ORDER BY name DESC"
+                ).fetchall():
+                    cols = [r[1] for r in c_org.execute(f"PRAGMA table_info({t_nm})").fetchall()]
+                    c_alb = next((c for c in cols if c.endswith("ALBUMS")), None)
+                    c_ast = next((c for c in cols if c.endswith("ASSETS") and not c.endswith("KEYASSETS")), None)
+                    if c_alb and c_ast:
+                        join_tbl, alb_col, ast_col = t_nm, c_alb, c_ast
+                        break
+
+                org_zpk_to_uuids: dict[int, list[str]] = {}
+                if join_tbl and alb_col and ast_col:
+                    for a_zpk, z_uuid in c_org.execute(
+                        f"""
+                        SELECT ja.{alb_col}, z.ZUUID
+                        FROM {join_tbl} ja
+                        JOIN ZASSET z ON z.Z_PK = ja.{ast_col}
+                        WHERE COALESCE(z.ZTRASHEDSTATE, 0) = 0 AND z.ZUUID IS NOT NULL
+                        """
+                    ).fetchall():
+                        clean_u = str(z_uuid).strip().split("/")[0]
+                        if clean_u:
+                            org_zpk_to_uuids.setdefault(int(a_zpk), []).append(clean_u)
+
+                existing_org_keys = {
+                    (str(r[0] or "").strip().lower(), str(r[1] or "").strip().lower()): (int(r[2]), int(r[3] or 0))
+                    for r in cur.execute(
+                        """
+                        SELECT album_name, COALESCE(parent_folder_name, ''), album_pk, COALESCE(asset_count, 0)
+                        FROM media_organizer_albums
+                        WHERE is_folder = 0 AND COALESCE(library_scope, 'all_media') = 'organizer'
+                        """
+                    ).fetchall()
+                }
+
+                for z_pk, z_title, par_title, full_p, z_kind, _depth in album_rows:
+                    if int(z_kind) != 2:
+                        continue
+                    alb_nm = str(z_title or "").strip()
+                    par_nm = str(par_title or "").strip()
+                    if not alb_nm:
+                        continue
+                    member_org_uuids = org_zpk_to_uuids.get(int(z_pk), [])
+                    member_src_ids = [org_to_src[u] for u in member_org_uuids if u in org_to_src]
+                    key_lc = (alb_nm.lower(), par_nm.lower())
+                    ex_info = existing_org_keys.get(key_lc)
+                    if ex_info is None or ex_info[1] < len(member_src_ids):
+                        alb_pk, _ = _upsert_organizer_album_in_db(cur, par_nm, alb_nm, member_src_ids)
+                        dirty_db = True
+                        if par_nm.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments") and alb_nm.lower() not in ("ignore", "skippublishing"):
+                            try:
+                                m_ex = cur.execute(
+                                    "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
+                                    (alb_nm,),
+                                ).fetchone()
+                                if not m_ex:
+                                    cur.execute(
+                                        "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, ?)",
+                                        (alb_pk, alb_nm, par_nm),
+                                    )
+                                if member_src_ids:
+                                    ph_m = ",".join("?" for _ in member_src_ids)
+                                    cur.execute(
+                                        f"UPDATE assets SET MomentsAlbumName = ? WHERE asset_id IN ({ph_m}) AND COALESCE(MomentsAlbumName, '') != ?",
+                                        [alb_nm, *member_src_ids, alb_nm],
+                                    )
+                            except sqlite3.OperationalError:
+                                pass
+            finally:
+                c_org.close()
+        except Exception:
+            pass
+
+    if dirty_db:
+        try:
+            cur.connection.commit()
+        except Exception:
+            pass
+
+    org_folders_by_src_aid: dict[str, list[dict]] = {}
+    try:
+        for alb_nm, par_nm, full_p, aid in cur.execute(
+            """
+            SELECT moa.album_name, COALESCE(moa.parent_folder_name, ''), COALESCE(moa.full_path, ''), moaa.asset_id
+            FROM media_organizer_album_assets moaa
+            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+            WHERE moa.is_folder = 0
+              AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
+              AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded')
+            ORDER BY moa.full_path ASC
+            """
+        ).fetchall():
+            if not aid or not alb_nm:
+                continue
+            a_clean = str(alb_nm).strip()
+            p_clean = str(par_nm or "Moments").strip() or "Moments"
+            fp_clean = str(full_p).strip() or f"{p_clean}/{a_clean}"
+            bucket = org_folders_by_src_aid.setdefault(str(aid).strip(), [])
+            if not any(x["full_path"].lower() == fp_clean.lower() for x in bucket):
+                bucket.append(
+                    {
+                        "album_name": a_clean,
+                        "parent_folder": p_clean,
+                        "full_path": fp_clean,
+                    }
+                )
+    except sqlite3.OperationalError:
+        pass
+
+    return mapped_src_aids, org_folders_by_src_aid
+
+
 def _upsert_organizer_album_in_db(
     cur: sqlite3.Cursor,
     parent_folder: str,
@@ -11204,10 +11421,7 @@ def get_all_unified_groupings():
                 pass
 
             # 3. Album memberships across Apple Photos (Media Organizer target library + All-Media source library)
-            _ensure_organizer_library_tables(cur)
-            mapped_src_aids: set[str] = {
-                r[0] for r in cur.execute("SELECT source_asset_id FROM organizer_asset_map").fetchall() if r[0]
-            }
+            mapped_src_aids, org_folders_by_src_aid = _reconcile_organizer_albums_from_photos_db(cur)
             album_parents_by_lc: dict[str, set[str]] = {}
             photos_folders_by_lc: dict[str, dict[str, dict]] = {}
             canonical_name_by_lc: dict[str, str] = {}
@@ -11247,6 +11461,7 @@ def get_all_unified_groupings():
                     entry = f_bucket.setdefault(
                         f"{scope_clean}::{fp_clean.lower()}",
                         {
+                            "album_name": nm,
                             "parent_folder": par_clean,
                             "full_path": fp_clean,
                             "asset_count": int(ac_cnt or 0),
@@ -11465,6 +11680,7 @@ def get_all_unified_groupings():
                 raw_f_bucket = photos_folders_by_lc.get(lc, {})
                 photos_folders_list = [
                     {
+                        "album_name": fv.get("album_name") or name,
                         "parent_folder": fv["parent_folder"],
                         "full_path": fv["full_path"],
                         "asset_count": max(int(fv["asset_count"] or 0), len(fv["_aids"])),
@@ -11477,6 +11693,24 @@ def get_all_unified_groupings():
                 ]
                 in_org_lib = any(pf.get("library_scope") == "organizer" for pf in photos_folders_list)
                 org_mapped_cnt = sum(1 for aid in valid_members if aid in mapped_src_aids)
+                org_targets_agg: dict[str, dict] = {}
+                for aid in valid_members:
+                    for oref in org_folders_by_src_aid.get(aid, []):
+                        k_fp = oref["full_path"].lower()
+                        t_ent = org_targets_agg.setdefault(
+                            k_fp,
+                            {
+                                "album_name": oref["album_name"],
+                                "parent_folder": oref["parent_folder"],
+                                "full_path": oref["full_path"],
+                                "matched_count": 0,
+                            },
+                        )
+                        t_ent["matched_count"] += 1
+                org_target_folders_list = sorted(
+                    org_targets_agg.values(),
+                    key=lambda x: (-x["matched_count"], x["full_path"].lower()),
+                )
                 parents_sorted = sorted(album_parents_by_lc.get(lc, set()))
 
                 sf_url_final = cm.get("shutterfly_url") or pub_sf_url_by_lc.get(lc, "")
@@ -11580,6 +11814,7 @@ def get_all_unified_groupings():
                         "can_publish_ok": can_pub_ok,
                         "parent_folders": parents_sorted,
                         "photos_folders": photos_folders_list,
+                        "organizer_target_folders": org_target_folders_list,
                         "in_organizer_library": in_org_lib,
                         "organizer_mapped_count": org_mapped_cnt,
                         "curated_folder_exists": fs_curated_exists,
@@ -11651,6 +11886,8 @@ def get_all_unified_groupings():
 
                 b_counts: dict[str, int] = {}
                 inline_assets: list[dict] = []
+                unass_org_targets_agg: dict[str, dict] = {}
+                unass_org_mapped_cnt = 0
                 for a in c_assets:
                     mo_a = str(a.get("month") or "").strip()
                     b_st = batch_status_by_month.get(mo_a, "—")
@@ -11658,6 +11895,22 @@ def get_all_unified_groupings():
                         b_counts[mo_a] = b_counts.get(mo_a, 0) + 1
                     aid_a = a.get("asset_id") or ""
                     m_type_a = asset_info_map.get(aid_a, ("", 0.0, "", "", "", "photo"))[5]
+                    a_in_org = aid_a in mapped_src_aids
+                    if a_in_org:
+                        unass_org_mapped_cnt += 1
+                    a_org_refs = org_folders_by_src_aid.get(aid_a, [])
+                    for oref in a_org_refs:
+                        k_fp = oref["full_path"].lower()
+                        t_ent = unass_org_targets_agg.setdefault(
+                            k_fp,
+                            {
+                                "album_name": oref["album_name"],
+                                "parent_folder": oref["parent_folder"],
+                                "full_path": oref["full_path"],
+                                "matched_count": 0,
+                            },
+                        )
+                        t_ent["matched_count"] += 1
                     inline_assets.append(
                         {
                             "asset_id": aid_a,
@@ -11675,6 +11928,8 @@ def get_all_unified_groupings():
                             "in_to_be_curated": False,
                             "in_curated": False,
                             "is_published": False,
+                            "in_organizer_library": a_in_org,
+                            "organizer_folders": [x["full_path"] for x in a_org_refs],
                             "asset_tags": [],
                         }
                     )
@@ -11706,6 +11961,11 @@ def get_all_unified_groupings():
                         "can_publish_str": "—",
                         "can_publish_ok": False,
                         "parent_folders": [],
+                        "organizer_target_folders": sorted(
+                            unass_org_targets_agg.values(),
+                            key=lambda x: (-x["matched_count"], x["full_path"].lower()),
+                        ),
+                        "organizer_mapped_count": unass_org_mapped_cnt,
                         "total_assets": total_c,
                         "qualified_assets": qual_c,
                         "unique_count": uniq_c,
@@ -11737,8 +11997,15 @@ def get_all_unified_groupings():
                     }
                 )
 
-            # Default order: Average Score descending
-            unified_groupings.sort(key=lambda g: (-g["avg_score"], -g["total_assets"], g["name"].lower()))
+            # Default order: Average Score descending (with Media Organizer library moments prioritized on exact ties)
+            unified_groupings.sort(
+                key=lambda g: (
+                    -g["avg_score"],
+                    0 if g.get("in_organizer_library") else 1,
+                    -g["total_assets"],
+                    g["name"].lower(),
+                )
+            )
 
             total_assets_sum = sum(g["total_assets"] for g in unified_groupings)
             weighted_score_sum = sum(g["avg_score"] * g["total_assets"] for g in unified_groupings)
@@ -11909,6 +12176,7 @@ def get_unified_grouping_assets(moment_name: str):
             except sqlite3.OperationalError:
                 pass
 
+            mapped_src_aids, org_folders_by_src_aid = _reconcile_organizer_albums_from_photos_db(cur)
             in_moments_set: set[str] = set()
             in_tbc_set: set[str] = set()
             in_cur_set: set[str] = set()
@@ -12038,6 +12306,8 @@ def get_unified_grouping_assets(moment_name: str):
                         "in_to_be_curated": aid in in_tbc_set,
                         "in_curated": aid in in_cur_set,
                         "is_published": aid in pub_set,
+                        "in_organizer_library": aid in mapped_src_aids or bool(org_folders_by_src_aid.get(aid)),
+                        "organizer_folders": [x["full_path"] for x in org_folders_by_src_aid.get(aid, [])],
                         "asset_tags": per_asset_tags.get(aid, []),
                     }
                 )

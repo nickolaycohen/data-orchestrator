@@ -7833,6 +7833,12 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
         ? `<span class="badge badge-xs ${batchStatusBadgeClass(a.batch_status)} font-mono" title="Month batch ${escapeHtml(a.month)} · Status ${escapeHtml(a.batch_status)}">📅 ${escapeHtml(a.month)} [${escapeHtml(a.batch_status)}]</span>`
         : '';
       const folderChips: string[] = [];
+      if (a.in_organizer_library || (a.organizer_folders && a.organizer_folders.length > 0)) {
+        const orgPaths = a.organizer_folders && a.organizer_folders.length > 0 ? a.organizer_folders.join(' + ') : 'Media Organizer';
+        folderChips.push(
+          `<span class="badge badge-xs badge-green font-mono" title="Copied into Media Organizer.photoslibrary: ${escapeHtml(orgPaths)}">⚡ Media Organizer: ${escapeHtml(orgPaths)}</span>`
+        );
+      }
       if (a.is_published) folderChips.push('<span class="badge badge-xs badge-green font-mono">📢 Published</span>');
       if (a.in_curated) folderChips.push('<span class="badge badge-xs badge-blue font-mono">✅ Curated</span>');
       if (a.in_to_be_curated) folderChips.push('<span class="badge badge-xs badge-amber font-mono">🟡 TBC</span>');
@@ -7880,7 +7886,26 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
     })
     .join('');
 
+  const orgTargets = g.organizer_target_folders || [];
+  const sampleAidExp = assets[0]?.asset_id || g.preview_assets?.[0]?.asset_id || '';
+  const orgSummaryBannerHtml =
+    orgTargets.length > 0
+      ? `<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; padding: 0.42rem 0.65rem; margin-bottom: 0.45rem; border-radius: 6px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.35);">
+          <div class="font-mono" style="font-size: 0.72rem; color: #6ee7b7; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+            <strong>⚡ Media Organizer Library:</strong>
+            ${orgTargets
+              .map(
+                ot =>
+                  `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-exp-open-photos" data-album-name="${escapeHtml(ot.album_name)}" data-full-path="${escapeHtml(ot.full_path)}" data-sample-aid="${escapeHtml(sampleAidExp)}" title="Click to spotlight ${escapeHtml(ot.full_path)} in Media Organizer.photoslibrary">📁 ${escapeHtml(ot.full_path)} (${ot.matched_count}/${g.total_assets}) ↗</button>`
+              )
+              .join('')}
+          </div>
+          <span class="font-mono text-muted" style="font-size: 0.68rem;">~/Pictures/Media Organizer.photoslibrary</span>
+        </div>`
+      : '';
+
   return `
+    ${orgSummaryBannerHtml}
     <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
       <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
         <label style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.74rem; cursor: pointer;" class="font-mono">
@@ -7964,6 +7989,29 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
 
   bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-publish')?.addEventListener('click', () => {
     void openPublishMomentModal(g.name);
+  });
+
+  bodyEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-exp-open-photos').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const albName = btn.dataset.albumName || g.name;
+      const fullPath = btn.dataset.fullPath || '';
+      const sampleAid = btn.dataset.sampleAid || '';
+      btn.disabled = true;
+      try {
+        await fetch('/api/media/memories/open-photos-album', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            album_name: albName,
+            full_path: fullPath,
+            sample_asset_id: sampleAid
+          })
+        });
+      } finally {
+        btn.disabled = false;
+      }
+    });
   });
 
   bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-tag-merge')?.addEventListener('click', () => {
@@ -8065,10 +8113,13 @@ function renderAllUnifiedGroupings(): void {
       if (allGroupingsBatchFilter === '600_plus' && !has600) return false;
       if (allGroupingsBatchFilter === 'under_600' && !hasUnder600) return false;
     }
-    if (allGroupingsLibraryFilter === 'organizer' && !g.in_organizer_library) {
+    const isFullyCopied =
+      Boolean(g.in_organizer_library) ||
+      ((g.organizer_mapped_count || 0) >= g.total_assets && g.total_assets > 0);
+    if (allGroupingsLibraryFilter === 'organizer' && !g.in_organizer_library && !(g.organizer_target_folders || []).length) {
       return false;
     }
-    if (allGroupingsLibraryFilter === 'source_only' && g.in_organizer_library) {
+    if (allGroupingsLibraryFilter === 'source_only' && isFullyCopied) {
       return false;
     }
     if (allGroupingsSearchQuery) {
@@ -8081,6 +8132,7 @@ function renderAllUnifiedGroupings(): void {
         g.shutterfly_url || '',
         g.youtube_url || '',
         ...(g.photos_folders || []).map(pf => `${pf.parent_folder} ${pf.full_path}`),
+        ...(g.organizer_target_folders || []).map(ot => `${ot.album_name} ${ot.full_path}`),
         ...g.batches.map(b => `${b.month} ${b.status_code}`)
       ]
         .join(' ')
@@ -8140,23 +8192,35 @@ function renderAllUnifiedGroupings(): void {
       const photosFolders = g.photos_folders || [];
       const orgFolders = photosFolders.filter(pf => pf.library_scope === 'organizer');
       const legacyFolders = photosFolders.filter(pf => pf.library_scope !== 'organizer');
+      const orgTargets = g.organizer_target_folders || [];
       const sampleAid = g.preview_assets?.[0]?.asset_id || '';
       let photosFolderPillHtml = '';
       if (orgFolders.length > 0) {
-        const primaryOrgPath = orgFolders[0]?.full_path || '';
-        photosFolderPillHtml = `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-full-path="${escapeHtml(primaryOrgPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
+        const primaryOrg = orgFolders[0];
+        const primaryOrgPath = primaryOrg?.full_path || '';
+        const primaryOrgAlbum = primaryOrg?.album_name || g.name;
+        const pathLabel = orgFolders.map(pf => pf.full_path).join(' + ');
+        photosFolderPillHtml = `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-album-name="${escapeHtml(primaryOrgAlbum)}" data-full-path="${escapeHtml(primaryOrgPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
           `In Media Organizer.photoslibrary:\n${orgFolders.map(pf => `• ${pf.full_path}${pf.asset_count ? ` (${pf.asset_count})` : ''}`).join('\n')}\nClick to open in Media Organizer Photos`
-        )}">⚡ Organizer: ${escapeHtml(
-          Array.from(new Set(orgFolders.map(pf => pf.parent_folder))).join(' + ')
-        )} ↗</button>`;
-      } else if (legacyFolders.length > 0) {
-        photosFolderPillHtml = `<span class="badge badge-xs badge-outline font-mono" title="${escapeHtml(
-          `Source library only (All-Media — read-only):\n${legacyFolders.map(pf => `• ${pf.full_path}${pf.asset_count ? ` (${pf.asset_count})` : ''}`).join('\n')}\nUse Tag & Copy / Curate to copy into Media Organizer.photoslibrary`
-        )}">📀 All-Media: ${escapeHtml(
-          Array.from(new Set(legacyFolders.map(pf => pf.parent_folder))).join(' + ')
-        )}</span>`;
-      } else if (g.parent_folders.length) {
-        photosFolderPillHtml = `<span class="badge badge-xs badge-outline font-mono">📀 All-Media: ${escapeHtml(g.parent_folders.join(' + '))}</span>`;
+        )}">⚡ Media Organizer: ${escapeHtml(pathLabel)} ↗</button>`;
+      } else {
+        if (legacyFolders.length > 0) {
+          photosFolderPillHtml = `<span class="badge badge-xs badge-outline font-mono" title="${escapeHtml(
+            `Source library (All-Media — read-only):\n${legacyFolders.map(pf => `• ${pf.full_path}${pf.asset_count ? ` (${pf.asset_count})` : ''}`).join('\n')}`
+          )}">📀 All-Media: ${escapeHtml(
+            Array.from(new Set(legacyFolders.map(pf => pf.parent_folder))).join(' + ')
+          )}</span>`;
+        } else if (g.parent_folders.length) {
+          photosFolderPillHtml = `<span class="badge badge-xs badge-outline font-mono">📀 All-Media: ${escapeHtml(g.parent_folders.join(' + '))}</span>`;
+        }
+        if (orgTargets.length > 0) {
+          const topTarget = orgTargets[0];
+          const extraTargetsCnt = orgTargets.length - 1;
+          const targetSummary = `${topTarget.full_path} (${topTarget.matched_count}/${g.total_assets})${extraTargetsCnt > 0 ? ` +${extraTargetsCnt}` : ''}`;
+          photosFolderPillHtml += `${photosFolderPillHtml ? ' ' : ''}<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-album-name="${escapeHtml(topTarget.album_name)}" data-full-path="${escapeHtml(topTarget.full_path)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
+            `Asset(s) copied into Media Organizer.photoslibrary:\n${orgTargets.map(ot => `• ${ot.full_path} (${ot.matched_count}/${g.total_assets})`).join('\n')}\nClick to open folder in Media Organizer Photos`
+          )}">⚡ Media Organizer → ${escapeHtml(targetSummary)} ↗</button>`;
+        }
       }
 
       const curatedFinderPillHtml = g.curated_folder_exists
@@ -8229,7 +8293,10 @@ function renderAllUnifiedGroupings(): void {
         .join('');
       const extraThumbCnt = Math.max(0, g.total_assets - 5);
 
-      const tagBtnLabel = g.in_organizer_library ? '🏷️ Tag / Merge' : '🏷️ Tag &amp; Copy';
+      const allCopiedToOrganizer =
+        Boolean(g.in_organizer_library) ||
+        ((g.organizer_mapped_count || 0) >= g.total_assets && g.total_assets > 0);
+      const tagBtnLabel = allCopiedToOrganizer ? '🏷️ Tag / Merge' : '🏷️ Tag &amp; Copy';
       const quickActionHtml =
         g.kind === 'unassigned'
           ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}">✨ Assign</button>`
@@ -8239,7 +8306,7 @@ function renderAllUnifiedGroupings(): void {
             : g.moment_status === 'M400' || g.moment_status === 'M450'
               ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🚀 Publish</button>
                  <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}">${tagBtnLabel}</button>`
-              : `<button type="button" class="btn btn-xs ${g.in_organizer_library ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}">${tagBtnLabel}</button>`;
+              : `<button type="button" class="btn btn-xs ${allCopiedToOrganizer ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}">${tagBtnLabel}</button>`;
 
       const cachedAssets = unifiedGroupingAssetsCache.get(g.grouping_id);
       const bodyInnerHtml = isExpanded
@@ -8411,6 +8478,7 @@ function renderAllUnifiedGroupings(): void {
       const gid = btn.dataset.groupingId || '';
       const g = itemById.get(gid);
       if (!g) return;
+      const albName = btn.dataset.albumName || g.name;
       const fullPath = btn.dataset.fullPath || '';
       const sampleAid = btn.dataset.sampleAid || '';
       btn.disabled = true;
@@ -8419,7 +8487,7 @@ function renderAllUnifiedGroupings(): void {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            album_name: g.name,
+            album_name: albName,
             full_path: fullPath,
             sample_asset_id: sampleAid
           })

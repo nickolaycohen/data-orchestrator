@@ -813,10 +813,18 @@ export interface UnifiedGroupingBatchSummary {
 }
 
 export interface UnifiedGroupingPhotosFolder {
+  album_name?: string;
   parent_folder: string;
   full_path: string;
   asset_count: number;
   library_scope?: 'organizer' | 'all_media';
+}
+
+export interface OrganizerTargetFolderRef {
+  album_name: string;
+  parent_folder: string;
+  full_path: string;
+  matched_count: number;
 }
 
 export interface PhotosLibrariesStatus {
@@ -862,6 +870,8 @@ export interface UnifiedGroupingAssetItem {
   in_to_be_curated?: boolean;
   in_curated?: boolean;
   is_published?: boolean;
+  in_organizer_library?: boolean;
+  organizer_folders?: string[];
   asset_tags?: MomentTagItem[];
 }
 
@@ -878,6 +888,7 @@ export interface UnifiedGroupingItem {
   can_publish_ok: boolean;
   parent_folders: string[];
   photos_folders?: UnifiedGroupingPhotosFolder[];
+  organizer_target_folders?: OrganizerTargetFolderRef[];
   in_organizer_library?: boolean;
   organizer_mapped_count?: number;
   curated_folder_exists?: boolean;
