@@ -936,6 +936,23 @@
           </div>
 
           <div class="card-body" style="display: flex; flex-direction: column; gap: 0.75rem;">
+            <!-- Dual-Library Bridge Bar: All-Media (Read-Only Source) -> Media Organizer (Writable Target) -->
+            <div id="dual-photos-library-bar"
+              style="display: flex; align-items: center; justify-content: space-between; gap: 0.65rem; flex-wrap: wrap; padding: 0.5rem 0.75rem; border-radius: 8px; background: rgba(15, 23, 42, 0.72); border: 1px solid rgba(56, 189, 248, 0.28);">
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.73rem;" class="font-mono">
+                <span class="badge badge-xs badge-outline" title="/Volumes/Extreme Pro/Photos Library/All-Media.photoslibrary — 100% Read-Only Source">📀 Source: All-Media (Read-Only)</span>
+                <span class="text-muted">➜</span>
+                <span class="badge badge-xs badge-blue" id="organizer-lib-status-badge">⚡ Target: Checking Media Organizer.photoslibrary...</span>
+                <span class="text-muted" id="organizer-lib-counts-note" style="font-size: 0.68rem;"></span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <button type="button" class="btn btn-xs btn-cyan" id="btn-activate-organizer-library"
+                  title="Open ~/Pictures/Media Organizer.photoslibrary in Photos.app (or launch Photos Library Chooser to create it if absent)">
+                  ⚡ Open / Create Media Organizer Library
+                </button>
+              </div>
+            </div>
+
             <div class="unassigned-clusters-toolbar" style="border-radius: 8px; border: 1px solid var(--border-subtle);">
               <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
                 <span class="font-mono text-muted" style="font-size: 0.68rem; text-transform: uppercase;">Sort:</span>
@@ -951,6 +968,12 @@
                   <option value="all">📅 All Batch Statuses</option>
                   <option value="600_plus">✅ Batch ≥ 600 (Ranked)</option>
                   <option value="under_600">⏳ Batch &lt; 600 (In Pipeline)</option>
+                </select>
+                <select id="all-groupings-library-filter" class="form-control"
+                  style="width: auto; min-width: 185px; margin-top: 0; padding: 0.25rem 0.5rem; font-size: 0.72rem;">
+                  <option value="all">📚 All Libraries</option>
+                  <option value="organizer">⚡ In Media Organizer Library</option>
+                  <option value="source_only">📀 Source Only (Not Yet Copied)</option>
                 </select>
               </div>
               <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">

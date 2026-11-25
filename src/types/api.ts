@@ -816,6 +816,21 @@ export interface UnifiedGroupingPhotosFolder {
   parent_folder: string;
   full_path: string;
   asset_count: number;
+  library_scope?: 'organizer' | 'all_media';
+}
+
+export interface PhotosLibrariesStatus {
+  ok: boolean;
+  source_library_path: string;
+  source_online: boolean;
+  organizer_library_path: string;
+  organizer_exists: boolean;
+  photos_running: boolean;
+  active_photos_library: string;
+  organizer_active_in_photos: boolean;
+  all_media_open_in_photos: boolean;
+  mapped_assets_count: number;
+  organizer_albums_count: number;
 }
 
 export interface UnifiedGroupingPreviewAsset {
@@ -863,6 +878,8 @@ export interface UnifiedGroupingItem {
   can_publish_ok: boolean;
   parent_folders: string[];
   photos_folders?: UnifiedGroupingPhotosFolder[];
+  in_organizer_library?: boolean;
+  organizer_mapped_count?: number;
   curated_folder_exists?: boolean;
   pub_rec_folder_exists?: boolean;
   total_assets: number;
@@ -899,9 +916,11 @@ export interface AllGroupingsResponse {
   total_groupings: number;
   moments_count: number;
   unassigned_count: number;
+  in_organizer_count?: number;
   total_assets: number;
   overall_avg_score: number;
   by_status: Record<string, number>;
+  library_status?: PhotosLibrariesStatus;
   groupings: UnifiedGroupingItem[];
 }
 

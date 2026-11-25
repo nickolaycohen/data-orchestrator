@@ -55,6 +55,7 @@ let allGroupingsData: AllGroupingsResponse | null = null;
 let allGroupingsSortMode: 'avg_score' | 'qual_avg' | 'count' | 'rank_score' | 'date' = 'avg_score';
 let allGroupingsStatusFilter = 'all';
 let allGroupingsBatchFilter: 'all' | '600_plus' | 'under_600' = 'all';
+let allGroupingsLibraryFilter: 'all' | 'organizer' | 'source_only' = 'all';
 let allGroupingsSearchQuery = '';
 const expandedUnifiedGroupingIds = new Set<string>();
 const unifiedGroupingAssetsCache = new Map<string, UnifiedGroupingAssetItem[]>();
@@ -4485,10 +4486,19 @@ async function submitCreateMoment(): Promise<void> {
     applyOptimisticClusterRemoval(new Set([...assetIds, ...ignoreAssetIds]));
 
     await refreshModeMFull();
+    unifiedGroupingAssetsCache.clear();
+    allGroupingsLoaded = false;
+    if (activePlannerModeView === 'g') {
+      await fetchAllUnifiedGroupings(true);
+    }
     closeCreateMomentModal();
-    finishApplePhotosActionSyncLock(
-      `⏳ Apple Photos updated (${momentName}) — awaiting Background DB Copy & Sync Service refresh to re-enable UI & reload browser…`
-    );
+    if ((data as any).library_target === 'organizer') {
+      cancelApplePhotosSyncLock();
+    } else {
+      finishApplePhotosActionSyncLock(
+        `⏳ Apple Photos updated (${momentName}) — awaiting Background DB Copy & Sync Service refresh to re-enable UI & reload browser…`
+      );
+    }
     succeeded = true;
   } catch (err: any) {
     console.error('Error creating Moment via AppleScript:', err);
@@ -7102,7 +7112,7 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     proceedBtn.textContent = exportLacie ? '✅ Confirm Curate & Export' : '✅ Confirm Move into Curated';
   } else if (isMerge) {
     const existingInfo = getExistingTargetAlbumInfo(resolvedParent, targetMoment);
-    const fullTargetPath = `Media Organizer on LaCie / ${resolvedParent} / ${targetMoment}`;
+    const fullTargetPath = `Media Organizer.photoslibrary / ${resolvedParent} / ${targetMoment}`;
     const extraEntries = Array.from(combinedExtraMoments.values());
     const totalAssetSel = assetIds.length + extraEntries.reduce((acc, e) => acc + e.assetIds.size, 0);
 
@@ -7480,9 +7490,13 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
     if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
 
     closeResolveDisjointModal();
-    finishApplePhotosActionSyncLock(
-      `⏳ Apple Photos updated (${isMerge ? targetMoment : resolveDisjointMomentName}) — awaiting Background DB Copy & Sync Service refresh to re-enable UI & reload browser…`
-    );
+    if ((data as any).library_target === 'organizer') {
+      cancelApplePhotosSyncLock();
+    } else {
+      finishApplePhotosActionSyncLock(
+        `⏳ Apple Photos updated (${isMerge ? targetMoment : resolveDisjointMomentName}) — awaiting Background DB Copy & Sync Service refresh to re-enable UI & reload browser…`
+      );
+    }
     succeeded = true;
   } catch (err: any) {
     cancelApplePhotosSyncLock();
@@ -7530,6 +7544,35 @@ function setupAllGroupingsListeners(): void {
     const v = batchSel.value;
     allGroupingsBatchFilter = v === '600_plus' || v === 'under_600' ? v : 'all';
     renderAllUnifiedGroupings();
+  });
+
+  const libSel = document.getElementById('all-groupings-library-filter') as HTMLSelectElement | null;
+  libSel?.addEventListener('change', () => {
+    const v = libSel.value;
+    allGroupingsLibraryFilter = v === 'organizer' || v === 'source_only' ? v : 'all';
+    renderAllUnifiedGroupings();
+  });
+
+  document.getElementById('btn-activate-organizer-library')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-activate-organizer-library') as HTMLButtonElement | null;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳ Connecting Photos.app...';
+    }
+    try {
+      const res = await fetch('/api/media/photos-libraries/activate-organizer', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        alert(`Could not activate Media Organizer library:\n${data.error || `HTTP ${res.status}`}`);
+      } else if (data.mode === 'chooser_launched') {
+        alert(data.message);
+      }
+      await fetchAllUnifiedGroupings(true);
+    } catch (err: any) {
+      alert(`Network error: ${err?.message || 'Unknown error'}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   });
 
   const searchInp = document.getElementById('all-groupings-search') as HTMLInputElement | null;
@@ -7905,6 +7948,34 @@ function renderAllUnifiedGroupings(): void {
     avgBadge.textContent = `Overall Avg ${allGroupingsData.overall_avg_score.toFixed(4)}`;
   }
 
+  const libStatus = allGroupingsData.library_status;
+  const orgBadgeEl = document.getElementById('organizer-lib-status-badge');
+  const orgCountsEl = document.getElementById('organizer-lib-counts-note');
+  const orgBtnEl = document.getElementById('btn-activate-organizer-library') as HTMLButtonElement | null;
+  if (libStatus && orgBadgeEl) {
+    if (!libStatus.organizer_exists) {
+      orgBadgeEl.className = 'badge badge-xs badge-amber font-mono';
+      orgBadgeEl.textContent = '➕ Target: Media Organizer.photoslibrary Not Created Yet';
+      orgBadgeEl.title = `Expected at ${libStatus.organizer_library_path}`;
+      if (orgBtnEl) orgBtnEl.textContent = '➕ Create Media Organizer Library in Photos';
+    } else if (libStatus.organizer_active_in_photos && !libStatus.all_media_open_in_photos) {
+      orgBadgeEl.className = 'badge badge-xs badge-green font-mono';
+      orgBadgeEl.textContent = '🟢 Target: Media Organizer Active in Photos';
+      orgBadgeEl.title = libStatus.organizer_library_path;
+      if (orgBtnEl) orgBtnEl.textContent = '⚡ Focus Media Organizer in Photos';
+    } else {
+      orgBadgeEl.className = 'badge badge-xs badge-blue font-mono';
+      orgBadgeEl.textContent = libStatus.all_media_open_in_photos
+        ? '⚠️ Photos Open on All-Media (Will Switch on Write)'
+        : '🟡 Target: Media Organizer Ready on SSD';
+      orgBadgeEl.title = libStatus.organizer_library_path;
+      if (orgBtnEl) orgBtnEl.textContent = '⚡ Activate Media Organizer in Photos';
+    }
+    if (orgCountsEl) {
+      orgCountsEl.textContent = `${allGroupingsData.in_organizer_count ?? 0} groupings · ${libStatus.mapped_assets_count} mapped assets`;
+    }
+  }
+
   const bySt = allGroupingsData.by_status || {};
   const statusPillsDef: Array<{ key: string; label: string }> = [
     { key: 'all', label: `All (${allItems.length})` },
@@ -7949,6 +8020,12 @@ function renderAllUnifiedGroupings(): void {
       });
       if (allGroupingsBatchFilter === '600_plus' && !has600) return false;
       if (allGroupingsBatchFilter === 'under_600' && !hasUnder600) return false;
+    }
+    if (allGroupingsLibraryFilter === 'organizer' && !g.in_organizer_library) {
+      return false;
+    }
+    if (allGroupingsLibraryFilter === 'source_only' && g.in_organizer_library) {
+      return false;
     }
     if (allGroupingsSearchQuery) {
       const hay = [
@@ -8017,17 +8094,26 @@ function renderAllUnifiedGroupings(): void {
             )}">📅 ${escapeHtml(g.batches[0].month)}..${escapeHtml(g.batches[g.batches.length - 1].month)} (${g.batches.length} batches)</span>`;
 
       const photosFolders = g.photos_folders || [];
-      const primaryPhotosPath = photosFolders[0]?.full_path || '';
+      const orgFolders = photosFolders.filter(pf => pf.library_scope === 'organizer');
+      const legacyFolders = photosFolders.filter(pf => pf.library_scope !== 'organizer');
       const sampleAid = g.preview_assets?.[0]?.asset_id || '';
-      const photosFolderPillHtml = photosFolders.length
-        ? `<button type="button" class="badge badge-xs badge-blue font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-full-path="${escapeHtml(primaryPhotosPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
-            `Linked Apple Photos album(s):\n${photosFolders.map(pf => `• ${pf.full_path}${pf.asset_count ? ` (${pf.asset_count})` : ''}`).join('\n')}\nClick to open in Apple Photos`
-          )}">📸 Photos: ${escapeHtml(
-            Array.from(new Set(photosFolders.map(pf => pf.parent_folder))).join(' + ')
-          )} ↗</button>`
-        : g.parent_folders.length
-          ? `<span class="badge badge-xs badge-outline font-mono" title="Apple Photos folder: ${escapeHtml(g.parent_folders.join(' + '))}">📸 Photos: ${escapeHtml(g.parent_folders.join(' + '))}</span>`
-          : '';
+      let photosFolderPillHtml = '';
+      if (orgFolders.length > 0) {
+        const primaryOrgPath = orgFolders[0]?.full_path || '';
+        photosFolderPillHtml = `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-full-path="${escapeHtml(primaryOrgPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
+          `In Media Organizer.photoslibrary:\n${orgFolders.map(pf => `• ${pf.full_path}${pf.asset_count ? ` (${pf.asset_count})` : ''}`).join('\n')}\nClick to open in Media Organizer Photos`
+        )}">⚡ Organizer: ${escapeHtml(
+          Array.from(new Set(orgFolders.map(pf => pf.parent_folder))).join(' + ')
+        )} ↗</button>`;
+      } else if (legacyFolders.length > 0) {
+        photosFolderPillHtml = `<span class="badge badge-xs badge-outline font-mono" title="${escapeHtml(
+          `Source library only (All-Media — read-only):\n${legacyFolders.map(pf => `• ${pf.full_path}${pf.asset_count ? ` (${pf.asset_count})` : ''}`).join('\n')}\nUse Tag & Copy / Curate to copy into Media Organizer.photoslibrary`
+        )}">📀 All-Media: ${escapeHtml(
+          Array.from(new Set(legacyFolders.map(pf => pf.parent_folder))).join(' + ')
+        )}</span>`;
+      } else if (g.parent_folders.length) {
+        photosFolderPillHtml = `<span class="badge badge-xs badge-outline font-mono">📀 All-Media: ${escapeHtml(g.parent_folders.join(' + '))}</span>`;
+      }
 
       const curatedFinderPillHtml = g.curated_folder_exists
         ? `<button type="button" class="badge badge-xs badge-outline font-mono pub-badge-link btn-ugrp-open-curated" data-moment-name="${escapeHtml(g.name)}" title="Open exported Curated folder on LaCie in Finder">📂 Curated ↗</button>`
@@ -8099,14 +8185,17 @@ function renderAllUnifiedGroupings(): void {
         .join('');
       const extraThumbCnt = Math.max(0, g.total_assets - 5);
 
+      const tagBtnLabel = g.in_organizer_library ? '🏷️ Tag / Merge' : '🏷️ Tag &amp; Copy';
       const quickActionHtml =
         g.kind === 'unassigned'
           ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}">✨ Assign</button>`
           : g.moment_status === 'M200' || g.moment_status === 'M300' || g.to_be_curated_count > 0
-            ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Curate</button>`
+            ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Curate</button>
+               <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}">${tagBtnLabel}</button>`
             : g.moment_status === 'M400' || g.moment_status === 'M450'
-              ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🚀 Publish</button>`
-              : `<button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Merge</button>`;
+              ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🚀 Publish</button>
+                 <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}">${tagBtnLabel}</button>`
+              : `<button type="button" class="btn btn-xs ${g.in_organizer_library ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}">${tagBtnLabel}</button>`;
 
       const cachedAssets = unifiedGroupingAssetsCache.get(g.grouping_id);
       const bodyInnerHtml = isExpanded
