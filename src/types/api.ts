@@ -932,6 +932,52 @@ export interface GroupingAssetsResponse {
   assets: UnifiedGroupingAssetItem[];
 }
 
+export interface TimeframeDeviceSummary {
+  device_key: string;
+  label: string;
+  owner_name: string;
+  camera_model: string;
+  total_count: number;
+  qualified_count: number;
+  other_count: number;
+  moments_seen: string[];
+}
+
+export interface TimeframeDeviceAssetItem {
+  asset_id: string;
+  original_filename: string;
+  score_normalized: number;
+  qualified: boolean;
+  date_created_utc: string;
+  media_type: 'photo' | 'video';
+  duration: number;
+  file_size_bytes: number;
+  camera_model: string;
+  owner_name: string;
+  device_key: string;
+  assigned_moment: string;
+  in_source: boolean;
+  is_excluded: boolean;
+  asset_tags: MomentTagItem[];
+}
+
+export interface TimeframeDevicesResponse {
+  ok: boolean;
+  error?: string;
+  window_label: string;
+  window_days: number;
+  total_assets: number;
+  devices: TimeframeDeviceSummary[];
+  naming_hints: {
+    locations: string[];
+    people: string[];
+    family_owners: string[];
+    activities: string[];
+    moments: Array<{ moment_name: string; count: number }>;
+  };
+  assets: TimeframeDeviceAssetItem[];
+}
+
 export type TriggerTaskFn = (
   taskId: string,
   args?: Record<string, any> | null,

@@ -2762,6 +2762,41 @@
               <div id="resolve-disjoint-candidate-tagging-mount"></div>
             </div>
 
+            <!-- Devices Active in Same Timeframe (Naming Clues + Cross-Device Photo Explorer) -->
+            <div id="resolve-disjoint-timeframe-devices-section"
+              style="padding: 0.55rem 0.65rem; border-radius: 6px; background: rgba(8, 15, 30, 0.65); border: 1px solid rgba(56, 189, 248, 0.24); display: flex; flex-direction: column; gap: 0.45rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                  <span class="font-mono" style="font-size: 0.71rem; font-weight: 600; color: #bae6fd;">📱 Devices in Same Timeframe</span>
+                  <span class="badge badge-xs badge-outline font-mono" id="resolve-disjoint-timeframe-range-pill">—</span>
+                </div>
+                <div class="cleanup-filter-group" style="padding: 0.1rem 0.22rem;">
+                  <button type="button" class="cleanup-preview-sort-btn disjoint-tf-window-btn" data-tf-days="0">Same Day</button>
+                  <button type="button" class="cleanup-preview-sort-btn disjoint-tf-window-btn active" data-tf-days="1">±1d</button>
+                  <button type="button" class="cleanup-preview-sort-btn disjoint-tf-window-btn" data-tf-days="3">±3d</button>
+                  <button type="button" class="cleanup-preview-sort-btn disjoint-tf-window-btn" data-tf-days="7">±7d</button>
+                </div>
+              </div>
+              <div id="resolve-disjoint-timeframe-hints" style="display: none; flex-wrap: wrap; gap: 0.3rem; align-items: center;"></div>
+              <div class="disjoint-target-chips" id="resolve-disjoint-device-chips">
+                <span class="text-muted font-mono" style="font-size: 0.68rem;">Loading nearby device activity...</span>
+              </div>
+              <div id="resolve-disjoint-device-preview-panel" class="tag-db-query-panel" style="display: none; margin-top: 0.15rem;">
+                <div class="tag-db-query-header" style="flex-wrap: wrap; gap: 0.4rem;">
+                  <span id="resolve-disjoint-device-preview-title" class="font-mono" style="font-size: 0.72rem; font-weight: 600;">📱 Device Photos</span>
+                  <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+                    <button type="button" class="btn btn-xs btn-outline" id="btn-disjoint-device-qual-toggle">★ Qualified Only</button>
+                    <button type="button" class="btn btn-xs btn-cyan" id="btn-disjoint-device-add-checked"
+                      title="Include checked photos from this timeframe into this Moment consolidation">
+                      ➕ Include Checked in Consolidation
+                    </button>
+                    <button type="button" class="btn btn-xs btn-icon" id="btn-close-disjoint-device-panel" aria-label="Close Device Photos">✕</button>
+                  </div>
+                </div>
+                <div id="resolve-disjoint-device-assets-grid" class="tag-db-assets-grid" style="max-height: 230px; overflow-y: auto;"></div>
+              </div>
+            </div>
+
             <div id="resolve-disjoint-propagate-tags-box"
               style="padding: 0.45rem 0.6rem; border-radius: 6px; background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); display: flex; flex-direction: column; gap: 0.32rem;">
               <label

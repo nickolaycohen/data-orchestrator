@@ -35,6 +35,8 @@ import type {
   SearchMomentsResponse,
   TagCatalogItem,
   TagLookupResponse,
+  TimeframeDeviceAssetItem,
+  TimeframeDevicesResponse,
   UnifiedGroupingAssetItem,
   UnifiedGroupingItem
 } from '../types/api.ts';
@@ -143,7 +145,10 @@ let resolveDisjointAssets: DisjointDetailAsset[] = [];
 const resolveDisjointSelectedIds = new Set<string>();
 let isSubmittingResolveDisjoint = false;
 let resolveDisjointCompleted = false;
-let combinedExtraMoments = new Map<string, { momentName: string; assetIds: Set<string>; totalAssets: number; tags: MomentTagItem[] }>();
+let combinedExtraMoments = new Map<
+  string,
+  { momentName: string; assetIds: Set<string>; totalAssets: number; tags: MomentTagItem[]; isTimeframeDeviceSelection?: boolean }
+>();
 const candidateTagsCache = new Map<string, { tags: MomentTagItem[]; lastSession: MomentTagSessionSummary | null }>();
 let previewedCandidateMomentName = '';
 let previewedCandidateAssets: DisjointDetailAsset[] = [];
@@ -151,6 +156,11 @@ const previewedCandidateSelectedIds = new Set<string>();
 let nearbyMomentCandidatesList: Array<{ moment_name: string; qualified_count: number; rel_label: string; is_suggested: boolean }> = [];
 let displayedCandidateMomentsList: Array<{ moment_name: string; qualified_count: number; total_count?: number; rel_label: string; is_suggested?: boolean }> = [];
 let momentSearchTimer: number | null = null;
+let disjointTimeframeWindowDays = 1;
+let disjointTimeframeData: TimeframeDevicesResponse | null = null;
+let disjointTimeframeActiveDeviceKey: string | null = null;
+let disjointTimeframeQualOnly = false;
+const disjointTimeframeCheckedIds = new Set<string>();
 let lastAutoSyncedTargetName = '';
 let targetNameManuallyEdited = false;
 const existingTargetAlbumsMap = new Map<string, number>();
@@ -1027,6 +1037,29 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     const panel = document.getElementById('resolve-disjoint-candidate-preview-panel');
     if (panel) panel.style.display = 'none';
     renderCandidateMomentChips(displayedCandidateMomentsList);
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('.disjoint-tf-window-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll<HTMLButtonElement>('.disjoint-tf-window-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      disjointTimeframeWindowDays = Number(btn.dataset.tfDays || '1');
+      void fetchDisjointTimeframeDevices();
+    });
+  });
+
+  document.getElementById('btn-disjoint-device-qual-toggle')?.addEventListener('click', () => {
+    disjointTimeframeQualOnly = !disjointTimeframeQualOnly;
+    renderDisjointTimeframeDevicesUI();
+  });
+
+  document.getElementById('btn-close-disjoint-device-panel')?.addEventListener('click', () => {
+    disjointTimeframeActiveDeviceKey = null;
+    renderDisjointTimeframeDevicesUI();
+  });
+
+  document.getElementById('btn-disjoint-device-add-checked')?.addEventListener('click', () => {
+    addCheckedTimeframeDeviceAssetsToConsolidation();
   });
   document.getElementById('btn-candidate-add-combine')?.addEventListener('click', () => {
     addPreviewedCandidateToCombined();
@@ -6942,6 +6975,11 @@ export async function openResolveDisjointModal(
     renderPropagateTagsPreview();
     updateResolveDisjointTargetPreview();
     renderResolveDisjointAssets();
+
+    disjointTimeframeData = null;
+    disjointTimeframeActiveDeviceKey = null;
+    disjointTimeframeCheckedIds.clear();
+    void fetchDisjointTimeframeDevices();
   } catch (err: any) {
     if (summaryEl) {
       summaryEl.innerHTML = `<span class="text-red">❌ Error loading disjoint details: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
@@ -7151,10 +7189,11 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
       `<strong>Copy only missing non-duplicate assets (${totalAssetSel} selected):</strong> Inspect items from ${sourceListParts.join(' + ')} and add only unique assets not already in destination.${skipNote}`
     );
 
+    const realExtraMoments = extraEntries.filter(e => !e.isTimeframeDeviceSelection);
     const allSourceNamesLc = new Set(
       [
         ...(resolveDisjointIsUnassignedCluster ? [] : [resolveDisjointMomentName]),
-        ...extraEntries.map(e => e.momentName)
+        ...realExtraMoments.map(e => e.momentName)
       ].map(s => s.trim().toLowerCase())
     );
     const priorAlbumsToRemove = existingAlbumsList.filter(al => {
@@ -7165,7 +7204,7 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     });
     const deletableSources = [
       ...(resolveDisjointIsUnassignedCluster ? [] : [resolveDisjointMomentName]),
-      ...extraEntries.map(e => e.momentName)
+      ...realExtraMoments.map(e => e.momentName)
     ].filter(s => s.toLowerCase() !== targetMoment.toLowerCase());
 
     if (delSrc) {
@@ -7344,7 +7383,12 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
     return;
   }
 
-  const additionalMoments = isMerge || isCurate ? Array.from(combinedExtraMoments.keys()) : [];
+  const additionalMoments =
+    isMerge || isCurate
+      ? Array.from(combinedExtraMoments.entries())
+          .filter(([, entry]) => !entry.isTimeframeDeviceSelection)
+          .map(([k]) => k)
+      : [];
   const additionalAssetIds: string[] = [];
   if (isMerge || isCurate) {
     combinedExtraMoments.forEach(entry => {
@@ -8462,5 +8506,332 @@ function renderAllUnifiedGroupings(): void {
       }
     });
   });
+}
+
+// ==========================================================================
+// Consolidate Dialog: Devices in Same Timeframe (Naming Clues & Photo Explorer)
+// ==========================================================================
+
+async function fetchDisjointTimeframeDevices(): Promise<void> {
+  const chipsEl = document.getElementById('resolve-disjoint-device-chips');
+  const rangePillEl = document.getElementById('resolve-disjoint-timeframe-range-pill');
+  const hintsEl = document.getElementById('resolve-disjoint-timeframe-hints');
+  const panelEl = document.getElementById('resolve-disjoint-device-preview-panel');
+  if (!chipsEl) return;
+
+  chipsEl.innerHTML =
+    '<span class="text-muted font-mono" style="font-size: 0.68rem;">Scanning devices in timeframe...</span>';
+  if (rangePillEl) rangePillEl.textContent = '...';
+  if (hintsEl) {
+    hintsEl.style.display = 'none';
+    hintsEl.innerHTML = '';
+  }
+
+  const dates = resolveDisjointAssets
+    .map(a => (a.date_created_utc || '').trim())
+    .filter(Boolean)
+    .sort();
+  const startDate = dates[0] || '';
+  const endDate = dates[dates.length - 1] || startDate;
+  const srcIds = resolveDisjointAssets.map(a => a.asset_id).slice(0, 60).join(',');
+
+  const qs = new URLSearchParams({
+    anchor_moment: resolveDisjointMomentName,
+    start_date: startDate,
+    end_date: endDate,
+    window_days: String(disjointTimeframeWindowDays),
+    source_asset_ids: srcIds
+  });
+
+  try {
+    const res = await fetch(`/api/media/memories/timeframe-devices?${qs.toString()}`);
+    const data: TimeframeDevicesResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      chipsEl.innerHTML = `<span class="text-muted font-mono" style="font-size: 0.68rem;">${escapeHtml(data.error || 'No timeframe device data')}</span>`;
+      if (panelEl) panelEl.style.display = 'none';
+      return;
+    }
+
+    disjointTimeframeData = data;
+    (data.assets || []).forEach(a => {
+      const sz = a.file_size_bytes || 0;
+      candidateAssetMeta.set(a.asset_id, {
+        asset_id: a.asset_id,
+        filename: a.original_filename,
+        original_filename: a.original_filename,
+        camera_model: a.camera_model || 'Unknown Device',
+        primary_owner: a.owner_name || '',
+        month: (a.date_created_utc || '').slice(0, 7),
+        date_created_utc: a.date_created_utc || '',
+        capture_timestamp: a.date_created_utc || '',
+        file_size_bytes: sz,
+        bytes: sz,
+        file_size_mb: sz / (1024 * 1024),
+        score_normalized: a.score_normalized,
+        score_quartile: a.qualified ? 'Qualified' : 'Below Threshold',
+        assigned_moment: a.assigned_moment || 'Unassigned',
+        asset_tags: a.asset_tags,
+        media_type: a.media_type,
+        duration_sec: a.duration || 0,
+        width: 0,
+        height: 0,
+        fps: 0
+      });
+    });
+
+    if (
+      disjointTimeframeActiveDeviceKey &&
+      disjointTimeframeActiveDeviceKey !== '__all__' &&
+      !(data.devices || []).some(d => d.device_key === disjointTimeframeActiveDeviceKey)
+    ) {
+      disjointTimeframeActiveDeviceKey = null;
+    }
+    renderDisjointTimeframeDevicesUI();
+  } catch (err: any) {
+    chipsEl.innerHTML = `<span class="text-red font-mono" style="font-size: 0.68rem;">Error loading timeframe devices: ${escapeHtml(err?.message || 'Unknown')}</span>`;
+  }
+}
+
+function renderDisjointTimeframeDevicesUI(): void {
+  const chipsEl = document.getElementById('resolve-disjoint-device-chips');
+  const rangePillEl = document.getElementById('resolve-disjoint-timeframe-range-pill');
+  const hintsEl = document.getElementById('resolve-disjoint-timeframe-hints');
+  const panelEl = document.getElementById('resolve-disjoint-device-preview-panel');
+  const titleEl = document.getElementById('resolve-disjoint-device-preview-title');
+  const gridEl = document.getElementById('resolve-disjoint-device-assets-grid');
+  const qualToggleBtn = document.getElementById('btn-disjoint-device-qual-toggle') as HTMLButtonElement | null;
+  const addCheckedBtn = document.getElementById('btn-disjoint-device-add-checked') as HTMLButtonElement | null;
+  if (!chipsEl || !disjointTimeframeData) return;
+
+  if (rangePillEl) {
+    rangePillEl.textContent = `📅 ${disjointTimeframeData.window_label} · ${disjointTimeframeData.total_assets} assets`;
+  }
+
+  // Naming clues strip (1-click add to Location / Family Member / People / Activity tags or preview nearby Moment)
+  if (hintsEl) {
+    const nh = disjointTimeframeData.naming_hints;
+    const presentTagLc = new Set(sourceTagState.tags.map(t => t.tag_value.toLowerCase()));
+    const clueChips: string[] = [];
+
+    (nh.locations || []).forEach(loc => {
+      if (presentTagLc.has(loc.toLowerCase())) return;
+      clueChips.push(
+        `<button type="button" class="disjoint-mini-chip btn-tf-add-clue" data-cat="location" data-val="${escapeHtml(loc)}" data-inc="1" title="Add '${escapeHtml(loc)}' to Location tags & folder name" style="border-color: rgba(251, 191, 36, 0.45); color: #fde68a;">+ 📍 ${escapeHtml(loc)}</button>`
+      );
+    });
+    (nh.activities || []).forEach(act => {
+      if (presentTagLc.has(act.toLowerCase())) return;
+      clueChips.push(
+        `<button type="button" class="disjoint-mini-chip btn-tf-add-clue" data-cat="activity" data-val="${escapeHtml(act)}" data-inc="1" title="Add '${escapeHtml(act)}' to Activity tags & folder name" style="border-color: rgba(56, 189, 248, 0.45); color: #bae6fd;">+ 🏃 ${escapeHtml(act)}</button>`
+      );
+    });
+    (nh.family_owners || []).forEach(fam => {
+      if (presentTagLc.has(fam.toLowerCase())) return;
+      clueChips.push(
+        `<button type="button" class="disjoint-mini-chip btn-tf-add-clue" data-cat="family_member" data-val="${escapeHtml(fam)}" data-inc="0" title="Device active in timeframe — add '${escapeHtml(fam)}' to Family Member tags" style="border-color: rgba(52, 211, 153, 0.45); color: #a7f3d0;">+ 📱 ${escapeHtml(fam)}</button>`
+      );
+    });
+    (nh.people || []).forEach(per => {
+      if (presentTagLc.has(per.toLowerCase()) || (nh.family_owners || []).some(f => f.toLowerCase() === per.toLowerCase())) {
+        return;
+      }
+      clueChips.push(
+        `<button type="button" class="disjoint-mini-chip btn-tf-add-clue" data-cat="people" data-val="${escapeHtml(per)}" data-inc="1" title="Detected face in timeframe — add '${escapeHtml(per)}' to People tags" style="border-color: rgba(167, 139, 250, 0.45); color: #ddd6fe;">+ 👤 ${escapeHtml(per)}</button>`
+      );
+    });
+    (nh.moments || []).slice(0, 4).forEach(m => {
+      clueChips.push(
+        `<button type="button" class="disjoint-mini-chip btn-tf-preview-moment" data-moment-name="${escapeHtml(m.moment_name)}" title="Preview '${escapeHtml(m.moment_name)}' (${m.count} asset(s) in this timeframe)">📂 ${escapeHtml(m.moment_name)} (${m.count})</button>`
+      );
+    });
+
+    if (clueChips.length > 0) {
+      hintsEl.style.display = 'flex';
+      hintsEl.innerHTML = `<span class="font-mono text-muted" style="font-size: 0.64rem;">Clues in timeframe:</span>${clueChips.join('')}`;
+      hintsEl.querySelectorAll<HTMLButtonElement>('.btn-tf-add-clue').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const cat = (btn.dataset.cat || 'location') as MomentTagItem['category'];
+          const val = btn.dataset.val || '';
+          const inc = btn.dataset.inc === '1';
+          if (val) {
+            addTagToEngineState(sourceTagState, cat, val, inc);
+            renderDisjointTimeframeDevicesUI();
+          }
+        });
+      });
+      hintsEl.querySelectorAll<HTMLButtonElement>('.btn-tf-preview-moment').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const mn = btn.dataset.momentName || '';
+          if (mn) void openCandidateMomentPreview(mn);
+        });
+      });
+    } else {
+      hintsEl.style.display = 'none';
+      hintsEl.innerHTML = '';
+    }
+  }
+
+  const devices = disjointTimeframeData.devices || [];
+  if (!devices.length) {
+    chipsEl.innerHTML =
+      '<span class="text-muted font-mono" style="font-size: 0.68rem;">No device photos found in this window — widen timeframe to ±3d or ±7d.</span>';
+    if (panelEl) panelEl.style.display = 'none';
+    return;
+  }
+
+  const otherTotal = (disjointTimeframeData.assets || []).filter(a => !a.in_source).length;
+  const allChipHtml = `<button type="button" class="disjoint-target-chip${disjointTimeframeActiveDeviceKey === '__all__' ? ' active' : ''}" data-tf-device-key="__all__" title="Inspect all ${disjointTimeframeData.assets.length} photos across ${devices.length} device(s) in this timeframe">🌐 All Devices <span style="opacity:0.75;">(${otherTotal} other / ${disjointTimeframeData.assets.length} total)</span></button>`;
+  const devChipsHtml = devices
+    .map(d => {
+      const isAct = disjointTimeframeActiveDeviceKey === d.device_key;
+      const qualNote = d.qualified_count > 0 ? ` · ★${d.qualified_count}` : '';
+      const momentsTip = d.moments_seen.length ? `\nMoments: ${d.moments_seen.join(', ')}` : '';
+      return `<button type="button" class="disjoint-target-chip${isAct ? ' active' : ''}" data-tf-device-key="${escapeHtml(d.device_key)}" title="${escapeHtml(`${d.label}: ${d.total_count} photo(s) (${d.other_count} outside this Moment)${momentsTip}`)}">📱 ${escapeHtml(d.label)} <span style="opacity:0.75;">(${d.total_count}${qualNote})</span></button>`;
+    })
+    .join('');
+
+  chipsEl.innerHTML = `${allChipHtml}${devChipsHtml}`;
+  chipsEl.querySelectorAll<HTMLButtonElement>('[data-tf-device-key]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const dk = btn.dataset.tfDeviceKey || '';
+      disjointTimeframeActiveDeviceKey = disjointTimeframeActiveDeviceKey === dk ? null : dk;
+      renderDisjointTimeframeDevicesUI();
+    });
+  });
+
+  if (!panelEl || !titleEl || !gridEl) return;
+  if (!disjointTimeframeActiveDeviceKey) {
+    panelEl.style.display = 'none';
+    return;
+  }
+
+  panelEl.style.display = 'flex';
+  const activeDev = devices.find(d => d.device_key === disjointTimeframeActiveDeviceKey);
+  const matchingAssets = (disjointTimeframeData.assets || []).filter(a => {
+    if (disjointTimeframeActiveDeviceKey !== '__all__' && a.device_key !== disjointTimeframeActiveDeviceKey) {
+      return false;
+    }
+    if (disjointTimeframeQualOnly && !a.qualified) {
+      return false;
+    }
+    return true;
+  });
+
+  const checkedOutsideCnt = (disjointTimeframeData.assets || []).filter(
+    a => !a.in_source && disjointTimeframeCheckedIds.has(a.asset_id)
+  ).length;
+  titleEl.textContent = activeDev
+    ? `📱 ${activeDev.label} · ${matchingAssets.length} photo(s) in ${disjointTimeframeData.window_label}`
+    : `🌐 All Devices · ${matchingAssets.length} photo(s) in ${disjointTimeframeData.window_label}`;
+
+  if (qualToggleBtn) {
+    qualToggleBtn.classList.toggle('btn-purple', disjointTimeframeQualOnly);
+    qualToggleBtn.classList.toggle('btn-outline', !disjointTimeframeQualOnly);
+    qualToggleBtn.textContent = disjointTimeframeQualOnly ? '★ Showing Qualified Only' : '★ Qualified Only';
+  }
+  if (addCheckedBtn) {
+    addCheckedBtn.textContent =
+      checkedOutsideCnt > 0
+        ? `➕ Include Checked (${checkedOutsideCnt}) in Consolidation`
+        : '➕ Include Checked in Consolidation';
+    addCheckedBtn.disabled = checkedOutsideCnt === 0;
+  }
+
+  if (!matchingAssets.length) {
+    gridEl.innerHTML =
+      '<div class="text-muted font-mono" style="font-size: 0.69rem; padding: 0.4rem;">No photos match filter on this device.</div>';
+    return;
+  }
+
+  const previewIds = matchingAssets.map(a => a.asset_id);
+  gridEl.innerHTML = matchingAssets
+    .map((a: TimeframeDeviceAssetItem) => {
+      const checked = disjointTimeframeCheckedIds.has(a.asset_id);
+      const dtShort = (a.date_created_utc || '').replace('T', ' ').slice(5, 16);
+      const ownerShort = a.owner_name && a.owner_name !== 'Shared/Other' ? `${a.owner_name} · ` : '';
+      const momLabel = a.in_source
+        ? '<span class="badge badge-xs badge-amber font-mono" style="font-size:0.56rem;">📌 This Moment</span>'
+        : a.assigned_moment
+          ? `<button type="button" class="badge badge-xs badge-blue font-mono btn-tf-card-moment" data-moment-name="${escapeHtml(a.assigned_moment)}" style="font-size:0.56rem; cursor:pointer;" title="Click to preview Moment '${escapeHtml(a.assigned_moment)}'">📂 ${escapeHtml(a.assigned_moment)}</button>`
+          : a.is_excluded
+            ? '<span class="badge badge-xs badge-outline font-mono" style="font-size:0.56rem;">Ignored/Skip</span>'
+            : '<span class="badge badge-xs badge-purple font-mono" style="font-size:0.56rem;">Unassigned</span>';
+      return `
+        <div class="tag-db-asset-card" style="${a.in_source ? 'border-color: rgba(245, 158, 11, 0.45);' : ''}" title="${escapeHtml(`${a.original_filename} · ${ownerShort}${a.camera_model} · ${a.date_created_utc}`)}">
+          <input type="checkbox" class="disjoint-tf-asset-cb" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} ${a.in_source ? 'disabled title="Already in primary Moment"' : 'style="cursor: pointer; flex-shrink: 0;"'} />
+          <img class="tag-db-asset-thumb btn-tf-preview-asset" data-asset-id="${escapeHtml(a.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
+          <div class="btn-tf-preview-asset" data-asset-id="${escapeHtml(a.asset_id)}" style="min-width: 0; flex: 1; cursor: pointer;">
+            <div class="font-mono" style="font-size: 0.66rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              ${escapeHtml(dtShort || a.original_filename)} · ${a.qualified ? '★' : ''}${a.score_normalized.toFixed(3)}
+            </div>
+            <div class="font-mono text-muted" style="font-size: 0.6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              ${escapeHtml(`${ownerShort}${a.camera_model}`)}
+            </div>
+            <div style="margin-top: 0.12rem; display: flex; align-items: center; gap: 0.2rem; flex-wrap: wrap;">
+              ${momLabel}
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  gridEl.querySelectorAll<HTMLInputElement>('.disjoint-tf-asset-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const aid = cb.dataset.assetId || '';
+      if (!aid) return;
+      if (cb.checked) disjointTimeframeCheckedIds.add(aid);
+      else disjointTimeframeCheckedIds.delete(aid);
+      renderDisjointTimeframeDevicesUI();
+    });
+  });
+
+  gridEl.querySelectorAll<HTMLButtonElement>('.btn-tf-card-moment').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const mn = btn.dataset.momentName || '';
+      if (mn) void openCandidateMomentPreview(mn);
+    });
+  });
+
+  gridEl.querySelectorAll<HTMLElement>('.btn-tf-preview-asset').forEach(el => {
+    el.addEventListener('click', () => {
+      const aid = el.dataset.assetId || '';
+      if (!aid) return;
+      openCleanupPreviewModal(aid, {
+        assetIds: previewIds,
+        groupLabel: titleEl.textContent || 'Timeframe Devices',
+        hideMarkRemoved: true,
+        selectedIds: disjointTimeframeCheckedIds,
+        onSelectionChange: () => renderDisjointTimeframeDevicesUI()
+      });
+    });
+  });
+}
+
+function addCheckedTimeframeDeviceAssetsToConsolidation(): void {
+  if (!disjointTimeframeData) return;
+  const chosenAssets = (disjointTimeframeData.assets || []).filter(
+    a => !a.in_source && disjointTimeframeCheckedIds.has(a.asset_id)
+  );
+  if (!chosenAssets.length) return;
+
+  const keyLabel = `📱 Timeframe (${disjointTimeframeData.window_label.split(' (')[0]})`;
+  const existing = combinedExtraMoments.get(keyLabel);
+  const nextSet = new Set<string>(existing ? Array.from(existing.assetIds) : []);
+  chosenAssets.forEach(a => nextSet.add(a.asset_id));
+
+  combinedExtraMoments.set(keyLabel, {
+    momentName: keyLabel,
+    assetIds: nextSet,
+    totalAssets: nextSet.size,
+    tags: [],
+    isTimeframeDeviceSelection: true
+  });
+
+  renderResolveDisjointCombineTray();
+  renderPropagateTagsPreview();
+  updateSingleAssetWarningVisibility();
+  updateResolveDisjointTargetPreview();
 }
 

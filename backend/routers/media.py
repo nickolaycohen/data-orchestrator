@@ -7,6 +7,7 @@ import time
 import errno
 import shutil
 import signal
+import tempfile
 import subprocess
 import sqlite3
 from typing import Optional
@@ -6205,9 +6206,19 @@ on run argv
         set deleteAlbumNames to items (6 + existingUuidCount) thru (5 + existingUuidCount + deleteAlbumCount) of argv
     end if
     set filesStartIdx to 6 + existingUuidCount + deleteAlbumCount
-    set importPaths to {}
+    set importEntries to {}
+    set importErrors to {}
     if (count of argv) >= filesStartIdx then
-        set importPaths to items filesStartIdx thru (count of argv) of argv
+        set rawPaths to items filesStartIdx thru (count of argv) of argv
+        repeat with pPath in rawPaths
+            set pStr to pPath as string
+            try
+                set fAlias to ((POSIX file pStr) as alias)
+                copy {pStr, fAlias} to end of importEntries
+            on error errMsg number errNum
+                copy (pStr & "::ERR(" & (errNum as string) & "):" & errMsg) to end of importErrors
+            end try
+        end repeat
     end if
 
     tell application "Photos"
@@ -6280,18 +6291,22 @@ on run argv
         end if
 
         set importedPairs to {}
-        if (count of importPaths) > 0 then
-            repeat with pPath in importPaths
-                set pStr to pPath as string
+        if (count of importEntries) > 0 then
+            repeat with entryPair in importEntries
+                set pStr to (item 1 of entryPair) as string
+                set fAlias to item 2 of entryPair
                 try
-                    set fRef to (POSIX file pStr)
-                    set impRes to import {fRef} into targetAlbum with skip check duplicates
+                    set impRes to import {fAlias} into targetAlbum with skip check duplicates
                     if (count of impRes) > 0 then
                         set newIt to item 1 of impRes
                         set newId to (id of newIt) as string
                         copy (pStr & ":::" & newId) to end of importedPairs
                         set addedCount to addedCount + 1
+                    else
+                        copy (pStr & "::ERR(0):Photos import returned no media items") to end of importErrors
                     end if
+                on error errMsg number errNum
+                    copy (pStr & "::ERR(" & (errNum as string) & "):" & errMsg) to end of importErrors
                 end try
             end repeat
         end if
@@ -6320,11 +6335,12 @@ on run argv
         end if
 
         set oldDelims to AppleScript's text item delimiters
-        set AppleScript's text item delimiters to "|||"
+        set AppleScript's text item delimiters to "@@AGY_ITEM@@"
         set pairsStr to importedPairs as string
+        set errorsStr to importErrors as string
         set AppleScript's text item delimiters to oldDelims
 
-        return actionState & "|" & (addedCount as string) & "|" & (deletedCount as string) & "|" & pairsStr
+        return actionState & "@@AGY_FIELD@@" & (addedCount as string) & "@@AGY_FIELD@@" & (deletedCount as string) & "@@AGY_FIELD@@" & pairsStr & "@@AGY_FIELD@@" & errorsStr
     end tell
 end run
 '''
@@ -6508,81 +6524,121 @@ def _sync_assets_to_organizer_library(
             ),
         }
 
-    path_to_src_id: dict[str, tuple[str, str]] = {}
-    import_paths: list[str] = []
-    for aid in missing_src_ids:
-        info = src_files_map.get(aid)
-        if info:
-            p_str = str(info[0])
-            path_to_src_id[p_str] = (aid, info[1])
-            import_paths.append(p_str)
+    stage_base = org_path.parent / ".agy_import_staging"
+    try:
+        stage_base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        stage_base = Path(tempfile.gettempdir())
 
     del_names = [d.strip() for d in (delete_organizer_albums or []) if d and d.strip()]
-
-    chunk_size = 40
-    path_chunks = [import_paths[i : i + chunk_size] for i in range(0, len(import_paths), chunk_size)] or [[]]
     action_state = "created"
     total_added = 0
     total_deleted = 0
     newly_imported = 0
+    import_errors: list[str] = []
 
-    for idx, p_chunk in enumerate(path_chunks):
-        allow_flag = "1" if (allow_existing or idx > 0) else "0"
-        uuids_arg = existing_org_uuids if idx == 0 else []
-        dels_arg = del_names if idx == len(path_chunks) - 1 else []
-        argv = [
-            parent_folder,
-            album_name,
-            allow_flag,
-            str(len(uuids_arg)),
-            *uuids_arg,
-            str(len(dels_arg)),
-            *dels_arg,
-            *p_chunk,
-        ]
-        try:
-            proc = subprocess.run(
-                ["osascript", "-", *argv],
-                input=_ORGANIZER_SYNC_APPLESCRIPT,
-                capture_output=True,
-                text=True,
-                timeout=240,
-            )
-        except Exception as e:
-            return {"ok": False, "error": f"Failed running AppleScript on Media Organizer library: {e}"}
+    with tempfile.TemporaryDirectory(prefix="sync_", dir=str(stage_base)) as tmp_stage_dir:
+        path_to_src_id: dict[str, tuple[str, str]] = {}
+        import_paths: list[str] = []
+        for slot_idx, aid in enumerate(missing_src_ids):
+            info = src_files_map.get(aid)
+            if not info:
+                continue
+            src_file, orig_fn = info
+            raw_fn = os.path.basename((orig_fn or "").strip())
+            raw_fn = re.sub(r'[|:/\\\x00-\x1f]+', "_", raw_fn).strip()
+            if not raw_fn:
+                raw_fn = src_file.name
+            elif Path(raw_fn).suffix.lower() != src_file.suffix.lower() and src_file.suffix:
+                raw_fn = f"{Path(raw_fn).stem or src_file.stem}{src_file.suffix}"
+            slot_dir = Path(tmp_stage_dir) / f"{slot_idx:04d}"
+            slot_dir.mkdir(parents=True, exist_ok=True)
+            staged_file = (slot_dir / raw_fn).resolve()
+            try:
+                shutil.copy2(src_file, staged_file)
+            except Exception as copy_err:
+                import_errors.append(f"{raw_fn}: stage copy failed ({copy_err})")
+                continue
+            p_str = str(staged_file)
+            path_to_src_id[p_str] = (aid, raw_fn)
+            import_paths.append(p_str)
 
-        out = (proc.stdout or "").strip()
-        if proc.returncode != 0 or out.startswith("ERROR|"):
-            err_detail = out.split("|", 1)[1] if out.startswith("ERROR|") else (out or (proc.stderr or "").strip())
-            return {"ok": False, "error": err_detail or f"AppleScript failed (exit {proc.returncode})"}
+        if missing_src_ids and not import_paths and not existing_org_uuids:
+            detail = "; ".join(import_errors[:3]) if import_errors else "could not stage original files"
+            return {"ok": False, "error": f"Failed staging originals for Media Organizer import: {detail}"}
 
-        parts = out.split("|", 3)
-        if idx == 0 and parts and parts[0]:
-            action_state = parts[0]
-        if len(parts) >= 2 and parts[1].isdigit():
-            total_added += int(parts[1])
-        if len(parts) >= 3 and parts[2].isdigit():
-            total_deleted += int(parts[2])
-        if len(parts) >= 4 and parts[3]:
-            for pair in parts[3].split("|||"):
-                if ":::" not in pair:
-                    continue
-                p_key, raw_new_id = pair.split(":::", 1)
-                clean_new_uuid = raw_new_id.strip().split("/")[0]
-                src_entry = path_to_src_id.get(p_key)
-                if src_entry and clean_new_uuid:
-                    src_aid, orig_fn = src_entry
-                    cur.execute(
-                        """
-                        INSERT INTO organizer_asset_map (source_asset_id, organizer_asset_uuid, original_filename, imported_at_utc)
-                        VALUES (?, ?, ?, datetime('now'))
-                        ON CONFLICT(source_asset_id) DO UPDATE SET
-                            organizer_asset_uuid = excluded.organizer_asset_uuid,
-                            imported_at_utc = datetime('now')
-                        """,
-                        (src_aid, clean_new_uuid, orig_fn),
-                    )
-                    newly_imported += 1
+        chunk_size = 40
+        path_chunks = [import_paths[i : i + chunk_size] for i in range(0, len(import_paths), chunk_size)] or [[]]
+
+        for idx, p_chunk in enumerate(path_chunks):
+            allow_flag = "1" if (allow_existing or idx > 0) else "0"
+            uuids_arg = existing_org_uuids if idx == 0 else []
+            dels_arg = del_names if idx == len(path_chunks) - 1 else []
+            argv = [
+                parent_folder,
+                album_name,
+                allow_flag,
+                str(len(uuids_arg)),
+                *uuids_arg,
+                str(len(dels_arg)),
+                *dels_arg,
+                *p_chunk,
+            ]
+            try:
+                proc = subprocess.run(
+                    ["osascript", "-", *argv],
+                    input=_ORGANIZER_SYNC_APPLESCRIPT,
+                    capture_output=True,
+                    text=True,
+                    timeout=240,
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"Failed running AppleScript on Media Organizer library: {e}"}
+
+            out = (proc.stdout or "").strip()
+            if proc.returncode != 0 or out.startswith("ERROR|"):
+                err_detail = out.split("|", 1)[1] if out.startswith("ERROR|") else (out or (proc.stderr or "").strip())
+                return {"ok": False, "error": err_detail or f"AppleScript failed (exit {proc.returncode})"}
+
+            parts = out.split("@@AGY_FIELD@@")
+            if idx == 0 and parts and parts[0]:
+                action_state = parts[0]
+            if len(parts) >= 2 and parts[1].isdigit():
+                total_added += int(parts[1])
+            if len(parts) >= 3 and parts[2].isdigit():
+                total_deleted += int(parts[2])
+            if len(parts) >= 4 and parts[3]:
+                for pair in parts[3].split("@@AGY_ITEM@@"):
+                    if ":::" not in pair:
+                        continue
+                    p_key, raw_new_id = pair.split(":::", 1)
+                    clean_new_uuid = raw_new_id.strip().split("/")[0]
+                    src_entry = path_to_src_id.get(p_key) or path_to_src_id.get(str(Path(p_key).resolve()))
+                    if src_entry and clean_new_uuid:
+                        src_aid, orig_fn = src_entry
+                        cur.execute(
+                            """
+                            INSERT INTO organizer_asset_map (source_asset_id, organizer_asset_uuid, original_filename, imported_at_utc)
+                            VALUES (?, ?, ?, datetime('now'))
+                            ON CONFLICT(source_asset_id) DO UPDATE SET
+                                organizer_asset_uuid = excluded.organizer_asset_uuid,
+                                original_filename = excluded.original_filename,
+                                imported_at_utc = datetime('now')
+                            """,
+                            (src_aid, clean_new_uuid, orig_fn),
+                        )
+                        newly_imported += 1
+            if len(parts) >= 5 and parts[4]:
+                for err_item in parts[4].split("@@AGY_ITEM@@"):
+                    if err_item.strip():
+                        import_errors.append(err_item.strip())
+
+    if import_paths and newly_imported == 0 and not existing_org_uuids:
+        err_summary = "; ".join(import_errors[:3]) if import_errors else "Photos.app returned 0 imported items"
+        return {
+            "ok": False,
+            "error": f"Failed importing {len(import_paths)} asset(s) into Media Organizer library: {err_summary}",
+        }
 
     alb_pk, full_path = _upsert_organizer_album_in_db(cur, parent_folder, album_name, clean_ids)
     return {
@@ -6593,6 +6649,7 @@ def _sync_assets_to_organizer_library(
         "photos_added": total_added,
         "newly_imported": newly_imported,
         "albums_deleted": total_deleted,
+        "import_warnings": import_errors,
     }
 
 
@@ -9929,6 +9986,343 @@ def search_moments_for_consolidation(q: str = "", exclude_moment: str = "", anch
             for r in results:
                 r.pop("_sort_diff", None)
             return {"ok": True, "moments": results[:lim], "total_matched": len(results)}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.get("/memories/timeframe-devices")
+def get_timeframe_devices_context(
+    anchor_moment: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    window_days: float = 1.0,
+    source_asset_ids: str = "",
+    limit_assets: int = 180,
+):
+    """Return active family/camera devices, reverse-geocoded naming clues, and asset previews in the same capture timeframe."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    src_id_set = {s.strip() for s in (source_asset_ids or "").split(",") if s.strip()}
+    m_clean = (anchor_moment or "").strip()
+    safe_days = max(0.0, min(float(window_days or 0.0), 30.0))
+    safe_limit = max(20, min(int(limit_assets or 180), 400))
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=20)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+            min_row = cur.fetchone()
+            hist_min = float(min_row[0]) if min_row and min_row[0] else 0.5315
+
+            d_start = _parse_utc_dt(start_date) if start_date else None
+            d_end = _parse_utc_dt(end_date) if end_date else None
+
+            if (d_start is None or d_end is None) and src_id_set:
+                ph_s = ",".join("?" for _ in src_id_set)
+                row_dt = cur.execute(
+                    f"SELECT MIN(date_created_utc), MAX(date_created_utc) FROM assets WHERE asset_id IN ({ph_s}) AND date_created_utc IS NOT NULL",
+                    list(src_id_set),
+                ).fetchone()
+                if row_dt and row_dt[0]:
+                    d_start = d_start or _parse_utc_dt(row_dt[0])
+                    d_end = d_end or _parse_utc_dt(row_dt[1] or row_dt[0])
+
+            if (d_start is None or d_end is None) and m_clean:
+                where_m, params_m = _moment_membership_where_sql(m_clean)
+                try:
+                    row_dt2 = cur.execute(
+                        f"SELECT MIN(a.date_created_utc), MAX(a.date_created_utc) FROM assets a WHERE {where_m} AND a.date_created_utc IS NOT NULL",
+                        params_m,
+                    ).fetchone()
+                    if row_dt2 and row_dt2[0]:
+                        d_start = d_start or _parse_utc_dt(row_dt2[0])
+                        d_end = d_end or _parse_utc_dt(row_dt2[1] or row_dt2[0])
+                except sqlite3.OperationalError:
+                    pass
+                if d_start is None:
+                    m_iso = re.match(r"^(\d{4}-\d{2}-\d{2})", m_clean)
+                    if m_iso:
+                        d_start = _parse_utc_dt(m_iso.group(1))
+                        d_end = d_start
+
+            if d_start is None:
+                return {"ok": False, "error": "Could not determine capture date for timeframe lookup"}
+            if d_end is None or d_end < d_start:
+                d_end = d_start
+
+            day_start_base = d_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end_base = d_end.replace(hour=23, minute=59, second=59, microsecond=0)
+            win_start = day_start_base - timedelta(days=safe_days)
+            win_end = day_end_base + timedelta(days=safe_days)
+            win_start_s = win_start.strftime("%Y-%m-%d")
+            win_end_s = win_end.strftime("%Y-%m-%d") + "T23:59:59Z"
+            win_end_space = win_end.strftime("%Y-%m-%d") + " 23:59:59"
+
+            if safe_days == 0:
+                win_label = (
+                    day_start_base.strftime("%Y-%m-%d")
+                    if day_start_base.date() == day_end_base.date()
+                    else f"{day_start_base.strftime('%Y-%m-%d')} .. {day_end_base.strftime('%Y-%m-%d')}"
+                ) + " (Same Day)"
+            else:
+                d_lbl = int(safe_days) if safe_days.is_integer() else safe_days
+                win_label = f"{win_start.strftime('%Y-%m-%d')} .. {win_end.strftime('%Y-%m-%d')} (±{d_lbl}d)"
+
+            excluded_aids: set[str] = set()
+            try:
+                for (aid_ex,) in cur.execute(
+                    """
+                    SELECT DISTINCT moaa.asset_id
+                    FROM media_organizer_album_assets moaa
+                    JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+                    """
+                ).fetchall():
+                    if aid_ex:
+                        excluded_aids.add(aid_ex)
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                raw_rows = cur.execute(
+                    """
+                    SELECT
+                        a.asset_id,
+                        COALESCE(v.original_filename, a.original_filename, ''),
+                        COALESCE(v.score_normalized, 0.0),
+                        COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                        COALESCE(za.ZKIND, 0),
+                        ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
+                        COALESCE(aaa.ZORIGINALFILESIZE, 0),
+                        COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, NULLIF(TRIM(a.carrier_device), ''), 'Unknown Device'),
+                        COALESCE(do.owner_name, 'Shared/Other'),
+                        COALESCE(
+                            NULLIF(TRIM(a.MomentsAlbumName), ''),
+                            NULLIF(TRIM(a.curated_album), ''),
+                            NULLIF(TRIM(a.to_be_curated_album), ''),
+                            ''
+                        )
+                    FROM assets a
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                    LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+                    LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+                    LEFT JOIN device_owners do ON do.camera_model = COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device)
+                        AND (do.start_date IS NULL OR do.start_date <= substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 10))
+                        AND (do.end_date IS NULL OR do.end_date >= substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 10))
+                    WHERE substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 10) >= ?
+                      AND substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 10) <= ?
+                      AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                    ORDER BY COALESCE(v.date_created_utc, a.date_created_utc, '') ASC, COALESCE(v.score_normalized, 0.0) DESC
+                    """,
+                    (win_start_s, win_end.strftime("%Y-%m-%d")),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                raw_rows = cur.execute(
+                    """
+                    SELECT
+                        a.asset_id,
+                        COALESCE(v.original_filename, a.original_filename, ''),
+                        COALESCE(v.score_normalized, 0.0),
+                        COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                        0,
+                        0.0,
+                        0,
+                        COALESCE(NULLIF(TRIM(a.carrier_device), ''), 'Unknown Device'),
+                        'Shared/Other',
+                        COALESCE(NULLIF(TRIM(a.MomentsAlbumName), ''), '')
+                    FROM assets a
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    WHERE substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 10) >= ?
+                      AND substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 10) <= ?
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                    ORDER BY COALESCE(v.date_created_utc, a.date_created_utc, '') ASC
+                    """,
+                    (win_start_s, win_end.strftime("%Y-%m-%d")),
+                ).fetchall()
+
+            seen_aids: set[str] = set()
+            deduped_rows = []
+            for r in raw_rows:
+                aid = r[0]
+                if not aid or aid in seen_aids:
+                    continue
+                seen_aids.add(aid)
+                deduped_rows.append(r)
+
+            all_tf_aids = [r[0] for r in deduped_rows]
+            try:
+                per_asset_tags = _load_per_asset_tags_map(cur, all_tf_aids[:450])
+            except sqlite3.OperationalError:
+                per_asset_tags = {}
+
+            photos_meta = _load_photos_moment_metadata(all_tf_aids[:450])
+
+            devices_map: dict[str, dict] = {}
+            moments_counter: dict[str, int] = {}
+            loc_hints: list[str] = []
+            seen_loc_lc: set[str] = set()
+            ppl_hints: list[str] = []
+            seen_ppl_lc: set[str] = set()
+            fam_hints: list[str] = []
+            seen_fam_lc: set[str] = set()
+            act_hints: list[str] = []
+            seen_act_lc: set[str] = set()
+
+            for pm in photos_meta.get("moments") or []:
+                raw_lbl = (pm.get("label") or "").strip()
+                if not raw_lbl:
+                    continue
+                primary_part = raw_lbl.split(" - ")[0].strip()
+                for cand_l in (primary_part, raw_lbl):
+                    if cand_l and cand_l.lower() not in seen_loc_lc and not re.match(r"^\d{4}", cand_l):
+                        seen_loc_lc.add(cand_l.lower())
+                        loc_hints.append(cand_l)
+
+            for pp in photos_meta.get("people") or []:
+                nm_p = (pp.get("name") or "").strip()
+                if nm_p:
+                    short_p = nm_p.split()[0]
+                    if short_p and short_p.lower() not in seen_ppl_lc:
+                        seen_ppl_lc.add(short_p.lower())
+                        ppl_hints.append(short_p)
+
+            assets_all_parsed: list[dict] = []
+            m_clean_lc = m_clean.lower()
+
+            for r in deduped_rows:
+                aid, fn, sc, dt_s, zkind, dur, fbytes, cam_raw, owner_raw, ass_m = r
+                cam = (cam_raw or "Unknown Device").strip()
+                owner = (owner_raw or "Shared/Other").strip()
+                dev_key = f"{owner}::{cam}"
+                dev_label = f"{owner} · {cam}" if owner and owner != "Shared/Other" else cam
+                sc_f = float(sc or 0.0)
+                is_qual = sc_f > hist_min
+                ass_clean = (ass_m or "").strip()
+                is_excl = aid in excluded_aids or ass_clean.lower() in ("ignore", "skippublishing", "topscore excluded")
+                in_src = (aid in src_id_set) or (bool(m_clean_lc) and ass_clean.lower() == m_clean_lc)
+
+                if owner and owner not in ("Shared/Other", "Unknown") and owner.lower() not in seen_fam_lc:
+                    seen_fam_lc.add(owner.lower())
+                    fam_hints.append(owner)
+
+                if ass_clean and not is_excl and ass_clean.lower() != m_clean_lc:
+                    moments_counter[ass_clean] = moments_counter.get(ass_clean, 0) + 1
+
+                a_tags = per_asset_tags.get(aid, [])
+                for t in a_tags:
+                    tv = (t.get("tag_value") or "").strip()
+                    cat = (t.get("category") or "").strip().lower()
+                    if not tv:
+                        continue
+                    if cat == "location" and tv.lower() not in seen_loc_lc:
+                        seen_loc_lc.add(tv.lower())
+                        loc_hints.append(tv)
+                    elif cat == "activity" and tv.lower() not in seen_act_lc:
+                        seen_act_lc.add(tv.lower())
+                        act_hints.append(tv)
+                    elif cat == "people" and tv.lower() not in seen_ppl_lc:
+                        seen_ppl_lc.add(tv.lower())
+                        ppl_hints.append(tv)
+                    elif cat == "family_member" and tv.lower() not in seen_fam_lc:
+                        seen_fam_lc.add(tv.lower())
+                        fam_hints.append(tv)
+
+                d_entry = devices_map.setdefault(
+                    dev_key,
+                    {
+                        "device_key": dev_key,
+                        "label": dev_label,
+                        "owner_name": owner,
+                        "camera_model": cam,
+                        "total_count": 0,
+                        "qualified_count": 0,
+                        "other_count": 0,
+                        "_moments": set(),
+                    },
+                )
+                d_entry["total_count"] += 1
+                if is_qual:
+                    d_entry["qualified_count"] += 1
+                if not in_src and not is_excl:
+                    d_entry["other_count"] += 1
+                if ass_clean and not is_excl:
+                    d_entry["_moments"].add(ass_clean)
+
+                ext = os.path.splitext(fn or "")[1].lower()
+                m_type = "video" if (int(zkind or 0) == 1 or ext in VIDEO_EXTENSIONS) else "photo"
+                assets_all_parsed.append(
+                    {
+                        "asset_id": aid,
+                        "original_filename": fn or "",
+                        "score_normalized": round(sc_f, 4),
+                        "qualified": is_qual,
+                        "date_created_utc": (dt_s or "")[:19],
+                        "media_type": m_type,
+                        "duration": float(dur or 0.0),
+                        "file_size_bytes": int(fbytes or 0),
+                        "camera_model": cam,
+                        "owner_name": owner,
+                        "device_key": dev_key,
+                        "assigned_moment": "" if is_excl else ass_clean,
+                        "in_source": in_src,
+                        "is_excluded": is_excl,
+                        "asset_tags": a_tags,
+                    }
+                )
+
+            devices_out = [
+                {
+                    "device_key": dv["device_key"],
+                    "label": dv["label"],
+                    "owner_name": dv["owner_name"],
+                    "camera_model": dv["camera_model"],
+                    "total_count": dv["total_count"],
+                    "qualified_count": dv["qualified_count"],
+                    "other_count": dv["other_count"],
+                    "moments_seen": sorted(dv["_moments"]),
+                }
+                for dv in sorted(
+                    devices_map.values(),
+                    key=lambda x: (-x["other_count"], -x["qualified_count"], -x["total_count"], x["label"].lower()),
+                )
+            ]
+
+            # Prioritize non-excluded, qualified/higher-scored assets if total exceeds safe_limit
+            if len(assets_all_parsed) > safe_limit:
+                assets_sorted = sorted(
+                    assets_all_parsed,
+                    key=lambda x: (1 if x["is_excluded"] else 0, 0 if x["qualified"] else 1, -x["score_normalized"]),
+                )[:safe_limit]
+                assets_sorted.sort(key=lambda x: x["date_created_utc"])
+            else:
+                assets_sorted = assets_all_parsed
+
+            moments_hint_list = [
+                {"moment_name": mn, "count": cnt}
+                for mn, cnt in sorted(moments_counter.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:10]
+            ]
+
+            return {
+                "ok": True,
+                "window_label": win_label,
+                "window_days": safe_days,
+                "total_assets": len(deduped_rows),
+                "devices": devices_out,
+                "naming_hints": {
+                    "locations": loc_hints[:8],
+                    "people": ppl_hints[:8],
+                    "family_owners": fam_hints[:8],
+                    "activities": act_hints[:6],
+                    "moments": moments_hint_list,
+                },
+                "assets": assets_sorted,
+            }
         finally:
             conn.close()
     except Exception as e:
