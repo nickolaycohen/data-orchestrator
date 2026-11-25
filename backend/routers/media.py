@@ -10912,9 +10912,9 @@ def get_unified_grouping_assets(moment_name: str):
                         ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
                         COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
                         COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
-                        COALESCE(aaa.ZORIGINALFILESIZE, a.file_size_bytes, 0),
+                        COALESCE(aaa.ZORIGINALFILESIZE, 0),
                         COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device, 'Unknown'),
-                        COALESCE(do.owner_name, a.primary_owner, 'Shared/Other')
+                        COALESCE(do.owner_name, 'Shared/Other')
                     FROM assets a
                     LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
                     LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
@@ -10944,9 +10944,9 @@ def get_unified_grouping_assets(moment_name: str):
                         0.0,
                         0,
                         0,
-                        COALESCE(a.file_size_bytes, 0),
-                        COALESCE(a.camera_model, 'Unknown'),
-                        COALESCE(a.primary_owner, 'Shared/Other')
+                        0,
+                        'Unknown',
+                        'Shared/Other'
                     FROM assets a
                     LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
                     WHERE {where_clause}
