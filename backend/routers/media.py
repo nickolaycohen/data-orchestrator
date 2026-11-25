@@ -10332,3 +10332,677 @@ def curate_moment_action(req: CurateMomentRequest):
         "moment_tags_union": moment_union_tags,
         "moment_paradigm_confirmed": bool(moment_union_tags),
     }
+
+
+@router.get("/planner/all-groupings")
+def get_all_unified_groupings():
+    """Return a unified view of ALL Groupings (Assigned Moments M100-M500 + Unassigned Clusters) ordered by average score."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=25)
+        conn.execute("PRAGMA busy_timeout = 25000")
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+            min_row = cur.fetchone()
+            hist_min = float(min_row[0]) if min_row and min_row[0] else 0.5315
+
+            # 1. Batch status map
+            batch_status_by_month: dict[str, str] = {}
+            try:
+                for m_str, st_code in cur.execute("SELECT month, COALESCE(status_code, '') FROM month_batches").fetchall():
+                    if m_str:
+                        batch_status_by_month[str(m_str).strip()] = str(st_code or "—")
+            except sqlite3.OperationalError:
+                pass
+
+            # 2. Excluded assets (Ignore / SkipPublishing / TopScore Excluded)
+            excluded_aids: set[str] = set()
+            try:
+                for (aid_ex,) in cur.execute(
+                    """
+                    SELECT DISTINCT moaa.asset_id
+                    FROM media_organizer_album_assets moaa
+                    JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+                    """
+                ).fetchall():
+                    if aid_ex:
+                        excluded_aids.add(aid_ex)
+            except sqlite3.OperationalError:
+                pass
+
+            # 3. Album memberships across Moments / ToBeCurated / Curated / Generic Moments
+            album_parents_by_lc: dict[str, set[str]] = {}
+            canonical_name_by_lc: dict[str, str] = {}
+            tbc_aids_by_lc: dict[str, set[str]] = {}
+            cur_aids_by_lc: dict[str, set[str]] = {}
+            album_aids_by_lc: dict[str, set[str]] = {}
+            try:
+                for alb_name, par_name, aid in cur.execute(
+                    """
+                    SELECT moa.album_name, COALESCE(moa.parent_folder_name, 'Moments'), moaa.asset_id
+                    FROM media_organizer_albums moa
+                    LEFT JOIN media_organizer_album_assets moaa ON moaa.album_pk = moa.album_pk
+                    WHERE moa.is_folder = 0
+                      AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('moments', 'tobecurated', 'curated', 'generic moments')
+                      AND LOWER(TRIM(moa.album_name)) NOT IN ('ignore', 'skippublishing', 'topscore excluded')
+                    """
+                ).fetchall():
+                    nm = (alb_name or "").strip()
+                    if not nm:
+                        continue
+                    lc = nm.lower()
+                    canonical_name_by_lc.setdefault(lc, nm)
+                    par_clean = (par_name or "Moments").strip()
+                    album_parents_by_lc.setdefault(lc, set()).add(par_clean)
+                    if aid and aid not in excluded_aids:
+                        album_aids_by_lc.setdefault(lc, set()).add(aid)
+                        par_lc = par_clean.lower()
+                        if par_lc == "tobecurated":
+                            tbc_aids_by_lc.setdefault(lc, set()).add(aid)
+                        elif par_lc == "curated":
+                            cur_aids_by_lc.setdefault(lc, set()).add(aid)
+            except sqlite3.OperationalError:
+                pass
+
+            # 4. Curated moments stage & Publications
+            cm_by_lc: dict[str, dict] = {}
+            deleted_lc: set[str] = set()
+            try:
+                for m_nm, stg, cur_cnt, tbc_ex, cur_ex in cur.execute(
+                    """
+                    SELECT moment_name, COALESCE(memory_stage, ''), COALESCE(curated_count, 0),
+                           COALESCE(photos_to_be_curated_exists, 0), COALESCE(photos_curated_exists, 0)
+                    FROM curated_moments
+                    """
+                ).fetchall():
+                    nm = (m_nm or "").strip()
+                    if not nm:
+                        continue
+                    lc = nm.lower()
+                    if str(stg).strip().lower() == "deleted":
+                        deleted_lc.add(lc)
+                        continue
+                    canonical_name_by_lc.setdefault(lc, nm)
+                    cm_by_lc[lc] = {
+                        "stage": stg or "M100",
+                        "curated_count": int(cur_cnt or 0),
+                        "tbc_exists": bool(tbc_ex),
+                        "curated_exists": bool(cur_ex),
+                    }
+            except sqlite3.OperationalError:
+                pass
+
+            pub_aids_by_lc: dict[str, set[str]] = {}
+            last_pub_by_lc: dict[str, str] = {}
+            try:
+                for aid_p, m_nm, pub_utc in cur.execute(
+                    "SELECT asset_uuid, moment_name, COALESCE(published_at_utc, '') FROM publications"
+                ).fetchall():
+                    nm = (m_nm or "").strip()
+                    if not nm:
+                        continue
+                    lc = nm.lower()
+                    if lc in deleted_lc:
+                        continue
+                    canonical_name_by_lc.setdefault(lc, nm)
+                    if aid_p:
+                        pub_aids_by_lc.setdefault(lc, set()).add(aid_p)
+                    if pub_utc and pub_utc > last_pub_by_lc.get(lc, ""):
+                        last_pub_by_lc[lc] = pub_utc
+            except sqlite3.OperationalError:
+                pass
+
+            # 5. Load all non-trashed asset metadata across the library in one pass
+            asset_info_map: dict[str, tuple[str, float, str, str, str, str]] = {}
+            moments_col_aids_by_lc: dict[str, set[str]] = {}
+            try:
+                rows_all = cur.execute(
+                    """
+                    SELECT
+                        a.asset_id,
+                        COALESCE(v.original_filename, a.original_filename, ''),
+                        COALESCE(v.score_normalized, 0.0),
+                        COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                        COALESCE(a.month, substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 7), ''),
+                        COALESCE(a.MomentsAlbumName, ''),
+                        COALESCE(za.ZKIND, 0)
+                    FROM assets a
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                    WHERE COALESCE(za.ZTRASHEDSTATE, 0) = 0
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows_all = cur.execute(
+                    """
+                    SELECT
+                        a.asset_id,
+                        COALESCE(v.original_filename, a.original_filename, ''),
+                        COALESCE(v.score_normalized, 0.0),
+                        COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                        COALESCE(a.month, substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 7), ''),
+                        COALESCE(a.MomentsAlbumName, ''),
+                        0
+                    FROM assets a
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    """
+                ).fetchall()
+
+            for aid, fn, sc, dt_utc, mo, mom_col, zkind in rows_all:
+                if not aid or aid in excluded_aids:
+                    continue
+                ext = os.path.splitext(fn or "")[1].lower()
+                m_type = "video" if (zkind == 1 or ext in VIDEO_EXTENSIONS) else "photo"
+                asset_info_map[aid] = (fn or "", float(sc or 0.0), dt_utc or "", mo or "", mom_col or "", m_type)
+                mc = (mom_col or "").strip()
+                if mc and mc.lower() not in ("ignore", "skippublishing", "topscore excluded") and mc.lower() not in deleted_lc:
+                    lc = mc.lower()
+                    canonical_name_by_lc.setdefault(lc, mc)
+                    moments_col_aids_by_lc.setdefault(lc, set()).add(aid)
+
+            tag_status_by_lc, tagged_aids = _load_moment_tagging_status_map(cur)
+            lacie_mounted = CURATED_LACIE_DIR.exists()
+            now_local = datetime.now()
+
+            all_moment_lcs = (
+                set(moments_col_aids_by_lc.keys())
+                | set(album_aids_by_lc.keys())
+                | set(pub_aids_by_lc.keys())
+            ) - deleted_lc
+
+            unified_groupings: list[dict] = []
+            by_status_counts: dict[str, int] = {}
+
+            for lc in all_moment_lcs:
+                name = canonical_name_by_lc.get(lc, lc)
+                member_aids = (
+                    moments_col_aids_by_lc.get(lc, set())
+                    | album_aids_by_lc.get(lc, set())
+                    | pub_aids_by_lc.get(lc, set())
+                )
+                valid_members = [aid for aid in member_aids if aid in asset_info_map]
+                if not valid_members:
+                    continue
+
+                valid_members.sort(key=lambda x: (-asset_info_map[x][1], asset_info_map[x][2], x))
+                scores_all = [asset_info_map[aid][1] for aid in valid_members]
+                qual_scores = [s for s in scores_all if s > hist_min]
+                total_cnt = len(valid_members)
+                qual_cnt = len(qual_scores)
+                avg_sc = sum(scores_all) / total_cnt if total_cnt else 0.0
+                qual_avg_sc = sum(qual_scores) / qual_cnt if qual_cnt else avg_sc
+                min_sc = min(scores_all) if scores_all else 0.0
+                max_sc = max(scores_all) if scores_all else 0.0
+                rank_sc = qual_avg_sc * math.log(max(1, qual_cnt) + 1)
+
+                cm = cm_by_lc.get(lc, {})
+                raw_stage = cm.get("stage", "M100")
+                tbc_cnt = len(tbc_aids_by_lc.get(lc, set()))
+                cur_set = cur_aids_by_lc.get(lc, set())
+                pub_set = pub_aids_by_lc.get(lc, set())
+                pub_cnt = len(pub_set)
+                fs_curated_exists = bool(lacie_mounted and (CURATED_LACIE_DIR / name).is_dir())
+                cur_exists = bool(cm.get("curated_exists") or cur_set or cm.get("curated_count", 0) > 0)
+                tbc_exists = bool(tbc_cnt > 0 or cm.get("tbc_exists"))
+                cur_cnt = max(len(cur_set), cm.get("curated_count", 0))
+
+                parents_sorted = sorted(album_parents_by_lc.get(lc, set()))
+                if not parents_sorted and lc in moments_col_aids_by_lc:
+                    parents_sorted = ["Moments"]
+
+                if raw_stage == "M500" or (pub_cnt > 0 and qual_cnt > 0 and pub_cnt >= max(qual_cnt, cur_cnt)):
+                    m_status = "M500"
+                    st_detail = "Published Complete"
+                elif raw_stage == "M450" or pub_cnt > 0:
+                    m_status = "M450"
+                    st_detail = f"Partially Published ({pub_cnt})"
+                elif raw_stage == "M400" or fs_curated_exists:
+                    m_status = "M400"
+                    st_detail = "Curated & Exported"
+                elif cur_exists:
+                    m_status = "M300"
+                    st_detail = "Curated (Needs Export)"
+                elif tbc_exists:
+                    m_status = "M200"
+                    st_detail = f"ToBeCurated ({tbc_cnt})"
+                elif parents_sorted == ["Generic Moments"]:
+                    m_status = "Generic"
+                    st_detail = "Generic Moment"
+                else:
+                    m_status = "M100"
+                    st_detail = "In Moments"
+
+                too_recent = False
+                days_rem = 0
+                last_pub_raw = last_pub_by_lc.get(lc, "")
+                if last_pub_raw:
+                    p_dt = _parse_utc_dt(last_pub_raw)
+                    if p_dt and (now_local - p_dt).days < 30:
+                        too_recent = True
+                        days_rem = max(1, 30 - (now_local - p_dt).days)
+
+                has_unpub_cur = cur_cnt > pub_cnt and cur_cnt > 0
+                if not has_unpub_cur:
+                    can_pub_str, can_pub_ok = "—", False
+                elif too_recent:
+                    can_pub_str, can_pub_ok = f"⏳ {days_rem}d", False
+                else:
+                    can_pub_str, can_pub_ok = "✅ Yes", True
+
+                dates_clean = sorted(
+                    asset_info_map[aid][2][:10]
+                    for aid in valid_members
+                    if asset_info_map[aid][2] and len(asset_info_map[aid][2]) >= 10
+                )
+                earliest_dt = dates_clean[0] if dates_clean else ""
+                date_range_str = (
+                    f"{dates_clean[0]} .. {dates_clean[-1]}"
+                    if len(dates_clean) > 1 and dates_clean[0] != dates_clean[-1]
+                    else (dates_clean[0] if dates_clean else "—")
+                )
+
+                batch_counts: dict[str, int] = {}
+                for aid in valid_members:
+                    mo = asset_info_map[aid][3]
+                    if mo:
+                        batch_counts[mo] = batch_counts.get(mo, 0) + 1
+                batches_list = [
+                    {
+                        "month": mo_k,
+                        "status_code": batch_status_by_month.get(mo_k, "—"),
+                        "count": batch_counts[mo_k],
+                    }
+                    for mo_k in sorted(batch_counts.keys())
+                ]
+
+                t_info = tag_status_by_lc.get(lc)
+                is_tagged = bool(t_info) or any(aid in tagged_aids for aid in valid_members)
+                is_disj = qual_cnt < 2 and pub_cnt == 0
+
+                by_status_counts[m_status] = by_status_counts.get(m_status, 0) + 1
+                if is_disj:
+                    by_status_counts["Disjoint"] = by_status_counts.get("Disjoint", 0) + 1
+
+                preview_assets = [
+                    {
+                        "asset_id": aid,
+                        "filename": asset_info_map[aid][0],
+                        "score": round(asset_info_map[aid][1], 4),
+                        "media_type": asset_info_map[aid][5],
+                    }
+                    for aid in valid_members[:6]
+                ]
+
+                unified_groupings.append(
+                    {
+                        "grouping_id": f"moment::{name}",
+                        "kind": "moment",
+                        "name": name,
+                        "moment_status": m_status,
+                        "status_detail": st_detail,
+                        "is_disjoint": is_disj,
+                        "can_publish_str": can_pub_str,
+                        "can_publish_ok": can_pub_ok,
+                        "parent_folders": parents_sorted,
+                        "total_assets": total_cnt,
+                        "qualified_assets": qual_cnt,
+                        "unique_count": total_cnt,
+                        "curated_count": cur_cnt,
+                        "to_be_curated_count": tbc_cnt,
+                        "published_count": pub_cnt,
+                        "duplicate_count": 0,
+                        "avg_score": round(avg_sc, 4),
+                        "qualified_avg_score": round(qual_avg_sc, 4),
+                        "min_score": round(min_sc, 4),
+                        "max_score": round(max_sc, 4),
+                        "rank_score": round(rank_sc, 4),
+                        "earliest_date": earliest_dt,
+                        "date_range": date_range_str,
+                        "batches": batches_list,
+                        "is_tagged": is_tagged,
+                        "paradigm_confirmed": bool(t_info and t_info.get("paradigm_confirmed")),
+                        "tag_summary": (t_info or {}).get("tag_summary", ""),
+                        "preview_assets": preview_assets,
+                    }
+                )
+
+            # 6. Add Unassigned Groupings from Mode [M] clustering engine
+            try:
+                mode_m_data = _compute_mode_m_from_db(cur, hist_min, None)
+            except sqlite3.OperationalError:
+                mode_m_data = {}
+            unassigned_clusters = mode_m_data.get("unassigned_clusters", [])
+            for grp in unassigned_clusters:
+                c_assets = grp.get("assets") or []
+                if not c_assets:
+                    continue
+                c_scores = [float(a.get("score_normalized") or 0.0) for a in c_assets]
+                non_dup_scores = [
+                    float(a.get("score_normalized") or 0.0)
+                    for a in c_assets
+                    if not a.get("is_duplicate_copy")
+                ]
+                total_c = len(c_assets)
+                qual_c = sum(1 for s in c_scores if s > hist_min)
+                uniq_c = int(grp.get("unique_count") if grp.get("unique_count") is not None else len(non_dup_scores))
+                dup_c = int(grp.get("duplicate_copy_count") or 0)
+                avg_c = sum(c_scores) / total_c if total_c else 0.0
+                qual_avg_c = sum(non_dup_scores) / len(non_dup_scores) if non_dup_scores else avg_c
+                min_c = min(c_scores) if c_scores else 0.0
+                max_c = max(c_scores) if c_scores else 0.0
+                rank_c = qual_avg_c * math.log(max(1, uniq_c) + 1)
+
+                c_dates = sorted(
+                    str(a.get("capture_timestamp") or "")[:10]
+                    for a in c_assets
+                    if a.get("capture_timestamp") and len(str(a.get("capture_timestamp"))) >= 10
+                )
+                earliest_c = c_dates[0] if c_dates else ""
+                date_range_c = (
+                    f"{c_dates[0]} .. {c_dates[-1]}"
+                    if len(c_dates) > 1 and c_dates[0] != c_dates[-1]
+                    else (c_dates[0] if c_dates else "—")
+                )
+
+                b_counts: dict[str, int] = {}
+                inline_assets: list[dict] = []
+                for a in c_assets:
+                    mo_a = str(a.get("month") or "").strip()
+                    b_st = batch_status_by_month.get(mo_a, "—")
+                    if mo_a:
+                        b_counts[mo_a] = b_counts.get(mo_a, 0) + 1
+                    aid_a = a.get("asset_id") or ""
+                    m_type_a = asset_info_map.get(aid_a, ("", 0.0, "", "", "", "photo"))[5]
+                    inline_assets.append(
+                        {
+                            "asset_id": aid_a,
+                            "original_filename": a.get("original_filename") or "",
+                            "score_normalized": round(float(a.get("score_normalized") or 0.0), 4),
+                            "qualified": float(a.get("score_normalized") or 0.0) > hist_min,
+                            "date_created_utc": a.get("capture_timestamp") or "",
+                            "month": mo_a,
+                            "batch_status": b_st,
+                            "media_type": m_type_a,
+                            "is_duplicate_copy": bool(a.get("is_duplicate_copy")),
+                            "duplicate_keeper_filename": a.get("duplicate_keeper_filename") or "",
+                            "duplicate_keeper_moment": a.get("duplicate_keeper_moment") or "",
+                            "in_moments": False,
+                            "in_to_be_curated": False,
+                            "in_curated": False,
+                            "is_published": False,
+                            "asset_tags": [],
+                        }
+                    )
+
+                batches_c = [
+                    {
+                        "month": mo_k,
+                        "status_code": batch_status_by_month.get(mo_k, "—"),
+                        "count": b_counts[mo_k],
+                    }
+                    for mo_k in sorted(b_counts.keys())
+                ]
+
+                folder_nm = grp.get("folder") or "Unassigned Group"
+                by_status_counts["Unassigned"] = by_status_counts.get("Unassigned", 0) + 1
+                if uniq_c < 2:
+                    by_status_counts["Disjoint"] = by_status_counts.get("Disjoint", 0) + 1
+
+                unified_groupings.append(
+                    {
+                        "grouping_id": f"unassigned::{folder_nm}",
+                        "kind": "unassigned",
+                        "name": folder_nm,
+                        "moment_status": "Unassigned",
+                        "status_detail": grp.get("rule_label") or grp.get("group_type") or "Unassigned Cluster",
+                        "rule_id": grp.get("rule_id") or "",
+                        "rule_reason": grp.get("rule_reason") or "",
+                        "is_disjoint": uniq_c < 2,
+                        "can_publish_str": "—",
+                        "can_publish_ok": False,
+                        "parent_folders": [],
+                        "total_assets": total_c,
+                        "qualified_assets": qual_c,
+                        "unique_count": uniq_c,
+                        "curated_count": 0,
+                        "to_be_curated_count": 0,
+                        "published_count": 0,
+                        "duplicate_count": dup_c,
+                        "avg_score": round(avg_c, 4),
+                        "qualified_avg_score": round(qual_avg_c, 4),
+                        "min_score": round(min_c, 4),
+                        "max_score": round(max_c, 4),
+                        "rank_score": round(rank_c, 4),
+                        "earliest_date": earliest_c,
+                        "date_range": date_range_c,
+                        "batches": batches_c,
+                        "is_tagged": False,
+                        "paradigm_confirmed": False,
+                        "tag_summary": "",
+                        "preview_assets": [
+                            {
+                                "asset_id": x["asset_id"],
+                                "filename": x["original_filename"],
+                                "score": x["score_normalized"],
+                                "media_type": x["media_type"],
+                            }
+                            for x in inline_assets[:6]
+                        ],
+                        "inline_assets": inline_assets,
+                    }
+                )
+
+            # Default order: Average Score descending
+            unified_groupings.sort(key=lambda g: (-g["avg_score"], -g["total_assets"], g["name"].lower()))
+
+            total_assets_sum = sum(g["total_assets"] for g in unified_groupings)
+            weighted_score_sum = sum(g["avg_score"] * g["total_assets"] for g in unified_groupings)
+            overall_avg = round(weighted_score_sum / total_assets_sum, 4) if total_assets_sum else 0.0
+            moments_cnt = sum(1 for g in unified_groupings if g["kind"] == "moment")
+            unassigned_cnt = sum(1 for g in unified_groupings if g["kind"] == "unassigned")
+
+            return {
+                "ok": True,
+                "historical_min": round(hist_min, 4),
+                "total_groupings": len(unified_groupings),
+                "moments_count": moments_cnt,
+                "unassigned_count": unassigned_cnt,
+                "total_assets": total_assets_sum,
+                "overall_avg_score": overall_avg,
+                "by_status": by_status_counts,
+                "groupings": unified_groupings,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.get("/planner/grouping-assets")
+def get_unified_grouping_assets(moment_name: str):
+    """Return full asset list with batch & moment folder statuses for an expanded Moment grouping."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    m_name = (moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=20)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+            min_row = cur.fetchone()
+            hist_min = float(min_row[0]) if min_row and min_row[0] else 0.5315
+
+            excluded_aids: set[str] = set()
+            try:
+                for (aid_ex,) in cur.execute(
+                    """
+                    SELECT DISTINCT moaa.asset_id
+                    FROM media_organizer_album_assets moaa
+                    JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+                    """
+                ).fetchall():
+                    if aid_ex:
+                        excluded_aids.add(aid_ex)
+            except sqlite3.OperationalError:
+                pass
+
+            batch_status_by_month: dict[str, str] = {}
+            try:
+                for m_str, st_code in cur.execute("SELECT month, COALESCE(status_code, '') FROM month_batches").fetchall():
+                    if m_str:
+                        batch_status_by_month[str(m_str).strip()] = str(st_code or "—")
+            except sqlite3.OperationalError:
+                pass
+
+            in_moments_set: set[str] = set()
+            in_tbc_set: set[str] = set()
+            in_cur_set: set[str] = set()
+            try:
+                for par_nm, aid in cur.execute(
+                    """
+                    SELECT LOWER(COALESCE(moa.parent_folder_name, 'moments')), moaa.asset_id
+                    FROM media_organizer_album_assets moaa
+                    JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                    WHERE moa.is_folder = 0 AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+                    """,
+                    (m_name,),
+                ).fetchall():
+                    if not aid:
+                        continue
+                    if par_nm == "tobecurated":
+                        in_tbc_set.add(aid)
+                    elif par_nm == "curated":
+                        in_cur_set.add(aid)
+                    else:
+                        in_moments_set.add(aid)
+            except sqlite3.OperationalError:
+                pass
+
+            pub_set: set[str] = set()
+            try:
+                for (aid_p,) in cur.execute(
+                    "SELECT DISTINCT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+                    (m_name,),
+                ).fetchall():
+                    if aid_p:
+                        pub_set.add(aid_p)
+            except sqlite3.OperationalError:
+                pass
+
+            where_clause, query_params = _moment_membership_where_sql(m_name)
+            try:
+                raw_rows = cur.execute(
+                    f"""
+                    SELECT DISTINCT
+                        a.asset_id,
+                        COALESCE(v.original_filename, a.original_filename, ''),
+                        COALESCE(v.score_normalized, 0.0),
+                        COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                        COALESCE(a.month, substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 7), ''),
+                        COALESCE(za.ZKIND, 0),
+                        ROUND(COALESCE(za.ZDURATION, ze.ZDURATION, 0.0), 2),
+                        COALESCE(aaa.ZORIGINALWIDTH, za.ZWIDTH, 0),
+                        COALESCE(aaa.ZORIGINALHEIGHT, za.ZHEIGHT, 0),
+                        COALESCE(aaa.ZORIGINALFILESIZE, a.file_size_bytes, 0),
+                        COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device, 'Unknown'),
+                        COALESCE(do.owner_name, a.primary_owner, 'Shared/Other')
+                    FROM assets a
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                    LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+                    LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+                    LEFT JOIN device_owners do ON do.camera_model = COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device)
+                        AND (do.start_date IS NULL OR do.start_date <= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                        AND (do.end_date IS NULL OR do.end_date >= date(za.ZDATECREATED + 978307200, 'unixepoch'))
+                    WHERE {where_clause}
+                      AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                    ORDER BY COALESCE(v.score_normalized, 0.0) DESC, a.date_created_utc ASC
+                    LIMIT 500
+                    """,
+                    query_params,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                raw_rows = cur.execute(
+                    f"""
+                    SELECT DISTINCT
+                        a.asset_id,
+                        COALESCE(v.original_filename, a.original_filename, ''),
+                        COALESCE(v.score_normalized, 0.0),
+                        COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                        COALESCE(a.month, substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 7), ''),
+                        0,
+                        0.0,
+                        0,
+                        0,
+                        COALESCE(a.file_size_bytes, 0),
+                        COALESCE(a.camera_model, 'Unknown'),
+                        COALESCE(a.primary_owner, 'Shared/Other')
+                    FROM assets a
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    WHERE {where_clause}
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                    ORDER BY COALESCE(v.score_normalized, 0.0) DESC, a.date_created_utc ASC
+                    LIMIT 500
+                    """,
+                    query_params,
+                ).fetchall()
+
+            kept_rows = [r for r in raw_rows if r[0] and r[0] not in excluded_aids]
+            aid_list = [r[0] for r in kept_rows]
+            try:
+                per_asset_tags = _load_per_asset_tags_map(cur, aid_list)
+            except sqlite3.OperationalError:
+                per_asset_tags = {}
+
+            assets_enriched = []
+            for r in kept_rows:
+                aid, fn, sc, dt_s, mo_raw, zkind, dur, w, h, fbytes, cam, owner = r
+                mo = str(mo_raw or (dt_s or "")[:7]).strip()
+                sc_f = float(sc or 0.0)
+                ext = os.path.splitext(fn or "")[1].lower()
+                m_type = "video" if (int(zkind or 0) == 1 or ext in VIDEO_EXTENSIONS) else "photo"
+                assets_enriched.append(
+                    {
+                        "asset_id": aid,
+                        "original_filename": fn or "",
+                        "score_normalized": round(sc_f, 4),
+                        "qualified": sc_f > hist_min,
+                        "date_created_utc": (dt_s or "")[:19],
+                        "month": mo,
+                        "batch_status": batch_status_by_month.get(mo, "—"),
+                        "media_type": m_type,
+                        "duration": float(dur or 0.0),
+                        "width": int(w or 0),
+                        "height": int(h or 0),
+                        "file_size_bytes": int(fbytes or 0),
+                        "camera_model": cam or "Unknown",
+                        "primary_owner": owner or "Shared/Other",
+                        "is_duplicate_copy": False,
+                        "in_moments": aid in in_moments_set,
+                        "in_to_be_curated": aid in in_tbc_set,
+                        "in_curated": aid in in_cur_set,
+                        "is_published": aid in pub_set,
+                        "asset_tags": per_asset_tags.get(aid, []),
+                    }
+                )
+
+            return {
+                "ok": True,
+                "moment_name": m_name,
+                "historical_min": round(hist_min, 4),
+                "assets": assets_enriched,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

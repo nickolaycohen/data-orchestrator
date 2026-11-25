@@ -330,6 +330,7 @@
             <span class="planner-mode-label">🛠️ Pipeline Branch:</span>
             <button class="planner-mode-tab active" data-mode-view="b">[B] Batch Management</button>
             <button class="planner-mode-tab" data-mode-view="m">[M] Moments Organizer</button>
+            <button class="planner-mode-tab" data-mode-view="g">[G] All Groupings</button>
             <button class="planner-mode-tab" data-mode-view="c">[C] Media Cleanup &amp; Reclaim</button>
           </div>
           <div style="display: flex; align-items: center; gap: 0.5rem;">
@@ -903,6 +904,68 @@
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Unified All Groupings Explorer (Mode [G] Combined View) -->
+        <div class="card mb-4" id="all-groupings-card" style="display: none;">
+          <div class="card-header">
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+              <div class="action-icon icon-purple"
+                style="width: 36px; height: 36px; font-size: 1.15rem; display: flex; align-items: center; justify-content: center; border-radius: 8px;">
+                🗂️</div>
+              <div>
+                <h3 style="display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap;">
+                  Unified Groupings Explorer
+                  <span class="badge badge-sm badge-purple font-mono" id="all-groupings-badge-total">Loading...</span>
+                  <span class="badge badge-sm badge-blue font-mono" id="all-groupings-badge-assets">0 assets</span>
+                  <span class="badge badge-sm badge-amber font-mono" id="all-groupings-badge-avg">Avg —</span>
+                </h3>
+                <p class="card-subtitle">
+                  Combined view of every Grouping (Unassigned Clusters + M100–M500 Moments + Disjoint) ordered by
+                  average score, with counts, batch &amp; moment statuses, and expandable interactive asset curation.
+                </p>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+              <button type="button" class="btn btn-xs btn-outline" id="btn-collapse-all-groupings">▴ Collapse Expanded</button>
+              <button type="button" class="btn btn-xs btn-outline" id="btn-refresh-all-groupings">🔄 Refresh Groupings</button>
+            </div>
+          </div>
+
+          <div class="card-body" style="display: flex; flex-direction: column; gap: 0.75rem;">
+            <div class="unassigned-clusters-toolbar" style="border-radius: 8px; border: 1px solid var(--border-subtle);">
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <span class="font-mono text-muted" style="font-size: 0.68rem; text-transform: uppercase;">Sort:</span>
+                <div class="cleanup-filter-group" style="padding: 0.14rem 0.28rem;">
+                  <button type="button" class="cleanup-preview-sort-btn all-groupings-sort-btn active" data-grp-sort="avg_score">⭐ Avg Score</button>
+                  <button type="button" class="cleanup-preview-sort-btn all-groupings-sort-btn" data-grp-sort="qual_avg">★ Qual. Avg</button>
+                  <button type="button" class="cleanup-preview-sort-btn all-groupings-sort-btn" data-grp-sort="count">📦 Asset Count</button>
+                  <button type="button" class="cleanup-preview-sort-btn all-groupings-sort-btn" data-grp-sort="rank_score">🏆 Rank Score</button>
+                  <button type="button" class="cleanup-preview-sort-btn all-groupings-sort-btn" data-grp-sort="date">📅 Chronological</button>
+                </div>
+                <select id="all-groupings-batch-filter" class="form-control"
+                  style="width: auto; min-width: 175px; margin-top: 0; padding: 0.25rem 0.5rem; font-size: 0.72rem;">
+                  <option value="all">📅 All Batch Statuses</option>
+                  <option value="600_plus">✅ Batch ≥ 600 (Ranked)</option>
+                  <option value="under_600">⏳ Batch &lt; 600 (In Pipeline)</option>
+                </select>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <input type="search" id="all-groupings-search" class="form-control"
+                  placeholder="🔍 Filter name, tag, batch (2020-08), status..."
+                  style="width: 260px; max-width: 100%; margin-top: 0; padding: 0.28rem 0.6rem; font-size: 0.74rem;" />
+                <span class="badge badge-xs badge-outline font-mono" id="all-groupings-visible-pill">0 shown</span>
+              </div>
+            </div>
+
+            <div class="disjoint-target-chips" id="all-groupings-status-pills"></div>
+
+            <div id="all-groupings-list" style="display: flex; flex-direction: column; gap: 0.5rem;">
+              <div class="text-center text-muted font-mono" style="padding: 1.5rem; font-size: 0.78rem;">
+                Select [G] All Groupings to load unified groupings across all statuses...
               </div>
             </div>
           </div>
@@ -2248,19 +2311,25 @@
             <div class="cleanup-preview-filmstrip-header">
               <span class="font-mono text-muted" id="cleanup-preview-group-label">Group Assets</span>
               <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                <div class="cleanup-filter-group" id="cleanup-preview-filter-group" style="display: none; padding: 0.12rem 0.25rem;"
+                <div class="cleanup-filter-group" id="cleanup-preview-filter-group"
+                  style="display: none; padding: 0.12rem 0.25rem;"
                   title="Filter filmstrip & arrow navigation (F key cycles)">
                   <span class="cleanup-filter-label" style="font-size: 0.64rem;">View:</span>
-                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn active" data-preview-filter="all">All</button>
-                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn" data-preview-filter="selected">★ Curated</button>
-                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn" data-preview-filter="unselected">⏭️ Unselected</button>
+                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn active"
+                    data-preview-filter="all">All</button>
+                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn"
+                    data-preview-filter="selected">★ Curated</button>
+                  <button type="button" class="cleanup-preview-filter-btn cleanup-preview-sort-btn"
+                    data-preview-filter="unselected">⏭️ Unselected</button>
                 </div>
                 <div class="cleanup-filter-group" id="cleanup-preview-sort-group" style="padding: 0.12rem 0.25rem;"
                   title="Reorder & renumber assets inside this dialog">
                   <span class="cleanup-filter-label" style="font-size: 0.64rem;">Sort:</span>
-                  <button type="button" class="cleanup-preview-sort-order-btn cleanup-preview-sort-btn active" data-preview-sort="timestamp">🕒
+                  <button type="button" class="cleanup-preview-sort-order-btn cleanup-preview-sort-btn active"
+                    data-preview-sort="timestamp">🕒
                     Timestamp</button>
-                  <button type="button" class="cleanup-preview-sort-order-btn cleanup-preview-sort-btn" data-preview-sort="score">⭐ Score</button>
+                  <button type="button" class="cleanup-preview-sort-order-btn cleanup-preview-sort-btn"
+                    data-preview-sort="score">⭐ Score</button>
                 </div>
                 <span class="font-mono text-muted" style="font-size: 0.66rem;">←/→ nav · Space keep · F filter</span>
               </div>
@@ -2273,7 +2342,8 @@
           <div class="cleanup-preview-compact-meta" id="cleanup-preview-compact-meta">
             <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; min-width: 0; flex: 1;">
               <span class="font-mono" id="cleanup-preview-compact-summary">—</span>
-              <span id="cleanup-preview-compact-tags" class="font-mono" style="display: inline-flex; align-items: center; gap: 0.25rem; flex-wrap: wrap;"></span>
+              <span id="cleanup-preview-compact-tags" class="font-mono"
+                style="display: inline-flex; align-items: center; gap: 0.25rem; flex-wrap: wrap;"></span>
             </div>
             <button type="button" class="btn btn-xs btn-outline font-mono" id="btn-preview-toggle-details"
               title="Toggle full device & EXIF details (I key)" style="flex-shrink: 0;">ⓘ Details</button>
@@ -2503,9 +2573,11 @@
             <div
               style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
               <div>
-                <strong style="font-size: 0.8rem;" id="publish-moment-assets-heading">Curate Next Publishing Batch (Target: 9 Assets)</strong>
+                <strong style="font-size: 0.8rem;" id="publish-moment-assets-heading">Curate Next Publishing Batch
+                  (Target: 9 Assets)</strong>
                 <span class="font-mono text-muted" style="font-size: 0.67rem; display: block; margin-top: 0.1rem;">
-                  Unselect any unwanted item to propose the next asset from the queue; unselected items move to <code>SkipPublishing</code>.
+                  Unselect any unwanted item to propose the next asset from the queue; unselected items move to
+                  <code>SkipPublishing</code>.
                 </span>
               </div>
               <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
@@ -2577,298 +2649,298 @@
       </div>
     </div>
 
-      <!-- Modal: Resolve Disjoint Moment -->
-      <div class="modal-backdrop" id="modal-resolve-disjoint">
-        <div class="modal-dialog"
-          style="max-width: 880px; width: 95vw; max-height: 90vh; display: flex; flex-direction: column;">
-          <div class="modal-header">
-            <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-              <h3 style="margin: 0; font-size: 1.05rem;" id="resolve-disjoint-modal-title">🔀 Resolve Disjoint Moment
-              </h3>
-              <span class="badge badge-xs badge-amber font-mono" id="resolve-disjoint-badge">0 assets</span>
-            </div>
-            <button class="btn btn-xs btn-icon btn-close-resolve-disjoint-modal" aria-label="Close">✕</button>
+    <!-- Modal: Resolve Disjoint Moment -->
+    <div class="modal-backdrop" id="modal-resolve-disjoint">
+      <div class="modal-dialog"
+        style="max-width: 880px; width: 95vw; max-height: 90vh; display: flex; flex-direction: column;">
+        <div class="modal-header">
+          <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+            <h3 style="margin: 0; font-size: 1.05rem;" id="resolve-disjoint-modal-title">🔀 Resolve Disjoint Moment
+            </h3>
+            <span class="badge badge-xs badge-amber font-mono" id="resolve-disjoint-badge">0 assets</span>
           </div>
-          <div class="modal-body"
-            style="padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem; overflow-y: auto; flex: 1;">
-            <div id="resolve-disjoint-summary-banner" class="dedup-status-banner"
-              style="padding: 0.55rem 0.75rem; font-size: 0.76rem;">
-              <div class="spinner-sm"></div>
-              <span>Loading disjoint Moment assets and merge targets...</span>
+          <button class="btn btn-xs btn-icon btn-close-resolve-disjoint-modal" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body"
+          style="padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem; overflow-y: auto; flex: 1;">
+          <div id="resolve-disjoint-summary-banner" class="dedup-status-banner"
+            style="padding: 0.55rem 0.75rem; font-size: 0.76rem;">
+            <div class="spinner-sm"></div>
+            <span>Loading disjoint Moment assets and merge targets...</span>
+          </div>
+
+          <div id="resolve-disjoint-albums-bar" class="publish-folder-bar" style="display: none; font-size: 0.72rem;">
+          </div>
+
+          <div id="resolve-disjoint-source-tagging-mount"></div>
+
+          <div>
+            <div
+              style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
+              <strong style="font-size: 0.8rem;">Assets in Disjoint Moment (click thumbnail to preview)</strong>
+              <div style="display: flex; align-items: center; gap: 0.4rem;">
+                <span class="badge badge-xs badge-purple font-mono" id="resolve-disjoint-selected-pill">0
+                  selected</span>
+                <button type="button" class="btn btn-xs btn-outline" id="btn-disjoint-hide-unselected"
+                  title="Filter list to show only selected keepers">👁️ Curated Only</button>
+              </div>
+            </div>
+            <div class="publish-asset-list" id="resolve-disjoint-asset-list"></div>
+          </div>
+
+          <div
+            style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 0.6rem;">
+            <div
+              style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+              <strong style="font-size: 0.82rem;">Consolidate Moments &amp; Target Moment Name</strong>
+              <span class="badge badge-xs badge-amber font-mono" id="resolve-disjoint-combine-count-badge">1
+                asset</span>
             </div>
 
-            <div id="resolve-disjoint-albums-bar" class="publish-folder-bar" style="display: none; font-size: 0.72rem;">
+            <div>
+              <span class="font-mono text-muted"
+                style="font-size: 0.67rem; display: block; margin-bottom: 0.25rem;">Sources Included in This
+                Consolidation:</span>
+              <div class="disjoint-target-chips" id="resolve-disjoint-combine-tray"></div>
             </div>
-
-            <div id="resolve-disjoint-source-tagging-mount"></div>
 
             <div>
               <div
-                style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
-                <strong style="font-size: 0.8rem;">Assets in Disjoint Moment (click thumbnail to preview)</strong>
-                <div style="display: flex; align-items: center; gap: 0.4rem;">
-                  <span class="badge badge-xs badge-purple font-mono" id="resolve-disjoint-selected-pill">0
-                    selected</span>
-                  <button type="button" class="btn btn-xs btn-outline" id="btn-disjoint-hide-unselected"
-                    title="Filter list to show only selected keepers">👁️ Curated Only</button>
-                </div>
+                style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.3rem; flex-wrap: wrap;">
+                <label class="font-mono text-muted" style="font-size: 0.68rem;">Search or Pick Existing Moments (click
+                  pill to preview assets &amp; combine):</label>
+                <input type="search" id="resolve-disjoint-moment-search" class="form-control"
+                  placeholder="🔍 Search any Moment (e.g. Ski, Blue, Soccer)..."
+                  style="width: 240px; max-width: 100%; font-size: 0.72rem; padding: 0.24rem 0.55rem;" />
               </div>
-              <div class="publish-asset-list" id="resolve-disjoint-asset-list"></div>
+              <div class="disjoint-target-chips" id="resolve-disjoint-nearby-chips"></div>
             </div>
 
-            <div
-              style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 0.6rem;">
+            <div id="resolve-disjoint-candidate-preview-panel" class="tag-db-query-panel" style="display: none;">
+              <div class="tag-db-query-header" style="flex-wrap: wrap;">
+                <div style="min-width: 0; flex: 1;">
+                  <div id="resolve-disjoint-candidate-preview-title" class="font-mono"
+                    style="font-size: 0.73rem; font-weight: 600;">📂 Moment Preview</div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+                  <button type="button" class="btn btn-xs btn-purple" id="btn-candidate-add-combine"
+                    title="Add this Moment, its selected assets, and its own tags to the consolidation list">
+                    ➕ Add Moment to Consolidation
+                  </button>
+                  <button type="button" class="btn btn-xs btn-outline" id="btn-candidate-use-legacy-target"
+                    title="Set Target Moment Name to this existing album for legacy Merge into Target">
+                    🔀 Use as Legacy Target
+                  </button>
+                  <button type="button" class="btn btn-xs btn-icon" id="btn-close-candidate-preview-panel"
+                    aria-label="Close Moment Preview">✕</button>
+                </div>
+              </div>
+              <div id="resolve-disjoint-candidate-assets-grid" class="tag-db-assets-grid"></div>
+              <div id="resolve-disjoint-candidate-tagging-mount"></div>
+            </div>
+
+            <div id="resolve-disjoint-propagate-tags-box"
+              style="padding: 0.45rem 0.6rem; border-radius: 6px; background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); display: flex; flex-direction: column; gap: 0.32rem;">
+              <label
+                style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: #ede9fe; font-weight: 500;">
+                <input type="checkbox" id="resolve-disjoint-save-per-source-tags" checked />
+                <span>Save each Moment's own DB tags onto its respective assets (Disjoint → disjoint tags; Combined
+                  Moment → its own tags)</span>
+              </label>
+              <label
+                style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.71rem; cursor: pointer; color: var(--text-secondary);">
+                <input type="checkbox" id="resolve-disjoint-share-disjoint-tags" />
+                <span>Also copy Disjoint Moment's tags onto combined existing Moment assets</span>
+              </label>
+              <div id="resolve-disjoint-propagate-tags-list" class="disjoint-mini-chips"></div>
+            </div>
+
+            <div id="resolve-disjoint-single-warning" class="dedup-status-banner"
+              style="display: none; padding: 0.42rem 0.65rem; font-size: 0.72rem; border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); color: #fde68a;">
+              ⚠️ <strong>Single-asset Moment (&lt; 2 files):</strong> Creating or renaming a Moment with only 1 asset
+              is
+              allowed but discouraged. Search or click an existing Moment pill above to combine two or more Moments
+              into
+              a multi-asset New Moment.
+            </div>
+
+            <div class="disjoint-target-path-box">
+              <span class="font-mono text-muted"
+                style="font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.28rem;">Final
+                Merge Destination · Target Path</span>
+              <div class="disjoint-target-path-inline">
+                <span class="disjoint-target-prefix font-mono">Media Organizer on LaCie /</span>
+                <select id="resolve-disjoint-parent-select" class="form-control disjoint-target-parent-select"
+                  aria-label="Target Folder">
+                  <option value="Moments">Moments</option>
+                  <option value="Generic Moments">Generic Moments</option>
+                  <option value="Curated">Curated</option>
+                  <option value="ToBeCurated">ToBeCurated</option>
+                </select>
+                <span class="disjoint-target-slash font-mono">/</span>
+                <input type="text" id="resolve-disjoint-target-input" class="form-control disjoint-target-leaf-input"
+                  placeholder="e.g. Skiing at CamelBack - Winter 2020" aria-label="Target Moment Album Name" />
+                <span id="resolve-disjoint-target-status-note" class="font-mono text-muted"
+                  style="font-size: 0.74rem; font-weight: 500; white-space: nowrap;"></span>
+              </div>
+            </div>
+            <label id="resolve-disjoint-delete-source-row"
+              style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem; cursor: pointer; color: var(--text-secondary);">
+              <input type="checkbox" id="resolve-disjoint-delete-source" checked />
+              <span>Delete disjoint / source album(s) if they exist &amp; migrate all DB Moment assignments to
+                target</span>
+            </label>
+
+            <div id="resolve-disjoint-curate-box"
+              style="display: none; padding: 0.6rem 0.75rem; border-radius: 8px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.32); flex-direction: column; gap: 0.45rem;">
               <div
                 style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
-                <strong style="font-size: 0.82rem;">Consolidate Moments &amp; Target Moment Name</strong>
-                <span class="badge badge-xs badge-amber font-mono" id="resolve-disjoint-combine-count-badge">1
-                  asset</span>
+                <strong id="curate-m200-box-title" style="font-size: 0.77rem; color: #a7f3d0;">🎨 M200 Curation
+                  Workflow (ToBeCurated ➜ Curated ➜ Export)</strong>
+                <span id="curate-m200-counts-summary" class="badge badge-xs badge-green font-mono">0 keepers · 0
+                  unselected</span>
               </div>
-
-              <div>
-                <span class="font-mono text-muted"
-                  style="font-size: 0.67rem; display: block; margin-bottom: 0.25rem;">Sources Included in This
-                  Consolidation:</span>
-                <div class="disjoint-target-chips" id="resolve-disjoint-combine-tray"></div>
+              <div id="curate-m200-new-folder-notice" class="font-mono"
+                style="display: none; font-size: 0.71rem; padding: 0.38rem 0.55rem; border-radius: 6px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.42); color: #fde68a;">
+                🔀 New folder name introduced — new folders cannot be copied directly to <code>Curated</code>.
+                Submitting will consolidate all selected Moments into <code>Moments</code> (<code>M100</code>) and
+                clean up prior <code>ToBeCurated</code> / source albums.
               </div>
-
-              <div>
-                <div
-                  style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.3rem; flex-wrap: wrap;">
-                  <label class="font-mono text-muted" style="font-size: 0.68rem;">Search or Pick Existing Moments (click
-                    pill to preview assets &amp; combine):</label>
-                  <input type="search" id="resolve-disjoint-moment-search" class="form-control"
-                    placeholder="🔍 Search any Moment (e.g. Ski, Blue, Soccer)..."
-                    style="width: 240px; max-width: 100%; font-size: 0.72rem; padding: 0.24rem 0.55rem;" />
-                </div>
-                <div class="disjoint-target-chips" id="resolve-disjoint-nearby-chips"></div>
-              </div>
-
-              <div id="resolve-disjoint-candidate-preview-panel" class="tag-db-query-panel" style="display: none;">
-                <div class="tag-db-query-header" style="flex-wrap: wrap;">
-                  <div style="min-width: 0; flex: 1;">
-                    <div id="resolve-disjoint-candidate-preview-title" class="font-mono"
-                      style="font-size: 0.73rem; font-weight: 600;">📂 Moment Preview</div>
-                  </div>
-                  <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
-                    <button type="button" class="btn btn-xs btn-purple" id="btn-candidate-add-combine"
-                      title="Add this Moment, its selected assets, and its own tags to the consolidation list">
-                      ➕ Add Moment to Consolidation
-                    </button>
-                    <button type="button" class="btn btn-xs btn-outline" id="btn-candidate-use-legacy-target"
-                      title="Set Target Moment Name to this existing album for legacy Merge into Target">
-                      🔀 Use as Legacy Target
-                    </button>
-                    <button type="button" class="btn btn-xs btn-icon" id="btn-close-candidate-preview-panel"
-                      aria-label="Close Moment Preview">✕</button>
-                  </div>
-                </div>
-                <div id="resolve-disjoint-candidate-assets-grid" class="tag-db-assets-grid"></div>
-                <div id="resolve-disjoint-candidate-tagging-mount"></div>
-              </div>
-
-              <div id="resolve-disjoint-propagate-tags-box"
-                style="padding: 0.45rem 0.6rem; border-radius: 6px; background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); display: flex; flex-direction: column; gap: 0.32rem;">
-                <label
-                  style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: #ede9fe; font-weight: 500;">
-                  <input type="checkbox" id="resolve-disjoint-save-per-source-tags" checked />
-                  <span>Save each Moment's own DB tags onto its respective assets (Disjoint → disjoint tags; Combined
-                    Moment → its own tags)</span>
+              <div
+                style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; font-size: 0.74rem; color: var(--text-secondary);">
+                <label style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+                  <input type="checkbox" id="curate-m200-handle-unselected" checked />
+                  <span>For unselected items:</span>
                 </label>
-                <label
-                  style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.71rem; cursor: pointer; color: var(--text-secondary);">
-                  <input type="checkbox" id="resolve-disjoint-share-disjoint-tags" />
-                  <span>Also copy Disjoint Moment's tags onto combined existing Moment assets</span>
-                </label>
-                <div id="resolve-disjoint-propagate-tags-list" class="disjoint-mini-chips"></div>
+                <select id="curate-m200-unselected-action" class="form-control"
+                  style="width: auto; min-width: 240px; font-size: 0.72rem; padding: 0.2rem 0.45rem;">
+                  <option value="ignore" selected>🗑️ Add to Ignore folder (not needed / exclude)</option>
+                  <option value="skip_publishing">⏭️ Move to SkipPublishing (similar exists / personal judgment)
+                  </option>
+                </select>
               </div>
-
-              <div id="resolve-disjoint-single-warning" class="dedup-status-banner"
-                style="display: none; padding: 0.42rem 0.65rem; font-size: 0.72rem; border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); color: #fde68a;">
-                ⚠️ <strong>Single-asset Moment (&lt; 2 files):</strong> Creating or renaming a Moment with only 1 asset
-                is
-                allowed but discouraged. Search or click an existing Moment pill above to combine two or more Moments
-                into
-                a multi-asset New Moment.
-              </div>
-
-              <div class="disjoint-target-path-box">
-                <span class="font-mono text-muted"
-                  style="font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.28rem;">Final
-                  Merge Destination · Target Path</span>
-                <div class="disjoint-target-path-inline">
-                  <span class="disjoint-target-prefix font-mono">Media Organizer on LaCie /</span>
-                  <select id="resolve-disjoint-parent-select" class="form-control disjoint-target-parent-select"
-                    aria-label="Target Folder">
-                    <option value="Moments">Moments</option>
-                    <option value="Generic Moments">Generic Moments</option>
-                    <option value="Curated">Curated</option>
-                    <option value="ToBeCurated">ToBeCurated</option>
-                  </select>
-                  <span class="disjoint-target-slash font-mono">/</span>
-                  <input type="text" id="resolve-disjoint-target-input" class="form-control disjoint-target-leaf-input"
-                    placeholder="e.g. Skiing at CamelBack - Winter 2020" aria-label="Target Moment Album Name" />
-                  <span id="resolve-disjoint-target-status-note" class="font-mono text-muted"
-                    style="font-size: 0.74rem; font-weight: 500; white-space: nowrap;"></span>
-                </div>
-              </div>
-              <label id="resolve-disjoint-delete-source-row"
-                style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem; cursor: pointer; color: var(--text-secondary);">
-                <input type="checkbox" id="resolve-disjoint-delete-source" checked />
-                <span>Delete disjoint / source album(s) if they exist &amp; migrate all DB Moment assignments to
-                  target</span>
+              <label id="curate-m200-delete-tbc-row"
+                style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
+                <input type="checkbox" id="curate-m200-delete-tbc" checked />
+                <span>Delete source <code>ToBeCurated</code> album in Apple Photos cleanly</span>
               </label>
-
-              <div id="resolve-disjoint-curate-box"
-                style="display: none; padding: 0.6rem 0.75rem; border-radius: 8px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.32); flex-direction: column; gap: 0.45rem;">
-                <div
-                  style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
-                  <strong id="curate-m200-box-title" style="font-size: 0.77rem; color: #a7f3d0;">🎨 M200 Curation
-                    Workflow (ToBeCurated ➜ Curated ➜ Export)</strong>
-                  <span id="curate-m200-counts-summary" class="badge badge-xs badge-green font-mono">0 keepers · 0
-                    unselected</span>
-                </div>
-                <div id="curate-m200-new-folder-notice" class="font-mono"
-                  style="display: none; font-size: 0.71rem; padding: 0.38rem 0.55rem; border-radius: 6px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.42); color: #fde68a;">
-                  🔀 New folder name introduced — new folders cannot be copied directly to <code>Curated</code>.
-                  Submitting will consolidate all selected Moments into <code>Moments</code> (<code>M100</code>) and
-                  clean up prior <code>ToBeCurated</code> / source albums.
-                </div>
-                <div
-                  style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; font-size: 0.74rem; color: var(--text-secondary);">
-                  <label style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
-                    <input type="checkbox" id="curate-m200-handle-unselected" checked />
-                    <span>For unselected items:</span>
-                  </label>
-                  <select id="curate-m200-unselected-action" class="form-control"
-                    style="width: auto; min-width: 240px; font-size: 0.72rem; padding: 0.2rem 0.45rem;">
-                    <option value="ignore" selected>🗑️ Add to Ignore folder (not needed / exclude)</option>
-                    <option value="skip_publishing">⏭️ Move to SkipPublishing (similar exists / personal judgment)
-                    </option>
-                  </select>
-                </div>
-                <label id="curate-m200-delete-tbc-row"
-                  style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
-                  <input type="checkbox" id="curate-m200-delete-tbc" checked />
-                  <span>Delete source <code>ToBeCurated</code> album in Apple Photos cleanly</span>
-                </label>
-                <label id="curate-m200-export-row"
-                  style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
-                  <input type="checkbox" id="curate-m200-export-lacie" checked />
-                  <span>Run final step: export <code>Curated / Target</code> to LaCie &amp; promote stage to
-                    <code>M400</code> (Option [2])</span>
-                </label>
-              </div>
-            </div>
-
-            <div id="resolve-disjoint-status" class="dedup-status-banner" style="display: none; font-size: 0.76rem;">
+              <label id="curate-m200-export-row"
+                style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
+                <input type="checkbox" id="curate-m200-export-lacie" checked />
+                <span>Run final step: export <code>Curated / Target</code> to LaCie &amp; promote stage to
+                  <code>M400</code> (Option [2])</span>
+              </label>
             </div>
           </div>
-          <div class="modal-footer" style="justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
-            <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
-              <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-skip"
-                title="Move selected assets to Moments/SkipPublishing album in Apple Photos">⏭️ Skip Publishing</button>
-              <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-ignore"
-                style="border-color: rgba(239, 68, 68, 0.45); color: #fca5a5;"
-                title="Exclude selected assets from Organizer & update DB">🗑️ Ignore Selected</button>
-              <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-legacy-merge"
-                style="border-color: rgba(245, 158, 11, 0.45); color: #fde68a;"
-                title="Legacy: Merge only disjoint source asset(s) into the specified existing Target Moment">🔀 Merge
-                into Target</button>
-            </div>
-            <div style="display: flex; align-items: center; gap: 0.5rem;">
-              <button type="button" class="btn btn-outline btn-close-resolve-disjoint-modal"
-                id="btn-cancel-resolve-disjoint">Cancel</button>
-              <button type="button" class="btn btn-purple" id="btn-submit-resolve-disjoint"
-                title="Recommended: Consolidate source(s) + apply DB tags into a New Paradigm formatted Moment">✨ Merge
-                &amp; Tag into New Moment</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
 
-    <div class="modal-backdrop" id="modal-resolve-action-confirm" style="z-index: 340;">
-      <div class="modal-dialog" style="width: 600px; max-width: 94vw; border-color: rgba(139, 92, 246, 0.45);">
-        <div class="modal-header">
-          <h3 id="resolve-confirm-title">📋 Confirm Action Steps</h3>
-          <button type="button" class="btn-icon btn-close-resolve-confirm-modal" aria-label="Close">✕</button>
-        </div>
-        <div class="modal-body" style="display: flex; flex-direction: column; gap: 0.75rem;">
-          <div id="resolve-confirm-subtitle" class="font-mono text-muted" style="font-size: 0.76rem;"></div>
-          <ol id="resolve-confirm-steps-list"
-            style="margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.8rem; color: var(--text-primary); line-height: 1.45;">
-          </ol>
-          <div id="resolve-confirm-note" class="dedup-status-banner"
-            style="padding: 0.45rem 0.65rem; font-size: 0.74rem; border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.08); color: #a7f3d0;">
-          </div>
-        </div>
-        <div class="modal-footer" style="justify-content: flex-end; gap: 0.5rem;">
-          <button type="button" class="btn btn-outline btn-close-resolve-confirm-modal" id="btn-resolve-confirm-back">←
-            Back &amp; Edit</button>
-          <button type="button" class="btn btn-purple" id="btn-resolve-confirm-proceed">✨ Confirm &amp; Execute</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal-backdrop" id="modal-month-selection-detail" style="z-index: 335;">
-      <div class="modal-dialog" style="width: 680px; max-width: 94vw; border-color: rgba(168, 85, 247, 0.45);">
-        <div class="modal-header">
-          <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-            <h3 id="ms-detail-title">📅 Apple Photos Month Selection</h3>
-            <span class="badge badge-xs font-mono" id="ms-detail-status-badge">Checking...</span>
-          </div>
-          <button type="button" class="btn-icon btn-close-ms-detail-modal" aria-label="Close">✕</button>
-        </div>
-        <div class="modal-body"
-          style="display: flex; flex-direction: column; gap: 0.75rem; max-height: 75vh; overflow-y: auto;">
-          <div id="ms-detail-banner" class="dedup-status-banner"
-            style="display: none; font-size: 0.76rem; line-height: 1.45;"></div>
-
-          <div id="ms-detail-meta"
-            style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.55rem; padding: 0.65rem 0.75rem; border-radius: 8px; background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(148, 163, 184, 0.16); font-size: 0.75rem;">
-          </div>
-
-          <div id="ms-detail-live-box" class="dedup-status-banner" style="display: none; font-size: 0.75rem;"></div>
-
-          <div style="display: flex; flex-direction: column; gap: 0.35rem;">
-            <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
-              <span class="font-mono text-muted"
-                style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;"
-                id="ms-detail-assets-heading">Album Assets</span>
-              <span class="font-mono text-muted" style="font-size: 0.69rem;" id="ms-detail-sync-note"></span>
-            </div>
-            <div id="ms-detail-assets-list"
-              style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.45rem;"></div>
-          </div>
-
-          <div id="ms-detail-action-status" class="dedup-status-banner" style="display: none; font-size: 0.75rem;">
+          <div id="resolve-disjoint-status" class="dedup-status-banner" style="display: none; font-size: 0.76rem;">
           </div>
         </div>
         <div class="modal-footer" style="justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
-          <button type="button" class="btn btn-xs btn-outline" id="btn-ms-detail-recheck"
-            title="Re-check media_organizer_albums & live Photos.app for this Month Selection album">
-            🔄 Re-check Photos DB
-          </button>
-          <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-            <button type="button" class="btn btn-outline btn-close-ms-detail-modal"
-              id="btn-ms-detail-close">Close</button>
-            <button type="button" class="btn btn-purple" id="btn-ms-detail-create-empty" style="display: none;"
-              title="Create an empty month folder under Apple Photos / Media Organizer on LaCie / Apple Photos Month Selection">
-              📁 Create Empty Folder
-            </button>
-            <button type="button" class="btn btn-purple" id="btn-ms-detail-queue-ready" style="display: none;">➕ Queue
-              (500➜650)</button>
-            <button type="button" class="btn btn-amber" id="btn-ms-detail-override" style="display: none;"
-              title="Bypass missing/empty Apple Photos Month Selection check and add batch to planned_execution queue">
-              ⚠️ Override &amp; Queue Anyway
-            </button>
+          <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+            <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-skip"
+              title="Move selected assets to Moments/SkipPublishing album in Apple Photos">⏭️ Skip Publishing</button>
+            <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-ignore"
+              style="border-color: rgba(239, 68, 68, 0.45); color: #fca5a5;"
+              title="Exclude selected assets from Organizer & update DB">🗑️ Ignore Selected</button>
+            <button type="button" class="btn btn-xs btn-outline" id="btn-resolve-disjoint-legacy-merge"
+              style="border-color: rgba(245, 158, 11, 0.45); color: #fde68a;"
+              title="Legacy: Merge only disjoint source asset(s) into the specified existing Target Moment">🔀 Merge
+              into Target</button>
+          </div>
+          <div style="display: flex; align-items: center; gap: 0.5rem;">
+            <button type="button" class="btn btn-outline btn-close-resolve-disjoint-modal"
+              id="btn-cancel-resolve-disjoint">Cancel</button>
+            <button type="button" class="btn btn-purple" id="btn-submit-resolve-disjoint"
+              title="Recommended: Consolidate source(s) + apply DB tags into a New Paradigm formatted Moment">✨ Merge
+              &amp; Tag into New Moment</button>
           </div>
         </div>
       </div>
     </div>
+  </div>
 
-    <script type="module" src="/src/main.ts"></script>
+  <div class="modal-backdrop" id="modal-resolve-action-confirm" style="z-index: 340;">
+    <div class="modal-dialog" style="width: 600px; max-width: 94vw; border-color: rgba(139, 92, 246, 0.45);">
+      <div class="modal-header">
+        <h3 id="resolve-confirm-title">📋 Confirm Action Steps</h3>
+        <button type="button" class="btn-icon btn-close-resolve-confirm-modal" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 0.75rem;">
+        <div id="resolve-confirm-subtitle" class="font-mono text-muted" style="font-size: 0.76rem;"></div>
+        <ol id="resolve-confirm-steps-list"
+          style="margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.8rem; color: var(--text-primary); line-height: 1.45;">
+        </ol>
+        <div id="resolve-confirm-note" class="dedup-status-banner"
+          style="padding: 0.45rem 0.65rem; font-size: 0.74rem; border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.08); color: #a7f3d0;">
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content: flex-end; gap: 0.5rem;">
+        <button type="button" class="btn btn-outline btn-close-resolve-confirm-modal" id="btn-resolve-confirm-back">←
+          Back &amp; Edit</button>
+        <button type="button" class="btn btn-purple" id="btn-resolve-confirm-proceed">✨ Confirm &amp; Execute</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-month-selection-detail" style="z-index: 335;">
+    <div class="modal-dialog" style="width: 680px; max-width: 94vw; border-color: rgba(168, 85, 247, 0.45);">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+          <h3 id="ms-detail-title">📅 Apple Photos Month Selection</h3>
+          <span class="badge badge-xs font-mono" id="ms-detail-status-badge">Checking...</span>
+        </div>
+        <button type="button" class="btn-icon btn-close-ms-detail-modal" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body"
+        style="display: flex; flex-direction: column; gap: 0.75rem; max-height: 75vh; overflow-y: auto;">
+        <div id="ms-detail-banner" class="dedup-status-banner"
+          style="display: none; font-size: 0.76rem; line-height: 1.45;"></div>
+
+        <div id="ms-detail-meta"
+          style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.55rem; padding: 0.65rem 0.75rem; border-radius: 8px; background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(148, 163, 184, 0.16); font-size: 0.75rem;">
+        </div>
+
+        <div id="ms-detail-live-box" class="dedup-status-banner" style="display: none; font-size: 0.75rem;"></div>
+
+        <div style="display: flex; flex-direction: column; gap: 0.35rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+            <span class="font-mono text-muted"
+              style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;"
+              id="ms-detail-assets-heading">Album Assets</span>
+            <span class="font-mono text-muted" style="font-size: 0.69rem;" id="ms-detail-sync-note"></span>
+          </div>
+          <div id="ms-detail-assets-list"
+            style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.45rem;"></div>
+        </div>
+
+        <div id="ms-detail-action-status" class="dedup-status-banner" style="display: none; font-size: 0.75rem;">
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+        <button type="button" class="btn btn-xs btn-outline" id="btn-ms-detail-recheck"
+          title="Re-check media_organizer_albums & live Photos.app for this Month Selection album">
+          🔄 Re-check Photos DB
+        </button>
+        <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+          <button type="button" class="btn btn-outline btn-close-ms-detail-modal"
+            id="btn-ms-detail-close">Close</button>
+          <button type="button" class="btn btn-purple" id="btn-ms-detail-create-empty" style="display: none;"
+            title="Create an empty month folder under Apple Photos / Media Organizer on LaCie / Apple Photos Month Selection">
+            📁 Create Empty Folder
+          </button>
+          <button type="button" class="btn btn-purple" id="btn-ms-detail-queue-ready" style="display: none;">➕ Queue
+            (500➜650)</button>
+          <button type="button" class="btn btn-amber" id="btn-ms-detail-override" style="display: none;"
+            title="Bypass missing/empty Apple Photos Month Selection check and add batch to planned_execution queue">
+            ⚠️ Override &amp; Queue Anyway
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
 </body>
 
 </html>

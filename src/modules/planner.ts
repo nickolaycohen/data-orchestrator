@@ -15,6 +15,8 @@ import type {
   MemoriesFolderItem,
   MemoriesFoldersResponse,
   ModeMDedupApplyResponse,
+  AllGroupingsResponse,
+  GroupingAssetsResponse,
   ModeMDedupDuplicate,
   ModeMDedupPreviewResponse,
   MomentAssetsPreviewResponse,
@@ -32,7 +34,9 @@ import type {
   SearchMomentItem,
   SearchMomentsResponse,
   TagCatalogItem,
-  TagLookupResponse
+  TagLookupResponse,
+  UnifiedGroupingAssetItem,
+  UnifiedGroupingItem
 } from '../types/api.ts';
 import { candidateAssetMeta, escapeHtml, formatBytes, formatDuration } from '../utils/formatters.ts';
 import { openCleanupPreviewModal } from './cleanup.ts';
@@ -41,10 +45,21 @@ let plannerOverviewData: PlannerOverviewResponse | null = null;
 type PlannerModeTarget = 'b' | 'm' | 'all';
 const activePlannerFetchByMode: Partial<Record<PlannerModeTarget, Promise<void>>> = {};
 const pendingPlannerRefreshByMode: Partial<Record<PlannerModeTarget, boolean>> = {};
-let activePlannerModeView: 'b' | 'm' | 'c' = 'b';
+let activePlannerModeView: 'b' | 'm' | 'g' | 'c' = 'b';
 let modeBLoaded = false;
 let modeMLoaded = false;
 let foldersLoaded = false;
+let allGroupingsLoaded = false;
+let isFetchingAllGroupings = false;
+let allGroupingsData: AllGroupingsResponse | null = null;
+let allGroupingsSortMode: 'avg_score' | 'qual_avg' | 'count' | 'rank_score' | 'date' = 'avg_score';
+let allGroupingsStatusFilter = 'all';
+let allGroupingsBatchFilter: 'all' | '600_plus' | 'under_600' = 'all';
+let allGroupingsSearchQuery = '';
+const expandedUnifiedGroupingIds = new Set<string>();
+const unifiedGroupingAssetsCache = new Map<string, UnifiedGroupingAssetItem[]>();
+const unifiedGroupingSelectedIds = new Map<string, Set<string>>();
+const unifiedGroupingCuratedOnly = new Set<string>();
 let unassignedSortMode: 'size' | 'score' | 'date' = 'size';
 let unassignedSearchQuery = '';
 const expandedUnassignedFolders = new Set<string>();
@@ -301,9 +316,9 @@ function savePostAppleReloadState(): void {
   }
 }
 
-let cachedPostAppleReloadState: { tab: string; modeView: 'b' | 'm' | 'c' } | null | undefined;
+let cachedPostAppleReloadState: { tab: string; modeView: 'b' | 'm' | 'g' | 'c' } | null | undefined;
 
-export function consumePostAppleReloadState(): { tab: string; modeView: 'b' | 'm' | 'c' } | null {
+export function consumePostAppleReloadState(): { tab: string; modeView: 'b' | 'm' | 'g' | 'c' } | null {
   if (cachedPostAppleReloadState !== undefined) {
     return cachedPostAppleReloadState;
   }
@@ -319,7 +334,8 @@ export function consumePostAppleReloadState(): { tab: string; modeView: 'b' | 'm
       cachedPostAppleReloadState = null;
       return null;
     }
-    const modeView = parsed.modeView === 'm' || parsed.modeView === 'c' ? parsed.modeView : 'b';
+    const modeView =
+      parsed.modeView === 'm' || parsed.modeView === 'g' || parsed.modeView === 'c' ? parsed.modeView : 'b';
     const tab = typeof parsed.tab === 'string' && parsed.tab ? parsed.tab : 'media';
     cachedPostAppleReloadState = { tab, modeView };
     return cachedPostAppleReloadState;
@@ -531,7 +547,7 @@ export function updateClustersBgSyncStatus(bg: {
   renderClustersSyncUI();
 }
 
-function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
+function applyPlannerModeView(view: 'b' | 'm' | 'g' | 'c'): void {
   activePlannerModeView = view;
 
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(t => {
@@ -541,6 +557,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
   const grid = document.getElementById('planner-modes-grid');
   const cardB = document.getElementById('planner-mode-b-card');
   const cardM = document.getElementById('planner-mode-m-card');
+  const cardG = document.getElementById('all-groupings-card');
   const cardC = document.getElementById('media-cleanup-card');
   const cardPub = document.getElementById('published-memories-card');
   const cardFolders = document.getElementById('mode-m-folders-block');
@@ -556,6 +573,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     }
     if (cardB) cardB.style.display = 'flex';
     if (cardM) cardM.style.display = 'none';
+    if (cardG) cardG.style.display = 'none';
     if (cardC) cardC.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardFolders) cardFolders.style.display = 'none';
@@ -569,6 +587,7 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     }
     if (cardB) cardB.style.display = 'none';
     if (cardM) cardM.style.display = 'flex';
+    if (cardG) cardG.style.display = 'none';
     if (cardC) cardC.style.display = 'none';
     if (cardPub) cardPub.style.display = 'block';
     if (cardFolders) cardFolders.style.display = 'block';
@@ -578,12 +597,25 @@ function applyPlannerModeView(view: 'b' | 'm' | 'c'): void {
     if (!foldersLoaded) {
       void fetchMemoriesFolders();
     }
+  } else if (view === 'g') {
+    closeIntakeDedupModal();
+    if (grid) grid.style.display = 'none';
+    if (cardB) cardB.style.display = 'none';
+    if (cardM) cardM.style.display = 'none';
+    if (cardC) cardC.style.display = 'none';
+    if (cardPub) cardPub.style.display = 'none';
+    if (cardFolders) cardFolders.style.display = 'none';
+    if (cardG) cardG.style.display = 'block';
+    if (!allGroupingsLoaded) {
+      void fetchAllUnifiedGroupings(false);
+    }
   } else if (view === 'c') {
     closeIntakeDedupModal();
     closeCreateMomentModal();
     closePublishMomentModal();
     closeResolveDisjointModal();
     if (grid) grid.style.display = 'none';
+    if (cardG) cardG.style.display = 'none';
     if (cardPub) cardPub.style.display = 'none';
     if (cardFolders) cardFolders.style.display = 'none';
     if (cardC) {
@@ -596,10 +628,10 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   plannerRefreshExecutorCb = onRefreshExecutor;
   plannerRefreshMediaMetricsCb = onRefreshMediaMetrics;
 
-  // Mode view tabs ([B] | [M] | [C])
+  // Mode view tabs ([B] | [M] | [G] | [C])
   document.querySelectorAll<HTMLElement>('.planner-mode-tab').forEach(tab => {
     tab.addEventListener('click', () => {
-      const view = (tab.dataset.modeView as 'b' | 'm' | 'c') || 'b';
+      const view = (tab.dataset.modeView as 'b' | 'm' | 'g' | 'c') || 'b';
       applyPlannerModeView(view);
     });
   });
@@ -686,10 +718,14 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     const btn = document.getElementById('btn-refresh-planner-overview') as HTMLButtonElement | null;
     if (activePlannerModeView === 'm') {
       void refreshModeMFull(btn);
+    } else if (activePlannerModeView === 'g') {
+      void fetchAllUnifiedGroupings(true);
     } else if (activePlannerModeView === 'b') {
       void fetchPlannerOverview(true, 'b');
     }
   });
+
+  setupAllGroupingsListeners();
 
   document.getElementById('btn-refresh-unassigned-clusters')?.addEventListener('click', () => {
     const btn = document.getElementById('btn-refresh-unassigned-clusters') as HTMLButtonElement | null;
@@ -1020,15 +1056,14 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     const btnOverride = document.getElementById('btn-ms-detail-override');
 
     if (badgeEl) {
-      badgeEl.className = `badge badge-xs font-mono ${
-        ms.ready ? 'badge-green' : ms.exists ? 'badge-amber' : 'badge-red'
-      }`;
+      badgeEl.className = `badge badge-xs font-mono ${ms.ready ? 'badge-green' : ms.exists ? 'badge-amber' : 'badge-red'
+        }`;
       const albLabel = ms.matched_album_name || ms.expected_album;
       badgeEl.textContent = ms.ready
         ? `✓ Ready (${ms.asset_count})`
         : ms.exists
-        ? `⚠️ ${albLabel} Folder is empty`
-        : `⚠️ Missing Album`;
+          ? `⚠️ ${albLabel} Folder is empty`
+          : `⚠️ Missing Album`;
     }
 
     if (bannerEl) {
@@ -1349,11 +1384,16 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
 const queuedPlannerFetchByMode: Partial<Record<PlannerModeTarget, Promise<void>>> = {};
 
 export async function fetchPlannerOverview(force = false, targetMode?: PlannerModeTarget): Promise<void> {
-  if (!targetMode && activePlannerModeView === 'c') {
+  if (!targetMode && (activePlannerModeView === 'c' || activePlannerModeView === 'g')) {
     if (force) {
       modeBLoaded = false;
       modeMLoaded = false;
       foldersLoaded = false;
+      if (activePlannerModeView === 'g') {
+        await fetchAllUnifiedGroupings(true);
+      } else {
+        allGroupingsLoaded = false;
+      }
     }
     return;
   }
@@ -1375,7 +1415,7 @@ export async function fetchPlannerOverview(force = false, targetMode?: PlannerMo
     pendingPlannerRefreshByMode[mode] = true;
     if (!queuedPlannerFetchByMode[mode]) {
       queuedPlannerFetchByMode[mode] = inFlight
-        .catch(() => {})
+        .catch(() => { })
         .then(() => {
           delete queuedPlannerFetchByMode[mode];
           pendingPlannerRefreshByMode[mode] = false;
@@ -1716,13 +1756,13 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
     const label = ms.ready
       ? `✓ ${albLabel} (${ms.asset_count})`
       : ms.exists
-      ? `⚠️ ${albLabel} Folder is empty`
-      : `⚠️ Missing (${ms.expected_album})`;
+        ? `⚠️ ${albLabel} Folder is empty`
+        : `⚠️ Missing (${ms.expected_album})`;
     const title = ms.ready
       ? `Click for details: Apple Photos Month Selection / ${albLabel} (${ms.asset_count} assets)`
       : ms.exists
-      ? `Click for details: ${albLabel} Folder exists under Apple Photos Month Selection with 0 assets`
-      : `Click for details: Missing folder '${ms.expected_album}' under Apple Photos Month Selection`;
+        ? `Click for details: ${albLabel} Folder exists under Apple Photos Month Selection with 0 assets`
+        : `Click for details: Missing folder '${ms.expected_album}' under Apple Photos Month Selection`;
     const mainBtn = `<button type="button" class="badge badge-xs ${cls} font-mono" style="cursor: pointer;" onclick="window.openMonthSelectionDialog('${escapeHtml(
       item.month
     )}', { sourceStep: '${sourceStep}' })" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
@@ -1808,8 +1848,8 @@ function renderModeBOverview(modeB: Partial<PlannerModeB>): void {
             (item.fav_assets || 0) > 0
               ? `<span class="badge badge-xs badge-green font-mono">⭐ ${item.fav_assets}</span>`
               : item.is_bypassed
-              ? `<span class="badge badge-xs badge-outline">Bypassed</span>`
-              : `<span class="text-muted font-mono">0</span>`;
+                ? `<span class="badge badge-xs badge-outline">Bypassed</span>`
+                : `<span class="text-muted font-mono">0</span>`;
           const msBadge = renderAppleMonthSelectionCell(item, 'step3');
           const actionBtn = item.in_queue
             ? `<button class="btn btn-xs btn-outline" onclick="window.runPlannerBatchAction('${escapeHtml(item.month)}', 'remove_queue')" title="Remove from planned_execution queue">✓ Queued (Dequeue)</button>`
@@ -1986,52 +2026,52 @@ function renderCliSimPendingSection(
     totalCount: number;
     showTbc: boolean;
   }> = [
-    {
-      key: 'publishable_tbc',
-      shortLabel: '⚠️ TBC',
-      badgeCls: 'badge-amber',
-      title: '⚠️ 🚀 Ready for Publishing (Action Required: Assets in ToBeCurated Need Review & Move to Curated)',
-      rows: pp.publishable_tbc || [],
-      totalCount: c.publishable_tbc_total ?? (pp.publishable_tbc || []).length,
-      showTbc: true
-    },
-    {
-      key: 'publishable_clean',
-      shortLabel: '🚀 Clean',
-      badgeCls: 'badge-green',
-      title: '🚀 Ready for Publishing (Fully Curated — No Assets in ToBeCurated, Ready to Export)',
-      rows: pp.publishable_clean || [],
-      totalCount: c.publishable_clean_total ?? (pp.publishable_clean || []).length,
-      showTbc: false
-    },
-    {
-      key: 'pending_curation',
-      shortLabel: '⏳ Curation',
-      badgeCls: 'badge-purple',
-      title: '⏳ Pending Curation (New Assets in ToBeCurated)',
-      rows: pp.pending_curation || [],
-      totalCount: c.pending_curation_total ?? (pp.pending_curation || []).length,
-      showTbc: true
-    },
-    {
-      key: 'pending_cooldown',
-      shortLabel: '⏱️ Cooldown',
-      badgeCls: 'badge-outline',
-      title: '⏱️ Pending Time Restriction (Cooldown Delay < 30d)',
-      rows: pp.pending_cooldown || [],
-      totalCount: c.pending_cooldown_total ?? (pp.pending_cooldown || []).length,
-      showTbc: false
-    },
-    {
-      key: 'disjoint',
-      shortLabel: '🔀 Disjoint',
-      badgeCls: 'badge-red',
-      title: '🔀 Disjoint Moments (< 2 Qualified Assets)',
-      rows: pp.disjoint || [],
-      totalCount: c.disjoint_pending_total ?? (pp.disjoint || []).length,
-      showTbc: false
-    }
-  ];
+      {
+        key: 'publishable_tbc',
+        shortLabel: '⚠️ TBC',
+        badgeCls: 'badge-amber',
+        title: '⚠️ 🚀 Ready for Publishing (Action Required: Assets in ToBeCurated Need Review & Move to Curated)',
+        rows: pp.publishable_tbc || [],
+        totalCount: c.publishable_tbc_total ?? (pp.publishable_tbc || []).length,
+        showTbc: true
+      },
+      {
+        key: 'publishable_clean',
+        shortLabel: '🚀 Clean',
+        badgeCls: 'badge-green',
+        title: '🚀 Ready for Publishing (Fully Curated — No Assets in ToBeCurated, Ready to Export)',
+        rows: pp.publishable_clean || [],
+        totalCount: c.publishable_clean_total ?? (pp.publishable_clean || []).length,
+        showTbc: false
+      },
+      {
+        key: 'pending_curation',
+        shortLabel: '⏳ Curation',
+        badgeCls: 'badge-purple',
+        title: '⏳ Pending Curation (New Assets in ToBeCurated)',
+        rows: pp.pending_curation || [],
+        totalCount: c.pending_curation_total ?? (pp.pending_curation || []).length,
+        showTbc: true
+      },
+      {
+        key: 'pending_cooldown',
+        shortLabel: '⏱️ Cooldown',
+        badgeCls: 'badge-outline',
+        title: '⏱️ Pending Time Restriction (Cooldown Delay < 30d)',
+        rows: pp.pending_cooldown || [],
+        totalCount: c.pending_cooldown_total ?? (pp.pending_cooldown || []).length,
+        showTbc: false
+      },
+      {
+        key: 'disjoint',
+        shortLabel: '🔀 Disjoint',
+        badgeCls: 'badge-red',
+        title: '🔀 Disjoint Moments (< 2 Qualified Assets)',
+        rows: pp.disjoint || [],
+        totalCount: c.disjoint_pending_total ?? (pp.disjoint || []).length,
+        showTbc: false
+      }
+    ];
 
   const totalPendingRows = subsections.reduce((acc, s) => acc + s.rows.length, 0);
   const totalPendingAll = subsections.reduce((acc, s) => acc + s.totalCount, 0);
@@ -2043,8 +2083,7 @@ function renderCliSimPendingSection(
     .filter(s => s.totalCount > 0)
     .map(
       s =>
-        `<span class="badge badge-xs ${s.badgeCls} font-mono">${escapeHtml(s.shortLabel)}: ${s.rows.length}${
-          s.totalCount > s.rows.length ? `/${s.totalCount}` : ''
+        `<span class="badge badge-xs ${s.badgeCls} font-mono">${escapeHtml(s.shortLabel)}: ${s.rows.length}${s.totalCount > s.rows.length ? `/${s.totalCount}` : ''
         }</span>`
     )
     .join(' ');
@@ -2099,20 +2138,18 @@ function renderCliSimPendingSection(
           if (sub.key === 'publishable_tbc') {
             actionCellHtml = `<div style="display: inline-flex; gap: 0.3rem; flex-wrap: nowrap;">
               <button type="button" class="btn btn-xs btn-purple btn-cli-sim-curate" data-moment-name="${escapeHtml(
-                entry.moment_name
-              )}" title="Curate ToBeCurated (${entry.to_be_curated_count}) into Curated & Ignore/Skip rejects">🎨 Curate (${entry.to_be_curated_count})</button>
-              <button type="button" class="btn btn-xs ${
-                entry.published > 0 ? 'btn-purple' : 'btn-green'
+              entry.moment_name
+            )}" title="Curate ToBeCurated (${entry.to_be_curated_count}) into Curated & Ignore/Skip rejects">🎨 Curate (${entry.to_be_curated_count})</button>
+              <button type="button" class="btn btn-xs ${entry.published > 0 ? 'btn-purple' : 'btn-green'
               } btn-cli-sim-publish" data-moment-name="${escapeHtml(
                 entry.moment_name
               )}" title="Review & publish batch for '${escapeHtml(entry.moment_name)}'">🚀 Publish</button>
             </div>`;
           } else if (sub.key === 'publishable_clean') {
-            actionCellHtml = `<button type="button" class="btn btn-xs ${
-              entry.published > 0 ? 'btn-purple' : 'btn-green'
-            } btn-cli-sim-publish" data-moment-name="${escapeHtml(
-              entry.moment_name
-            )}" title="Review & publish batch for '${escapeHtml(entry.moment_name)}'">🚀 Publish</button>`;
+            actionCellHtml = `<button type="button" class="btn btn-xs ${entry.published > 0 ? 'btn-purple' : 'btn-green'
+              } btn-cli-sim-publish" data-moment-name="${escapeHtml(
+                entry.moment_name
+              )}" title="Review & publish batch for '${escapeHtml(entry.moment_name)}'">🚀 Publish</button>`;
           } else if (sub.key === 'disjoint') {
             actionCellHtml = `<button type="button" class="btn btn-xs btn-amber btn-cli-sim-merge" data-moment-name="${escapeHtml(
               entry.moment_name
@@ -2240,32 +2277,32 @@ function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
   const consoleBodyHtml = !consoleRows.length
     ? '<tr><td colspan="13" class="text-center text-muted">No ranked moments in CLI Step 2 console table.</td></tr>'
     : consoleRows
-        .map((m: CliStep2ConsoleMomentRow) => {
-          let divider = '';
-          if (m.needs_update && !needsUpdateHeaderPrinted) {
-            needsUpdateHeaderPrinted = true;
-            divider = `
+      .map((m: CliStep2ConsoleMomentRow) => {
+        let divider = '';
+        if (m.needs_update && !needsUpdateHeaderPrinted) {
+          needsUpdateHeaderPrinted = true;
+          divider = `
               <tr class="cli-sim-divider-row">
                 <td colspan="13">--- Moments Requiring Curation Updates (Run Option [1] to sync proposed assets to ToBeCurated) ---</td>
               </tr>
             `;
-          } else if (!m.needs_update && !upToDateHeaderPrinted) {
-            upToDateHeaderPrinted = true;
-            divider = `
+        } else if (!m.needs_update && !upToDateHeaderPrinted) {
+          upToDateHeaderPrinted = true;
+          divider = `
               <tr class="cli-sim-divider-row">
                 <td colspan="13">--- Up-To-Date Moments (All qualified assets are already curated or in ToBeCurated) ---</td>
               </tr>
             `;
-          }
-          const scoreRange = `${m.avg_score.toFixed(4)} (${m.min_score.toFixed(3)}..${m.max_score.toFixed(3)})`;
-          const pubAvgDisplay = m.pub_count > 0 ? `${m.pub_avg_str} (${m.pub_range_str})` : '—';
-          const showCurateBtn = m.display_stage === 'M200' || m.display_stage === 'M300' || m.to_be_curated_exists;
-          const rowActionHtml = showCurateBtn
-            ? `<button type="button" class="btn btn-xs btn-purple btn-cli-sim-curate" data-moment-name="${escapeHtml(
-                m.moment_name
-              )}" title="Open Tagging & M200 Curation dialog (approve keepers ➜ Curated, Ignore/Skip rejects, delete ToBeCurated, export)">🎨 Curate</button>`
-            : '<span class="text-muted font-mono" style="font-size: 0.68rem;">—</span>';
-          return `${divider}
+        }
+        const scoreRange = `${m.avg_score.toFixed(4)} (${m.min_score.toFixed(3)}..${m.max_score.toFixed(3)})`;
+        const pubAvgDisplay = m.pub_count > 0 ? `${m.pub_avg_str} (${m.pub_range_str})` : '—';
+        const showCurateBtn = m.display_stage === 'M200' || m.display_stage === 'M300' || m.to_be_curated_exists;
+        const rowActionHtml = showCurateBtn
+          ? `<button type="button" class="btn btn-xs btn-purple btn-cli-sim-curate" data-moment-name="${escapeHtml(
+            m.moment_name
+          )}" title="Open Tagging & M200 Curation dialog (approve keepers ➜ Curated, Ignore/Skip rejects, delete ToBeCurated, export)">🎨 Curate</button>`
+          : '<span class="text-muted font-mono" style="font-size: 0.68rem;">—</span>';
+        return `${divider}
             <tr>
               <td class="font-mono text-muted">${m.no}</td>
               <td><strong class="text-primary">${escapeHtml(m.moment_name)}</strong></td>
@@ -2282,8 +2319,8 @@ function renderModeMCliStep2Sim(sim?: CliStep2Simulation | null): void {
               <td style="white-space: nowrap;">${rowActionHtml}</td>
             </tr>
           `;
-        })
-        .join('');
+      })
+      .join('');
 
   const consoleSectionHtml = `
     <div class="cli-sim-section-block">
@@ -2409,9 +2446,8 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
       headlineEl.textContent = `Step 1: Sync ${needsSync.length} Moment(s) Requiring Curation Updates (${names}) ➜ Step 2: Publish Top ${recs.length} Ready Moments`;
     }
     if (detailEl) {
-      detailEl.textContent = `👉 Run Option [1] to sync new qualified assets to ToBeCurated in Apple Photos, or publish top ready candidate: ${
-        recs[0] ? `${recs[0].moment_name} (${recs[0].action})` : '—'
-      }`;
+      detailEl.textContent = `👉 Run Option [1] to sync new qualified assets to ToBeCurated in Apple Photos, or publish top ready candidate: ${recs[0] ? `${recs[0].moment_name} (${recs[0].action})` : '—'
+        }`;
     }
   } else if (!th.aligned) {
     if (headlineEl) {
@@ -2420,9 +2456,8 @@ function renderModeMOverview(modeM: Partial<PlannerModeM>): void {
     if (detailEl) {
       const unassignedCount = modeM.unassigned_total_assets || 0;
       const clusterCount = modeM.unassigned_total_clusters || (modeM.unassigned_clusters || []).length;
-      detailEl.textContent = `👉 ToBeCurated sync is complete. Assign Moments to top unassigned assets (${unassignedCount} across ${clusterCount} clusters) to align threshold${
-        recs[0] ? `; next ready candidate once aligned: ${recs[0].moment_name}` : ''
-      }.`;
+      detailEl.textContent = `👉 ToBeCurated sync is complete. Assign Moments to top unassigned assets (${unassignedCount} across ${clusterCount} clusters) to align threshold${recs[0] ? `; next ready candidate once aligned: ${recs[0].moment_name}` : ''
+        }.`;
     }
   } else if (recs.length > 0) {
     if (headlineEl) {
@@ -3218,33 +3253,29 @@ function renderUnassignedClustersList(): void {
             <div class="unassigned-cluster-info">
               <div class="unassigned-cluster-title-row">
                 <span class="unassigned-cluster-folder">${count === 1 && (cluster.rule_id === 'ungrouped' || cluster.rule_id === 'refused_cluster') ? '🖼️' : '📁'} ${escapeHtml(cluster.folder)}</span>
-                ${
-                  isCompleteGroup
-                    ? `<span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Complete — all ${count} assets in this group are flagged as duplicate copies (no unique assets remain)">✅ Complete (0 unique)</span>`
-                    : `<span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Unique files identified after Media-Intake dedup (${count} total - ${cluster.duplicate_copy_count || 0} dup flagged)">✓ ${uniqueCount} unique</span>`
-                }
+                ${isCompleteGroup
+          ? `<span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Complete — all ${count} assets in this group are flagged as duplicate copies (no unique assets remain)">✅ Complete (0 unique)</span>`
+          : `<span class="badge badge-xs badge-green font-mono" style="font-size: 0.62rem;" title="Unique files identified after Media-Intake dedup (${count} total - ${cluster.duplicate_copy_count || 0} dup flagged)">✓ ${uniqueCount} unique</span>`
+        }
                 <span class="badge badge-xs ${sizeBadgeClass} font-mono">${count} asset${count === 1 ? '' : 's'}</span>
                 <span class="badge badge-xs ${typeBadgeClass}" style="font-size: 0.64rem;">${escapeHtml(cluster.group_type)}</span>
-                ${
-                  cluster.rule_label
-                    ? `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.61rem;" title="${escapeHtml(cluster.rule_reason || cluster.rule_label)}">⚖️ ${escapeHtml(cluster.rule_label)}</span>`
-                    : ''
-                }
-                ${
-                  (cluster.duplicate_copy_count || 0) > 0
-                    ? `<span class="badge badge-xs badge-amber font-mono" style="font-size: 0.62rem;" title="Potential duplicate copy flagged — review via Intake Dedup & Ignore">♻️ ${cluster.duplicate_copy_count} Dup Flagged</span>`
-                    : ''
-                }
+                ${cluster.rule_label
+          ? `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.61rem;" title="${escapeHtml(cluster.rule_reason || cluster.rule_label)}">⚖️ ${escapeHtml(cluster.rule_label)}</span>`
+          : ''
+        }
+                ${(cluster.duplicate_copy_count || 0) > 0
+          ? `<span class="badge badge-xs badge-amber font-mono" style="font-size: 0.62rem;" title="Potential duplicate copy flagged — review via Intake Dedup & Ignore">♻️ ${cluster.duplicate_copy_count} Dup Flagged</span>`
+          : ''
+        }
               </div>
               <div class="unassigned-cluster-meta-row font-mono">
                 <span>Score: <strong class="text-amber">${escapeHtml(cluster.score_span)}</strong></span>
                 <span>•</span>
                 <span>Month(s): <strong>${escapeHtml(cluster.months)}</strong></span>
-                ${
-                  cluster.rule_reason
-                    ? `<span>•</span><span class="text-secondary">${escapeHtml(cluster.rule_reason)}</span>`
-                    : ''
-                }
+                ${cluster.rule_reason
+          ? `<span>•</span><span class="text-secondary">${escapeHtml(cluster.rule_reason)}</span>`
+          : ''
+        }
                 <span>•</span>
                 <span>Log #[${cluster.orig_rank}]</span>
               </div>
@@ -3254,9 +3285,8 @@ function renderUnassignedClustersList(): void {
             <div class="unassigned-thumb-strip">
               ${thumbStripHtml}
             </div>
-            ${
-              cluster.rule_id === 'custom_split'
-                ? `<button
+            ${cluster.rule_id === 'custom_split'
+          ? `<button
               class="btn btn-xs btn-outline btn-clear-split-group"
               data-clear-split-group="${escapeHtml(cluster.folder)}"
               title="Undo manual event split and return assets to automatic grouping"
@@ -3264,11 +3294,10 @@ function renderUnassignedClustersList(): void {
             >
               ↩️ Undo Split
             </button>`
-                : ''
-            }
-            ${
-              count > 1
-                ? `<button
+          : ''
+        }
+            ${count > 1
+          ? `<button
               class="btn btn-xs btn-outline btn-refuse-cluster-group"
               data-refuse-cluster="${escapeHtml(cluster.folder)}"
               title="Refuse '${escapeHtml(cluster.rule_label || 'grouping')}' rule for this group and split into individual assets"
@@ -3276,8 +3305,8 @@ function renderUnassignedClustersList(): void {
             >
               🚫 Refuse Group
             </button>`
-                : cluster.refused_from_group
-                  ? `<button
+          : cluster.refused_from_group
+            ? `<button
               class="btn btn-xs btn-outline btn-restore-cluster-group"
               data-restore-cluster="${escapeHtml(cluster.refused_from_group)}"
               title="Restore grouping for '${escapeHtml(cluster.refused_from_group)}'"
@@ -3285,11 +3314,10 @@ function renderUnassignedClustersList(): void {
             >
               ↩️ Re-group
             </button>`
-                  : ''
-            }
-            ${
-              cluster.rule_id === 'misdated_duplicate_triage' || isCompleteGroup
-                ? `<button
+            : ''
+        }
+            ${cluster.rule_id === 'misdated_duplicate_triage' || isCompleteGroup
+          ? `<button
               class="btn btn-xs btn-danger btn-ignore-triage-cluster"
               data-ignore-cluster="${escapeHtml(cluster.folder)}"
               title="Move all ${count} duplicate/flagged assets into Apple Photos Ignore album"
@@ -3297,8 +3325,8 @@ function renderUnassignedClustersList(): void {
             >
               🗑️ Ignore All (${count})
             </button>`
-                : ''
-            }
+          : ''
+        }
             <button
               class="btn btn-xs btn-purple btn-create-moment-from-cluster"
               data-cluster-folder="${escapeHtml(cluster.folder)}"
@@ -3530,40 +3558,40 @@ function renderUnassignedClustersList(): void {
       const onSelectionChange =
         folder && cardEl && selSet
           ? (changedId: string, checked: boolean) => {
-              const cb = cardEl.querySelector<HTMLInputElement>(
-                `.cluster-asset-checkbox[data-asset-id="${CSS.escape(changedId)}"]`
-              );
-              if (cb) cb.checked = checked;
-              const masterCb = cardEl.querySelector<HTMLInputElement>('.cluster-select-all-checkbox');
-              if (masterCb) {
-                const allCbs = Array.from(cardEl.querySelectorAll<HTMLInputElement>('.cluster-asset-checkbox'));
-                masterCb.checked = allCbs.length > 0 && allCbs.every(item => item.checked);
-              }
-              syncClusterToolbarUI(cardEl, folder);
+            const cb = cardEl.querySelector<HTMLInputElement>(
+              `.cluster-asset-checkbox[data-asset-id="${CSS.escape(changedId)}"]`
+            );
+            if (cb) cb.checked = checked;
+            const masterCb = cardEl.querySelector<HTMLInputElement>('.cluster-select-all-checkbox');
+            if (masterCb) {
+              const allCbs = Array.from(cardEl.querySelectorAll<HTMLInputElement>('.cluster-asset-checkbox'));
+              masterCb.checked = allCbs.length > 0 && allCbs.every(item => item.checked);
             }
+            syncClusterToolbarUI(cardEl, folder);
+          }
           : undefined;
       openCleanupPreviewModal(
         aid,
         groupAssetIds && groupAssetIds.length > 0
           ? {
-              assetIds: groupAssetIds,
-              groupLabel: folder,
-              hideMarkRemoved: true,
-              selectedIds: selSet,
-              onSelectionChange,
-              onRemoveFromGroup:
-                groupAssetIds.length > 1 && folder
-                  ? async (removingAid: string) => {
-                      const activeSet = clusterAssetSelection.get(folder);
-                      if (activeSet) activeSet.delete(removingAid);
-                      return await updateGroupingRules({
-                        split_asset_ids: [removingAid],
-                        split_target_group: '__INDIVIDUAL__',
-                        split_source_group: folder
-                      });
-                    }
-                  : undefined
-            }
+            assetIds: groupAssetIds,
+            groupLabel: folder,
+            hideMarkRemoved: true,
+            selectedIds: selSet,
+            onSelectionChange,
+            onRemoveFromGroup:
+              groupAssetIds.length > 1 && folder
+                ? async (removingAid: string) => {
+                  const activeSet = clusterAssetSelection.get(folder);
+                  if (activeSet) activeSet.delete(removingAid);
+                  return await updateGroupingRules({
+                    split_asset_ids: [removingAid],
+                    split_target_group: '__INDIVIDUAL__',
+                    split_source_group: folder
+                  });
+                }
+                : undefined
+          }
           : { assetIds: [aid], hideMarkRemoved: true, selectedIds: selSet, onSelectionChange }
       );
     });
@@ -4854,11 +4882,11 @@ function renderPublishMomentAssets(): void {
     const tagsHtml =
       a.asset_tags && a.asset_tags.length > 0
         ? `<div style="display: flex; align-items: center; gap: 0.25rem; margin-top: 0.16rem; flex-wrap: wrap;">${a.asset_tags
-            .map(
-              t =>
-                `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.6rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`
-            )
-            .join('')}</div>`
+          .map(
+            t =>
+              `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.6rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`
+          )
+          .join('')}</div>`
         : '';
     return `
       <div class="publish-asset-row${rowCls}">
@@ -4942,11 +4970,10 @@ async function applyPublishBatchCuration(showStatusBanner = true): Promise<boole
   }
   if (statusEl) {
     statusEl.style.display = 'flex';
-    statusEl.innerHTML = `<div class="spinner-sm"></div><span>${
-      skipIds.length > 0
-        ? `Moving ${skipIds.length} unselected asset(s) to SkipPublishing & syncing ${selIds.length} selected to Pub. Rec folder...`
-        : `Syncing ${selIds.length} selected asset(s) to Publishing Recommendation folder...`
-    }</span>`;
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>${skipIds.length > 0
+      ? `Moving ${skipIds.length} unselected asset(s) to SkipPublishing & syncing ${selIds.length} selected to Pub. Rec folder...`
+      : `Syncing ${selIds.length} selected asset(s) to Publishing Recommendation folder...`
+      }</span>`;
   }
 
   try {
@@ -5215,11 +5242,10 @@ async function submitPublishMoment(): Promise<void> {
   }
   if (statusEl) {
     statusEl.style.display = 'flex';
-    statusEl.innerHTML = `<div class="spinner-sm"></div><span>${
-      skipIds.length > 0
-        ? `Moving ${skipIds.length} unselected asset(s) to SkipPublishing & recording publication of ${assetIds.length} asset(s)...`
-        : `Recording publication of ${assetIds.length} asset(s) for <code>${escapeHtml(publishMomentName)}</code>...`
-    }</span>`;
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>${skipIds.length > 0
+      ? `Moving ${skipIds.length} unselected asset(s) to SkipPublishing & recording publication of ${assetIds.length} asset(s)...`
+      : `Recording publication of ${assetIds.length} asset(s) for <code>${escapeHtml(publishMomentName)}</code>...`
+      }</span>`;
   }
 
   let succeeded = false;
@@ -5249,7 +5275,13 @@ async function submitPublishMoment(): Promise<void> {
     }
 
     publishSkippedAssetIds.clear();
-    await Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
+    unifiedGroupingAssetsCache.clear();
+    allGroupingsLoaded = false;
+    await Promise.all([
+      fetchPlannerOverview(true, 'm'),
+      fetchMemoriesFolders(),
+      ...(activePlannerModeView === 'g' ? [fetchAllUnifiedGroupings(true)] : [])
+    ]);
     if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
 
     if (statusEl) {
@@ -5406,21 +5438,20 @@ function renderResolveDisjointAssets(): void {
       const assetTagsHtml =
         a.asset_tags && a.asset_tags.length > 0
           ? `<div style="display: flex; align-items: center; gap: 0.25rem; margin-top: 0.18rem; flex-wrap: wrap;">${a.asset_tags
-              .map(
-                t =>
-                  `<span class="badge badge-xs ${
-                    t.category === 'family_member'
-                      ? 'badge-green'
-                      : t.category === 'people'
-                        ? 'badge-purple'
-                        : t.category === 'activity'
-                          ? 'badge-blue'
-                          : t.category === 'location'
-                            ? 'badge-amber'
-                            : 'badge-outline'
-                  } font-mono" style="font-size: 0.62rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`
-              )
-              .join('')}</div>`
+            .map(
+              t =>
+                `<span class="badge badge-xs ${t.category === 'family_member'
+                  ? 'badge-green'
+                  : t.category === 'people'
+                    ? 'badge-purple'
+                    : t.category === 'activity'
+                      ? 'badge-blue'
+                      : t.category === 'location'
+                        ? 'badge-amber'
+                        : 'badge-outline'
+                } font-mono" style="font-size: 0.62rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`
+            )
+            .join('')}</div>`
           : '';
       const rowStateCls = checked ? ' is-selected' : ' is-unselected-grey';
       return `
@@ -5926,11 +5957,10 @@ function populateTagCategoryDropdownMenu(
     });
 
   if (!matching.length) {
-    menuEl.innerHTML = `<div class="tag-category-dropdown-empty">${
-      catalog.length
-        ? `No applied ${escapeHtml(catLabel)} tag matches "${escapeHtml(filterText.trim())}"`
-        : `No applied DB tags in ${escapeHtml(catLabel)} yet`
-    }</div>`;
+    menuEl.innerHTML = `<div class="tag-category-dropdown-empty">${catalog.length
+      ? `No applied ${escapeHtml(catLabel)} tag matches "${escapeHtml(filterText.trim())}"`
+      : `No applied DB tags in ${escapeHtml(catLabel)} yet`
+      }</div>`;
     return;
   }
 
@@ -5992,18 +6022,18 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
       const pillsHtml = !catTags.length
         ? `<span class="text-muted font-mono" style="font-size: 0.64rem; opacity: 0.7;">${c.optional ? 'Optional' : 'No tags'}</span>`
         : catTags
-            .map(tag => {
-              const dbStat = state.tagDbCounts[tag.tag_value.toLowerCase()];
-              const dbCount = dbStat?.assets ?? tag.tagged_asset_count ?? 0;
-              const dbMoments = dbStat?.moments ?? 0;
-              const dbTitle =
-                dbCount > 0
-                  ? `In DB (${dbCount} asset(s)${dbMoments > 0 ? ` across ${dbMoments} moment(s)` : ''}) — click to query DB assets tagged '${tag.tag_value}'`
-                  : `Query assets in DB tagged '${tag.tag_value}'`;
-              const dbBadge = dbCount > 0 ? `<span class="tag-pill-db-count">DB</span>` : '';
-              const queryKey = `${c.key}:${tag.tag_value.toLowerCase()}`;
-              const isActive = state.activeQueriedTagKey === queryKey;
-              return `
+          .map(tag => {
+            const dbStat = state.tagDbCounts[tag.tag_value.toLowerCase()];
+            const dbCount = dbStat?.assets ?? tag.tagged_asset_count ?? 0;
+            const dbMoments = dbStat?.moments ?? 0;
+            const dbTitle =
+              dbCount > 0
+                ? `In DB (${dbCount} asset(s)${dbMoments > 0 ? ` across ${dbMoments} moment(s)` : ''}) — click to query DB assets tagged '${tag.tag_value}'`
+                : `Query assets in DB tagged '${tag.tag_value}'`;
+            const dbBadge = dbCount > 0 ? `<span class="tag-pill-db-count">DB</span>` : '';
+            const queryKey = `${c.key}:${tag.tag_value.toLowerCase()}`;
+            const isActive = state.activeQueriedTagKey === queryKey;
+            return `
                 <span class="tag-pill-card${tag.include_in_name ? ' included' : ''}${isActive ? ' active-query' : ''}">
                   <input type="checkbox" class="tag-pill-check" data-cat="${c.key}" data-val="${escapeHtml(tag.tag_value)}" ${tag.include_in_name ? 'checked' : ''} title="Include '${escapeHtml(tag.tag_value)}' when composing folder name" />
                   <button type="button" class="tag-pill-query-btn" data-cat="${c.key}" data-val="${escapeHtml(tag.tag_value)}" title="${escapeHtml(dbTitle)}">
@@ -6012,8 +6042,8 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
                   <button type="button" class="tag-pill-remove-btn" data-cat="${c.key}" data-val="${escapeHtml(tag.tag_value)}" aria-label="Remove tag" title="Remove tag">×</button>
                 </span>
               `;
-            })
-            .join('');
+          })
+          .join('');
 
       let extraHtml = '';
       if (c.key === 'family_member') {
@@ -6073,8 +6103,8 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
       : !assets.length
         ? '<div class="text-muted font-mono" style="font-size: 0.7rem;">No assets in the DB are saved under this tag yet. Click "💾 Save Tags Only" to record it for future lookups.</div>'
         : assets
-            .map(
-              a => `
+          .map(
+            a => `
                 <div class="tag-db-asset-card btn-query-preview-asset" data-asset-id="${escapeHtml(a.asset_id)}" title="${escapeHtml(a.moment_name)} · ${escapeHtml(a.original_filename)}">
                   <img class="tag-db-asset-thumb" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
                   <div style="min-width: 0; flex: 1;">
@@ -6087,8 +6117,8 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
                   </div>
                 </div>
               `
-            )
-            .join('');
+          )
+          .join('');
 
     queryPanelHtml = `
       <div class="tag-db-query-panel">
@@ -6849,8 +6879,8 @@ export async function openResolveDisjointModal(
           <div>
             <span class="font-mono text-muted" style="font-size: 0.68rem; display: block;">Apple Photos Albums Containing This Moment</span>
             <span class="font-mono" style="font-size: 0.72rem;">${albumsPresent
-              .map(al => `${escapeHtml(al.parent)} (${al.asset_count})`)
-              .join(' · ')}</span>
+            .map(al => `${escapeHtml(al.parent)} (${al.asset_count})`)
+            .join(' · ')}</span>
           </div>
         `;
       } else {
@@ -7421,7 +7451,13 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
       applyOptimisticClusterRemoval(new Set([...assetIds, ...additionalAssetIds]));
       clusterAssetSelection.delete(resolveDisjointMomentName);
     }
-    await Promise.all([fetchPlannerOverview(true, 'm'), fetchMemoriesFolders()]);
+    unifiedGroupingAssetsCache.clear();
+    allGroupingsLoaded = false;
+    await Promise.all([
+      fetchPlannerOverview(true, 'm'),
+      fetchMemoriesFolders(),
+      ...(activePlannerModeView === 'g' ? [fetchAllUnifiedGroupings(true)] : [])
+    ]);
     if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
 
     closeResolveDisjointModal();
@@ -7439,5 +7475,706 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
     isSubmittingResolveDisjoint = false;
     setResolveDisjointCompletedState(succeeded);
   }
+}
+
+// ==========================================================================
+// Mode [G]: Unified All Groupings Explorer (Moments + Unassigned Clusters)
+// ==========================================================================
+
+function setupAllGroupingsListeners(): void {
+  document.getElementById('btn-refresh-all-groupings')?.addEventListener('click', () => {
+    unifiedGroupingAssetsCache.clear();
+    void fetchAllUnifiedGroupings(true);
+  });
+
+  document.getElementById('btn-collapse-all-groupings')?.addEventListener('click', () => {
+    expandedUnifiedGroupingIds.clear();
+    renderAllUnifiedGroupings();
+  });
+
+  document.querySelectorAll<HTMLElement>('.all-groupings-sort-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll<HTMLElement>('.all-groupings-sort-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const mode = btn.dataset.grpSort;
+      if (mode === 'qual_avg' || mode === 'count' || mode === 'rank_score' || mode === 'date') {
+        allGroupingsSortMode = mode;
+      } else {
+        allGroupingsSortMode = 'avg_score';
+      }
+      renderAllUnifiedGroupings();
+    });
+  });
+
+  const batchSel = document.getElementById('all-groupings-batch-filter') as HTMLSelectElement | null;
+  batchSel?.addEventListener('change', () => {
+    const v = batchSel.value;
+    allGroupingsBatchFilter = v === '600_plus' || v === 'under_600' ? v : 'all';
+    renderAllUnifiedGroupings();
+  });
+
+  const searchInp = document.getElementById('all-groupings-search') as HTMLInputElement | null;
+  searchInp?.addEventListener('input', () => {
+    allGroupingsSearchQuery = (searchInp.value || '').trim().toLowerCase();
+    renderAllUnifiedGroupings();
+  });
+}
+
+function batchStatusBadgeClass(code: string): string {
+  const num = parseInt(code, 10);
+  if (Number.isNaN(num)) return 'badge-outline';
+  if (num >= 600) return 'badge-green';
+  if (num >= 400) return 'badge-amber';
+  return 'badge-purple';
+}
+
+function groupingMomentStatusBadgeClass(status: string): string {
+  switch (status) {
+    case 'M500':
+      return 'badge-green';
+    case 'M450':
+    case 'M400':
+      return 'badge-blue';
+    case 'M300':
+      return 'badge-purple';
+    case 'M200':
+      return 'badge-amber';
+    case 'Unassigned':
+      return 'badge-purple';
+    default:
+      return 'badge-outline';
+  }
+}
+
+function registerUnifiedAssetsForPreview(assets: UnifiedGroupingAssetItem[], groupName: string, histMin: number): void {
+  assets.forEach(a => {
+    const bytes = a.file_size_bytes || 0;
+    candidateAssetMeta.set(a.asset_id, {
+      asset_id: a.asset_id,
+      filename: a.original_filename,
+      original_filename: a.original_filename,
+      camera_model: a.camera_model || 'Library',
+      primary_owner: a.primary_owner || '',
+      month: a.month || (a.date_created_utc || '').slice(0, 7),
+      date_created_utc: a.date_created_utc || '',
+      capture_timestamp: a.date_created_utc || '',
+      file_size_bytes: bytes,
+      bytes,
+      file_size_mb: bytes / (1024 * 1024),
+      score_normalized: a.score_normalized,
+      score_quartile: a.qualified ? `Qualified (>${histMin.toFixed(4)})` : 'Below Threshold',
+      assigned_moment: groupName,
+      asset_tags: a.asset_tags,
+      media_type: a.media_type,
+      duration_sec: a.duration || 0,
+      width: a.width || 0,
+      height: a.height || 0,
+      fps: 0,
+      is_duplicate_copy: Boolean(a.is_duplicate_copy)
+    });
+  });
+}
+
+async function fetchAllUnifiedGroupings(force = false): Promise<void> {
+  if (isFetchingAllGroupings) return;
+  if (allGroupingsLoaded && !force && allGroupingsData) {
+    renderAllUnifiedGroupings();
+    return;
+  }
+
+  const listEl = document.getElementById('all-groupings-list');
+  const totalBadge = document.getElementById('all-groupings-badge-total');
+  isFetchingAllGroupings = true;
+  if (totalBadge) totalBadge.textContent = 'Loading...';
+  if (listEl && !allGroupingsData) {
+    listEl.innerHTML =
+      '<div class="text-center text-muted font-mono" style="padding: 1.5rem; font-size: 0.78rem;"><div class="spinner-sm" style="display: inline-block; margin-right: 0.45rem;"></div>Loading unified groupings across all Moment &amp; Batch statuses...</div>';
+  }
+
+  try {
+    const res = await fetch('/api/media/planner/all-groupings');
+    const data: AllGroupingsResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      if (listEl) {
+        listEl.innerHTML = `<div class="text-red font-mono" style="padding: 1rem;">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</div>`;
+      }
+      return;
+    }
+    allGroupingsData = data;
+    allGroupingsLoaded = true;
+    const histMin = data.historical_min || 0.5315;
+    (data.groupings || []).forEach(g => {
+      if (g.inline_assets?.length) {
+        unifiedGroupingAssetsCache.set(g.grouping_id, g.inline_assets);
+        registerUnifiedAssetsForPreview(g.inline_assets, g.name, histMin);
+      } else if (g.preview_assets?.length) {
+        g.preview_assets.forEach(pa => {
+          if (!candidateAssetMeta.has(pa.asset_id)) {
+            candidateAssetMeta.set(pa.asset_id, {
+              asset_id: pa.asset_id,
+              filename: pa.filename,
+              original_filename: pa.filename,
+              camera_model: 'Library',
+              primary_owner: '',
+              month: '',
+              date_created_utc: '',
+              capture_timestamp: '',
+              file_size_bytes: 0,
+              bytes: 0,
+              file_size_mb: 0,
+              score_normalized: pa.score,
+              score_quartile: pa.score > histMin ? `Qualified (>${histMin.toFixed(4)})` : 'Below Threshold',
+              assigned_moment: g.name,
+              media_type: pa.media_type,
+              duration_sec: 0,
+              width: 0,
+              height: 0,
+              fps: 0
+            });
+          }
+        });
+      }
+    });
+    renderAllUnifiedGroupings();
+  } catch (err: any) {
+    if (listEl) {
+      listEl.innerHTML = `<div class="text-red font-mono" style="padding: 1rem;">❌ Network error loading groupings: ${escapeHtml(err?.message || 'Unknown error')}</div>`;
+    }
+  } finally {
+    isFetchingAllGroupings = false;
+  }
+}
+
+async function ensureGroupingAssetsLoaded(g: UnifiedGroupingItem): Promise<UnifiedGroupingAssetItem[]> {
+  if (unifiedGroupingAssetsCache.has(g.grouping_id)) {
+    return unifiedGroupingAssetsCache.get(g.grouping_id) || [];
+  }
+  if (g.inline_assets) {
+    unifiedGroupingAssetsCache.set(g.grouping_id, g.inline_assets);
+    return g.inline_assets;
+  }
+  const qs = new URLSearchParams({ moment_name: g.name });
+  const res = await fetch(`/api/media/planner/grouping-assets?${qs.toString()}`);
+  const data: GroupingAssetsResponse = await res.json();
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  const assets = data.assets || [];
+  unifiedGroupingAssetsCache.set(g.grouping_id, assets);
+  registerUnifiedAssetsForPreview(assets, g.name, data.historical_min || allGroupingsData?.historical_min || 0.5315);
+  return assets;
+}
+
+function getOrInitGroupingSelectedSet(gid: string, assets: UnifiedGroupingAssetItem[]): Set<string> {
+  if (!unifiedGroupingSelectedIds.has(gid)) {
+    const sel = new Set<string>();
+    assets.forEach(a => {
+      if (!a.is_duplicate_copy && (a.qualified || assets.every(x => !x.qualified))) {
+        sel.add(a.asset_id);
+      }
+    });
+    if (sel.size === 0) {
+      assets.filter(a => !a.is_duplicate_copy).forEach(a => sel.add(a.asset_id));
+    }
+    unifiedGroupingSelectedIds.set(gid, sel);
+  }
+  return unifiedGroupingSelectedIds.get(gid)!;
+}
+
+function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedGroupingAssetItem[]): string {
+  if (!assets.length) {
+    return '<div class="text-muted font-mono" style="padding: 0.6rem;">No active assets found in this grouping.</div>';
+  }
+  const selSet = getOrInitGroupingSelectedSet(g.grouping_id, assets);
+  const curatedOnly = unifiedGroupingCuratedOnly.has(g.grouping_id);
+  const keeperRankMap = new Map<string, number>();
+  let kCounter = 0;
+  assets.forEach(a => {
+    if (selSet.has(a.asset_id)) {
+      kCounter += 1;
+      keeperRankMap.set(a.asset_id, kCounter);
+    }
+  });
+  const selCount = keeperRankMap.size;
+  const allChecked = assets.length > 0 && assets.every(a => selSet.has(a.asset_id));
+
+  const primaryActionBtn =
+    g.kind === 'unassigned'
+      ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-assign-selected" data-grouping-id="${escapeHtml(g.grouping_id)}">✨ Assign Selected (${selCount}) to Moment</button>`
+      : g.moment_status === 'M200' || g.moment_status === 'M300' || g.to_be_curated_count > 0
+        ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Curate M200</button>`
+        : g.moment_status === 'M400' || g.moment_status === 'M450'
+          ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🚀 Publish Batch</button>
+             <button type="button" class="btn btn-xs btn-outline btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Consolidate</button>`
+          : `<button type="button" class="btn btn-xs btn-purple btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Consolidate</button>`;
+
+  const rowsHtml = assets
+    .map((a, idx) => {
+      const checked = selSet.has(a.asset_id);
+      if (curatedOnly && !checked) return '';
+      const kRank = keeperRankMap.get(a.asset_id) || 0;
+      const keeperBadge = checked
+        ? `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Keeper ${kRank}/${selCount}</span>`
+        : '<span class="badge badge-xs badge-amber font-mono">⏭️ Unselected</span>';
+      const qualBadge = a.qualified
+        ? '<span class="badge badge-xs badge-green font-mono">★ QUALIFIED</span>'
+        : '<span class="badge badge-xs badge-outline font-mono">Below Thresh</span>';
+      const typeBadge =
+        a.media_type === 'video'
+          ? `<span class="badge badge-xs badge-purple font-mono">VIDEO${a.duration ? ` ${formatDuration(a.duration)}` : ''}</span>`
+          : '<span class="badge badge-xs badge-blue font-mono">PHOTO</span>';
+      const batchBadge = a.month
+        ? `<span class="badge badge-xs ${batchStatusBadgeClass(a.batch_status)} font-mono" title="Month batch ${escapeHtml(a.month)} · Status ${escapeHtml(a.batch_status)}">📅 ${escapeHtml(a.month)} [${escapeHtml(a.batch_status)}]</span>`
+        : '';
+      const folderChips: string[] = [];
+      if (a.is_published) folderChips.push('<span class="badge badge-xs badge-green font-mono">📢 Published</span>');
+      if (a.in_curated) folderChips.push('<span class="badge badge-xs badge-blue font-mono">✅ Curated</span>');
+      if (a.in_to_be_curated) folderChips.push('<span class="badge badge-xs badge-amber font-mono">🟡 TBC</span>');
+      if (a.in_moments && !a.in_curated && !a.in_to_be_curated) {
+        folderChips.push('<span class="badge badge-xs badge-outline font-mono">📁 Moments</span>');
+      }
+      const dupBadge = a.is_duplicate_copy
+        ? `<span class="badge badge-xs badge-amber font-mono" title="Duplicate of ${escapeHtml(a.duplicate_keeper_filename || 'keeper')}">♻️ Dup</span>`
+        : '';
+      const sizeStr = a.file_size_bytes ? ` · ${formatBytes(a.file_size_bytes)}` : '';
+      const dateStr = a.date_created_utc ? a.date_created_utc.slice(0, 10) : '';
+      const tagsHtml =
+        a.asset_tags && a.asset_tags.length > 0
+          ? `<div style="display: flex; align-items: center; gap: 0.25rem; margin-top: 0.16rem; flex-wrap: wrap;">${a.asset_tags
+              .map(t => `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.6rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`)
+              .join('')}</div>`
+          : '';
+      const rowStateCls = checked ? ' is-selected' : ' is-unselected-grey';
+      return `
+        <div class="publish-asset-row${rowStateCls}${a.is_duplicate_copy ? ' is-dup-copy' : ''}">
+          <div class="publish-asset-left">
+            <input type="checkbox" class="ugrp-asset-cb" data-grouping-id="${escapeHtml(g.grouping_id)}" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer;" />
+            <button type="button" class="disjoint-row-thumb-btn btn-ugrp-preview-asset" data-grouping-id="${escapeHtml(g.grouping_id)}" data-asset-id="${escapeHtml(a.asset_id)}" title="Open Curation Lightbox (Space toggles selection)" style="width: 40px; height: 40px;">
+              <img src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
+            </button>
+            <div style="min-width: 0; flex: 1;">
+              <div class="font-mono" style="font-size: 0.75rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                #${idx + 1} · ${escapeHtml(a.original_filename || a.asset_id)}
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
+                ${keeperBadge}
+                ${qualBadge}
+                ${typeBadge}
+                ${batchBadge}
+                ${folderChips.join('')}
+                ${dupBadge}
+                <span class="font-mono text-amber" style="font-size: 0.69rem;">Score ${a.score_normalized.toFixed(4)}</span>
+                <span class="font-mono text-muted" style="font-size: 0.68rem;">${escapeHtml(dateStr)}${escapeHtml(sizeStr)}</span>
+              </div>
+              ${tagsHtml}
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  return `
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+      <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+        <label style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.74rem; cursor: pointer;" class="font-mono">
+          <input type="checkbox" class="ugrp-select-all-cb" data-grouping-id="${escapeHtml(g.grouping_id)}" ${allChecked ? 'checked' : ''} />
+          <span>Select All</span>
+        </label>
+        <span class="badge badge-xs badge-green font-mono">${selCount} / ${assets.length} selected</span>
+        <button type="button" class="btn btn-xs ${curatedOnly ? 'btn-purple' : 'btn-outline'} btn-ugrp-curated-only" data-grouping-id="${escapeHtml(g.grouping_id)}">
+          ${curatedOnly ? `★ Curated Only (${selCount})` : '👁️ Curated Only'}
+        </button>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+        ${primaryActionBtn}
+      </div>
+    </div>
+    <div class="publish-asset-list" style="max-height: 360px;">
+      ${rowsHtml || '<div class="text-center text-muted font-mono" style="padding: 0.75rem;">No selected assets match filter.</div>'}
+    </div>
+  `;
+}
+
+function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingItem): void {
+  const assets = unifiedGroupingAssetsCache.get(g.grouping_id) || [];
+  const selSet = getOrInitGroupingSelectedSet(g.grouping_id, assets);
+  const rerenderBody = () => {
+    bodyEl.innerHTML = renderExpandedGroupingBodyHtml(g, assets);
+    wireExpandedGroupingBodyEvents(bodyEl, g);
+  };
+
+  bodyEl.querySelector<HTMLInputElement>('.ugrp-select-all-cb')?.addEventListener('change', e => {
+    const checked = (e.target as HTMLInputElement).checked;
+    selSet.clear();
+    if (checked) assets.forEach(a => selSet.add(a.asset_id));
+    rerenderBody();
+  });
+
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-curated-only')?.addEventListener('click', () => {
+    if (unifiedGroupingCuratedOnly.has(g.grouping_id)) {
+      unifiedGroupingCuratedOnly.delete(g.grouping_id);
+    } else {
+      unifiedGroupingCuratedOnly.add(g.grouping_id);
+    }
+    rerenderBody();
+  });
+
+  bodyEl.querySelectorAll<HTMLInputElement>('.ugrp-asset-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const aid = cb.dataset.assetId || '';
+      if (!aid) return;
+      if (cb.checked) selSet.add(aid);
+      else selSet.delete(aid);
+      rerenderBody();
+    });
+  });
+
+  bodyEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-preview-asset').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const aid = btn.dataset.assetId || '';
+      if (!aid) return;
+      openCleanupPreviewModal(aid, {
+        assetIds: assets.map(a => a.asset_id),
+        groupLabel: `${g.name} (${g.moment_status})`,
+        hideMarkRemoved: true,
+        selectedIds: selSet,
+        defaultSort: 'score',
+        onSelectionChange: () => rerenderBody()
+      });
+    });
+  });
+
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-assign-selected')?.addEventListener('click', () => {
+    const ids = assets.filter(a => selSet.has(a.asset_id)).map(a => a.asset_id);
+    if (!ids.length) return;
+    const prefill = /uncategorized/i.test(g.name) ? '' : g.name;
+    void openResolveDisjointModal(g.name, prefill, { assetIds: ids, isUnassignedCluster: true });
+  });
+
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-curate')?.addEventListener('click', () => {
+    void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true, isCurateM200: true });
+  });
+
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-publish')?.addEventListener('click', () => {
+    void openPublishMomentModal(g.name);
+  });
+
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-tag-merge')?.addEventListener('click', () => {
+    const ids = assets.filter(a => selSet.has(a.asset_id)).map(a => a.asset_id);
+    void openResolveDisjointModal(g.name, '', { assetIds: ids, isHistoricalMoment: true });
+  });
+}
+
+function renderAllUnifiedGroupings(): void {
+  const listEl = document.getElementById('all-groupings-list');
+  const pillsEl = document.getElementById('all-groupings-status-pills');
+  const totalBadge = document.getElementById('all-groupings-badge-total');
+  const assetsBadge = document.getElementById('all-groupings-badge-assets');
+  const avgBadge = document.getElementById('all-groupings-badge-avg');
+  const visiblePill = document.getElementById('all-groupings-visible-pill');
+  if (!listEl || !allGroupingsData) return;
+
+  const allItems = allGroupingsData.groupings || [];
+  if (totalBadge) {
+    totalBadge.textContent = `${allGroupingsData.total_groupings} groupings (${allGroupingsData.moments_count} Moments · ${allGroupingsData.unassigned_count} Unassigned)`;
+  }
+  if (assetsBadge) {
+    assetsBadge.textContent = `${allGroupingsData.total_assets.toLocaleString()} assets`;
+  }
+  if (avgBadge) {
+    avgBadge.textContent = `Overall Avg ${allGroupingsData.overall_avg_score.toFixed(4)}`;
+  }
+
+  const bySt = allGroupingsData.by_status || {};
+  const statusPillsDef: Array<{ key: string; label: string }> = [
+    { key: 'all', label: `All (${allItems.length})` },
+    { key: 'Unassigned', label: `🟣 Unassigned (${bySt['Unassigned'] || 0})` },
+    { key: 'M100', label: `📁 M100 (${bySt['M100'] || 0})` },
+    { key: 'M200', label: `🟡 M200 TBC (${bySt['M200'] || 0})` },
+    { key: 'M300', label: `📦 M300 (${bySt['M300'] || 0})` },
+    { key: 'M400', label: `✅ M400 Curated (${bySt['M400'] || 0})` },
+    { key: 'M450', label: `🚀 M450 Part-Pub (${bySt['M450'] || 0})` },
+    { key: 'M500', label: `🏁 M500 Complete (${bySt['M500'] || 0})` },
+    { key: 'Disjoint', label: `🔀 Disjoint <2 (${bySt['Disjoint'] || 0})` }
+  ];
+
+  if (pillsEl) {
+    pillsEl.innerHTML = statusPillsDef
+      .map(
+        p =>
+          `<button type="button" class="disjoint-target-chip${allGroupingsStatusFilter === p.key ? ' active' : ''}" data-grp-status-filter="${escapeHtml(p.key)}">${escapeHtml(p.label)}</button>`
+      )
+      .join('');
+    pillsEl.querySelectorAll<HTMLButtonElement>('[data-grp-status-filter]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        allGroupingsStatusFilter = btn.dataset.grpStatusFilter || 'all';
+        renderAllUnifiedGroupings();
+      });
+    });
+  }
+
+  const filtered = allItems.filter(g => {
+    if (allGroupingsStatusFilter !== 'all') {
+      if (allGroupingsStatusFilter === 'Disjoint') {
+        if (!g.is_disjoint) return false;
+      } else if (g.moment_status !== allGroupingsStatusFilter) {
+        return false;
+      }
+    }
+    if (allGroupingsBatchFilter !== 'all') {
+      const has600 = g.batches.some(b => parseInt(b.status_code, 10) >= 600);
+      const hasUnder600 = g.batches.some(b => {
+        const n = parseInt(b.status_code, 10);
+        return !Number.isNaN(n) && n < 600;
+      });
+      if (allGroupingsBatchFilter === '600_plus' && !has600) return false;
+      if (allGroupingsBatchFilter === 'under_600' && !hasUnder600) return false;
+    }
+    if (allGroupingsSearchQuery) {
+      const hay = [
+        g.name,
+        g.moment_status,
+        g.status_detail,
+        g.tag_summary,
+        g.rule_reason || '',
+        ...g.batches.map(b => `${b.month} ${b.status_code}`)
+      ]
+        .join(' ')
+        .toLowerCase();
+      if (!hay.includes(allGroupingsSearchQuery)) return false;
+    }
+    return true;
+  });
+
+  filtered.sort((a, b) => {
+    if (allGroupingsSortMode === 'qual_avg') {
+      return b.qualified_avg_score - a.qualified_avg_score || b.avg_score - a.avg_score;
+    }
+    if (allGroupingsSortMode === 'count') {
+      return b.total_assets - a.total_assets || b.avg_score - a.avg_score;
+    }
+    if (allGroupingsSortMode === 'rank_score') {
+      return b.rank_score - a.rank_score || b.avg_score - a.avg_score;
+    }
+    if (allGroupingsSortMode === 'date') {
+      return (b.earliest_date || '').localeCompare(a.earliest_date || '') || b.avg_score - a.avg_score;
+    }
+    return b.avg_score - a.avg_score || b.total_assets - a.total_assets;
+  });
+
+  if (visiblePill) {
+    visiblePill.textContent = `${filtered.length} / ${allItems.length} shown`;
+  }
+
+  if (!filtered.length) {
+    listEl.innerHTML =
+      '<div class="text-center text-muted font-mono" style="padding: 1.5rem;">No groupings match the current filters.</div>';
+    return;
+  }
+
+  listEl.innerHTML = filtered
+    .map((g, idx) => {
+      const isExpanded = expandedUnifiedGroupingIds.has(g.grouping_id);
+      const stCls = groupingMomentStatusBadgeClass(g.moment_status);
+      const taggedHtml = renderMomentTaggedBadge(g.is_tagged, g.paradigm_confirmed, g.tag_summary);
+      const disjHtml = g.is_disjoint
+        ? '<span class="badge badge-xs badge-red font-mono" title="Fewer than 2 qualified assets">🔀 &lt;2 Qual</span>'
+        : '';
+
+      const batchesHtml =
+        g.batches.length <= 3
+          ? g.batches
+              .map(
+                b =>
+                  `<span class="badge badge-xs ${batchStatusBadgeClass(b.status_code)} font-mono" title="${b.count} asset(s) in batch ${escapeHtml(b.month)} (status ${escapeHtml(b.status_code)})">📅 ${escapeHtml(b.month)} · ${escapeHtml(b.status_code)}</span>`
+              )
+              .join('')
+          : `<span class="badge badge-xs ${batchStatusBadgeClass(g.batches[0].status_code)} font-mono" title="${escapeHtml(
+              g.batches.map(b => `${b.month} [${b.status_code}] (${b.count})`).join(', ')
+            )}">📅 ${escapeHtml(g.batches[0].month)}..${escapeHtml(g.batches[g.batches.length - 1].month)} (${g.batches.length} batches)</span>`;
+
+      const foldersNote = g.parent_folders.length
+        ? `<span class="text-muted">Folders: ${escapeHtml(g.parent_folders.join(' + '))}</span>`
+        : `<span class="text-muted">${escapeHtml(g.status_detail)}</span>`;
+
+      const countsParts: string[] = [
+        `<strong>${g.total_assets}</strong> total`,
+        `<span class="text-green">★ ${g.qualified_assets} qual</span>`
+      ];
+      if (g.curated_count > 0) countsParts.push(`<span style="color:#93c5fd;">✅ ${g.curated_count} cur</span>`);
+      if (g.to_be_curated_count > 0) countsParts.push(`<span class="text-amber">🟡 ${g.to_be_curated_count} TBC</span>`);
+      if (g.published_count > 0) countsParts.push(`<span class="text-green">📢 ${g.published_count} pub</span>`);
+      if (g.duplicate_count > 0) countsParts.push(`<span class="text-amber">♻️ ${g.duplicate_count} dup</span>`);
+
+      const thumbsHtml = (g.preview_assets || [])
+        .slice(0, 5)
+        .map(
+          pa =>
+            `<img class="ugrp-inline-thumb" data-grouping-id="${escapeHtml(g.grouping_id)}" data-asset-id="${escapeHtml(pa.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(pa.asset_id)}" alt="${escapeHtml(pa.filename)}" title="${escapeHtml(pa.filename)} · Score ${pa.score.toFixed(4)}" loading="lazy" />`
+        )
+        .join('');
+      const extraThumbCnt = Math.max(0, g.total_assets - 5);
+
+      const quickActionHtml =
+        g.kind === 'unassigned'
+          ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}">✨ Assign</button>`
+          : g.moment_status === 'M200' || g.moment_status === 'M300' || g.to_be_curated_count > 0
+            ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Curate</button>`
+            : g.moment_status === 'M400' || g.moment_status === 'M450'
+              ? `<button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🚀 Publish</button>`
+              : `<button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Merge</button>`;
+
+      const cachedAssets = unifiedGroupingAssetsCache.get(g.grouping_id);
+      const bodyInnerHtml = isExpanded
+        ? cachedAssets
+          ? renderExpandedGroupingBodyHtml(g, cachedAssets)
+          : '<div class="text-muted font-mono" style="padding: 0.6rem;"><div class="spinner-sm" style="display:inline-block;margin-right:0.4rem;"></div>Loading grouping assets...</div>'
+        : '';
+
+      return `
+        <div class="unified-grouping-card${isExpanded ? ' expanded' : ''}" data-grouping-id="${escapeHtml(g.grouping_id)}">
+          <div class="unified-grouping-header" data-toggle-grouping-id="${escapeHtml(g.grouping_id)}">
+            <div class="unified-grouping-left">
+              <span class="font-mono text-muted" style="font-size: 0.72rem; min-width: 34px; padding-top: 0.1rem;">${isExpanded ? '▾' : '▸'} #${idx + 1}</span>
+              <div style="min-width: 0; flex: 1;">
+                <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                  <strong style="font-size: 0.85rem; color: var(--text-primary);">${escapeHtml(g.name)}</strong>
+                  <span class="badge badge-xs ${stCls} font-mono">${escapeHtml(g.moment_status)}</span>
+                  ${disjHtml}
+                  ${batchesHtml}
+                  ${taggedHtml}
+                </div>
+                <div class="unified-grouping-metrics" style="margin-top: 0.24rem; color: var(--text-secondary);">
+                  <span>${countsParts.join(' · ')}</span>
+                  <span>·</span>
+                  ${foldersNote}
+                  <span>·</span>
+                  <span class="text-muted">${escapeHtml(g.date_range)}</span>
+                </div>
+              </div>
+            </div>
+            <div class="unified-grouping-right">
+              <div style="text-align: right;" class="font-mono">
+                <div style="font-size: 0.82rem; font-weight: 700; color: #fbbf24;">Avg ${g.avg_score.toFixed(4)}</div>
+                <div class="text-muted" style="font-size: 0.65rem;">
+                  ${g.min_score.toFixed(3)}..${g.max_score.toFixed(3)} · Rank ${g.rank_score.toFixed(2)}
+                </div>
+              </div>
+              <div class="unified-grouping-thumbs">
+                ${thumbsHtml}
+                ${extraThumbCnt > 0 ? `<span class="badge badge-xs badge-outline font-mono">+${extraThumbCnt}</span>` : ''}
+              </div>
+              ${quickActionHtml}
+            </div>
+          </div>
+          <div class="unified-grouping-body" data-grouping-body-id="${escapeHtml(g.grouping_id)}">${bodyInnerHtml}</div>
+        </div>
+      `;
+    })
+    .join('');
+
+  const itemById = new Map<string, UnifiedGroupingItem>();
+  filtered.forEach(g => itemById.set(g.grouping_id, g));
+
+  filtered.forEach(g => {
+    if (expandedUnifiedGroupingIds.has(g.grouping_id) && unifiedGroupingAssetsCache.has(g.grouping_id)) {
+      const bodyEl = listEl.querySelector<HTMLElement>(
+        `.unified-grouping-body[data-grouping-body-id="${CSS.escape(g.grouping_id)}"]`
+      );
+      if (bodyEl) wireExpandedGroupingBodyEvents(bodyEl, g);
+    }
+  });
+
+  listEl.querySelectorAll<HTMLElement>('[data-toggle-grouping-id]').forEach(hdrEl => {
+    hdrEl.addEventListener('click', async e => {
+      if ((e.target as HTMLElement).closest('.btn-ugrp-row-action, .ugrp-inline-thumb')) return;
+      const gid = hdrEl.dataset.toggleGroupingId || '';
+      const g = itemById.get(gid);
+      if (!g) return;
+      const cardEl = hdrEl.closest<HTMLElement>('.unified-grouping-card');
+      const bodyEl = cardEl?.querySelector<HTMLElement>('.unified-grouping-body');
+      if (!cardEl || !bodyEl) return;
+
+      if (expandedUnifiedGroupingIds.has(gid)) {
+        expandedUnifiedGroupingIds.delete(gid);
+        cardEl.classList.remove('expanded');
+        const chev = hdrEl.querySelector('span.font-mono');
+        if (chev) chev.textContent = chev.textContent?.replace('▾', '▸') || '';
+        return;
+      }
+
+      expandedUnifiedGroupingIds.add(gid);
+      cardEl.classList.add('expanded');
+      const chev = hdrEl.querySelector('span.font-mono');
+      if (chev) chev.textContent = chev.textContent?.replace('▸', '▾') || '';
+      bodyEl.innerHTML =
+        '<div class="text-muted font-mono" style="padding: 0.6rem;"><div class="spinner-sm" style="display:inline-block;margin-right:0.4rem;"></div>Loading grouping assets...</div>';
+      try {
+        const assets = await ensureGroupingAssetsLoaded(g);
+        bodyEl.innerHTML = renderExpandedGroupingBodyHtml(g, assets);
+        wireExpandedGroupingBodyEvents(bodyEl, g);
+      } catch (err: any) {
+        bodyEl.innerHTML = `<div class="text-red font-mono" style="padding: 0.6rem;">❌ ${escapeHtml(err?.message || 'Failed loading assets')}</div>`;
+      }
+    });
+  });
+
+  listEl.querySelectorAll<HTMLElement>('.ugrp-inline-thumb').forEach(imgEl => {
+    imgEl.addEventListener('click', async e => {
+      e.stopPropagation();
+      const gid = imgEl.dataset.groupingId || '';
+      const aid = imgEl.dataset.assetId || '';
+      const g = itemById.get(gid);
+      if (!g || !aid) return;
+      try {
+        const assets = await ensureGroupingAssetsLoaded(g);
+        const selSet = getOrInitGroupingSelectedSet(gid, assets);
+        openCleanupPreviewModal(aid, {
+          assetIds: assets.map(x => x.asset_id),
+          groupLabel: `${g.name} (${g.moment_status})`,
+          hideMarkRemoved: true,
+          selectedIds: selSet,
+          defaultSort: 'score',
+          onSelectionChange: () => {
+            if (expandedUnifiedGroupingIds.has(gid)) {
+              const bodyEl = listEl.querySelector<HTMLElement>(
+                `.unified-grouping-body[data-grouping-body-id="${CSS.escape(gid)}"]`
+              );
+              if (bodyEl) {
+                bodyEl.innerHTML = renderExpandedGroupingBodyHtml(g, assets);
+                wireExpandedGroupingBodyEvents(bodyEl, g);
+              }
+            }
+          }
+        });
+      } catch {
+        openCleanupPreviewModal(aid, { assetIds: [aid], groupLabel: g.name, hideMarkRemoved: true });
+      }
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-row-action').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const gid = btn.dataset.groupingId || '';
+      const act = btn.dataset.action || '';
+      const g = itemById.get(gid);
+      if (!g) return;
+      if (act === 'assign') {
+        const assets = g.inline_assets || unifiedGroupingAssetsCache.get(gid) || [];
+        const selSet = getOrInitGroupingSelectedSet(gid, assets);
+        const ids = assets.filter(a => selSet.has(a.asset_id)).map(a => a.asset_id);
+        const prefill = /uncategorized/i.test(g.name) ? '' : g.name;
+        void openResolveDisjointModal(g.name, prefill, { assetIds: ids, isUnassignedCluster: true });
+      } else if (act === 'curate') {
+        void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true, isCurateM200: true });
+      } else if (act === 'publish') {
+        void openPublishMomentModal(g.name);
+      } else {
+        void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true });
+      }
+    });
+  });
 }
 

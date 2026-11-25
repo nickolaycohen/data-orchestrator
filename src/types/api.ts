@@ -806,6 +806,99 @@ export interface AppleMonthSelectionDetailResponse {
   live_photos_app?: LivePhotosMonthSelectionCheck | null;
 }
 
+export interface UnifiedGroupingBatchSummary {
+  month: string;
+  status_code: string;
+  count: number;
+}
+
+export interface UnifiedGroupingPreviewAsset {
+  asset_id: string;
+  filename: string;
+  score: number;
+  media_type: 'photo' | 'video';
+}
+
+export interface UnifiedGroupingAssetItem {
+  asset_id: string;
+  original_filename: string;
+  score_normalized: number;
+  qualified: boolean;
+  date_created_utc: string;
+  month: string;
+  batch_status: string;
+  media_type: 'photo' | 'video';
+  duration?: number;
+  width?: number;
+  height?: number;
+  file_size_bytes?: number;
+  camera_model?: string;
+  primary_owner?: string;
+  is_duplicate_copy?: boolean;
+  duplicate_keeper_filename?: string;
+  duplicate_keeper_moment?: string;
+  in_moments?: boolean;
+  in_to_be_curated?: boolean;
+  in_curated?: boolean;
+  is_published?: boolean;
+  asset_tags?: MomentTagItem[];
+}
+
+export interface UnifiedGroupingItem {
+  grouping_id: string;
+  kind: 'moment' | 'unassigned';
+  name: string;
+  moment_status: string;
+  status_detail: string;
+  rule_id?: string;
+  rule_reason?: string;
+  is_disjoint: boolean;
+  can_publish_str: string;
+  can_publish_ok: boolean;
+  parent_folders: string[];
+  total_assets: number;
+  qualified_assets: number;
+  unique_count: number;
+  curated_count: number;
+  to_be_curated_count: number;
+  published_count: number;
+  duplicate_count: number;
+  avg_score: number;
+  qualified_avg_score: number;
+  min_score: number;
+  max_score: number;
+  rank_score: number;
+  earliest_date: string;
+  date_range: string;
+  batches: UnifiedGroupingBatchSummary[];
+  is_tagged: boolean;
+  paradigm_confirmed: boolean;
+  tag_summary: string;
+  preview_assets: UnifiedGroupingPreviewAsset[];
+  inline_assets?: UnifiedGroupingAssetItem[];
+}
+
+export interface AllGroupingsResponse {
+  ok: boolean;
+  error?: string;
+  historical_min: number;
+  total_groupings: number;
+  moments_count: number;
+  unassigned_count: number;
+  total_assets: number;
+  overall_avg_score: number;
+  by_status: Record<string, number>;
+  groupings: UnifiedGroupingItem[];
+}
+
+export interface GroupingAssetsResponse {
+  ok: boolean;
+  error?: string;
+  moment_name: string;
+  historical_min: number;
+  assets: UnifiedGroupingAssetItem[];
+}
+
 export type TriggerTaskFn = (
   taskId: string,
   args?: Record<string, any> | null,
