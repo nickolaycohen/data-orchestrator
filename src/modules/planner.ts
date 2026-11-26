@@ -1070,6 +1070,10 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     });
   });
 
+  document.getElementById('btn-disjoint-device-select-all')?.addEventListener('click', () => {
+    toggleSelectAllVisibleTimeframeDeviceAssets();
+  });
+
   document.getElementById('btn-disjoint-device-qual-toggle')?.addEventListener('click', () => {
     disjointTimeframeQualOnly = !disjointTimeframeQualOnly;
     renderDisjointTimeframeDevicesUI();
@@ -9120,6 +9124,32 @@ async function fetchDisjointTimeframeDevices(): Promise<void> {
   }
 }
 
+function getVisibleSelectableTimeframeAssets(): TimeframeDeviceAssetItem[] {
+  if (!disjointTimeframeData || !disjointTimeframeActiveDeviceKey) return [];
+  return (disjointTimeframeData.assets || []).filter(a => {
+    if (a.in_source) return false;
+    if (disjointTimeframeActiveDeviceKey !== '__all__' && a.device_key !== disjointTimeframeActiveDeviceKey) {
+      return false;
+    }
+    if (disjointTimeframeQualOnly && !a.qualified) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function toggleSelectAllVisibleTimeframeDeviceAssets(): void {
+  const selectable = getVisibleSelectableTimeframeAssets();
+  if (!selectable.length) return;
+  const allChecked = selectable.every(a => disjointTimeframeCheckedIds.has(a.asset_id));
+  if (allChecked) {
+    selectable.forEach(a => disjointTimeframeCheckedIds.delete(a.asset_id));
+  } else {
+    selectable.forEach(a => disjointTimeframeCheckedIds.add(a.asset_id));
+  }
+  renderDisjointTimeframeDevicesUI();
+}
+
 function renderDisjointTimeframeDevicesUI(): void {
   const chipsEl = document.getElementById('resolve-disjoint-device-chips');
   const rangePillEl = document.getElementById('resolve-disjoint-timeframe-range-pill');
@@ -9127,6 +9157,7 @@ function renderDisjointTimeframeDevicesUI(): void {
   const panelEl = document.getElementById('resolve-disjoint-device-preview-panel');
   const titleEl = document.getElementById('resolve-disjoint-device-preview-title');
   const gridEl = document.getElementById('resolve-disjoint-device-assets-grid');
+  const selectAllBtn = document.getElementById('btn-disjoint-device-select-all') as HTMLButtonElement | null;
   const qualToggleBtn = document.getElementById('btn-disjoint-device-qual-toggle') as HTMLButtonElement | null;
   const addCheckedBtn = document.getElementById('btn-disjoint-device-add-checked') as HTMLButtonElement | null;
   if (!chipsEl || !disjointTimeframeData) return;
@@ -9252,6 +9283,19 @@ function renderDisjointTimeframeDevicesUI(): void {
     ? `📱 ${activeDev.label} · ${matchingAssets.length} photo(s) in ${disjointTimeframeData.window_label}`
     : `🌐 All Devices · ${matchingAssets.length} photo(s) in ${disjointTimeframeData.window_label}`;
 
+  const selectableVisible = matchingAssets.filter(a => !a.in_source);
+  const allVisibleSelected =
+    selectableVisible.length > 0 && selectableVisible.every(a => disjointTimeframeCheckedIds.has(a.asset_id));
+
+  if (selectAllBtn) {
+    selectAllBtn.disabled = selectableVisible.length === 0;
+    selectAllBtn.classList.toggle('btn-purple', allVisibleSelected);
+    selectAllBtn.classList.toggle('btn-outline', !allVisibleSelected);
+    selectAllBtn.textContent = allVisibleSelected
+      ? `✕ Deselect All (${selectableVisible.length})`
+      : `☑️ Select All (${selectableVisible.length})`;
+  }
+
   if (qualToggleBtn) {
     qualToggleBtn.classList.toggle('btn-purple', disjointTimeframeQualOnly);
     qualToggleBtn.classList.toggle('btn-outline', !disjointTimeframeQualOnly);
@@ -9354,9 +9398,17 @@ function addCheckedTimeframeDeviceAssetsToConsolidation(): void {
     assetIds: nextSet,
     totalAssets: nextSet.size,
     tags: [],
-    isTimeframeDeviceSelection: true
+    isTimeframeDeviceSelection: true,
+    allAssets: (disjointTimeframeData.assets || [])
+      .filter(a => nextSet.has(a.asset_id))
+      .map(a => ({
+        asset_id: a.asset_id,
+        score_normalized: a.score_normalized,
+        original_filename: a.original_filename
+      }))
   });
 
+  refreshExpectedCuratedUI();
   renderResolveDisjointCombineTray();
   renderPropagateTagsPreview();
   updateSingleAssetWarningVisibility();
