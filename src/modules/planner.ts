@@ -5696,13 +5696,23 @@ function composeMomentNameFromTags(tags: MomentTagItem[], fallbackName: string):
 
   const fam = picked('family_member').join(' & ');
   const act = picked('activity').join(' & ');
-  const loc = picked('location').join(', ');
+  const loc = picked('location')
+    .map(v => v.replace(/,/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' ');
   const ppl = picked('people').join(', ');
   const when = picked('when').join(' / ');
 
   const parts: string[] = [];
   if (act) parts.push(act);
-  if (loc) parts.push(act ? `at ${loc}` : loc);
+  if (loc) {
+    if (!act || /\s+(to|at)$/i.test(act)) {
+      parts.push(loc);
+    } else {
+      const prep = /\btrips?\b/i.test(act) ? 'to' : 'at';
+      parts.push(`${prep} ${loc}`);
+    }
+  }
   if (ppl) parts.push(`with ${ppl}`);
   const body = parts.join(' ').trim();
   const head = fam && body ? `${fam} — ${body}` : fam || body;

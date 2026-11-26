@@ -8639,6 +8639,41 @@ _ACTIVITY_RULES: list[tuple[tuple[str, ...], str, str]] = [
 ]
 
 
+def _compose_moment_name_from_tags(tags: list[dict], fallback_name: str = "") -> str:
+    """Compose canonical Moment folder name from structured tags (matching UI composeMomentNameFromTags)."""
+    def _picked(cat: str) -> list[str]:
+        return [
+            str(t.get("tag_value") or "").strip()
+            for t in (tags or [])
+            if (t.get("category") or "").strip().lower() == cat and bool(t.get("include_in_name", True))
+            and str(t.get("tag_value") or "").strip()
+        ]
+
+    fam = " & ".join(_picked("family_member"))
+    act = " & ".join(_picked("activity"))
+    loc_parts = [re.sub(r"\s+", " ", v.replace(",", " ")).strip() for v in _picked("location")]
+    loc = " ".join(p for p in loc_parts if p)
+    ppl = ", ".join(_picked("people"))
+    when = " / ".join(_picked("when"))
+
+    parts: list[str] = []
+    if act:
+        parts.append(act)
+    if loc:
+        if not act or re.search(r"\s+(?:to|at)$", act, re.IGNORECASE):
+            parts.append(loc)
+        else:
+            prep = "to" if re.search(r"\btrips?\b", act, re.IGNORECASE) else "at"
+            parts.append(f"{prep} {loc}")
+    if ppl:
+        parts.append(f"with {ppl}")
+    body = " ".join(parts).strip()
+    head = f"{fam} — {body}" if (fam and body) else (fam or body)
+    if not head:
+        return when or fallback_name
+    return f"{head} - {when}" if when else head
+
+
 def _build_moment_name_suggestion(
     moment_name: str,
     assets_out: list[dict],
@@ -8751,12 +8786,17 @@ def _build_moment_name_suggestion(
         if c and c.lower() not in {x.lower() for x in location_candidates}:
             location_candidates.append(c)
 
-    # Compose canonical readable label: [Activity] at [Location] with [People] - [When]
+    # Compose canonical readable label: [Activity] to/at [Location] with [People] - [When]
+    clean_location = re.sub(r"\s+", " ", location.replace(",", " ")).strip() if location else ""
     parts: list[str] = []
     if activity:
         parts.append(activity)
-    if location:
-        parts.append(f"at {location}")
+    if clean_location:
+        if not activity or re.search(r"\s+(?:to|at)$", activity, re.IGNORECASE):
+            parts.append(clean_location)
+        else:
+            prep = "to" if re.search(r"\btrips?\b", activity, re.IGNORECASE) else "at"
+            parts.append(f"{prep} {clean_location}")
     if people_str:
         parts.append(f"with {people_str}")
     head = " ".join(parts).strip() or moment_name
