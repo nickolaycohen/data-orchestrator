@@ -2336,6 +2336,16 @@
 
           <!-- Horizontal Scrollable Group Filmstrip -->
           <div class="cleanup-preview-filmstrip-wrap" id="cleanup-preview-filmstrip-wrap" style="display: none;">
+            <div id="cleanup-preview-log-curation-bar" class="font-mono"
+              style="display: none; align-items: center; justify-content: space-between; gap: 0.55rem; flex-wrap: wrap; padding: 0.42rem 0.65rem; margin-bottom: 0.35rem; border-radius: 7px; background: rgba(139, 92, 246, 0.14); border: 1px solid rgba(167, 139, 250, 0.42); font-size: 0.71rem; color: #ede9fe;">
+              <div id="cleanup-preview-log-curation-text" style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;"></div>
+              <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+                <button type="button" class="btn btn-xs btn-purple" id="btn-preview-select-log-top"
+                  title="Select the top round(ln(N)) highest-scoring non-duplicate assets as curated keepers">
+                  🎯 Select Top ln(N)
+                </button>
+              </div>
+            </div>
             <div class="cleanup-preview-filmstrip-header">
               <span class="font-mono text-muted" id="cleanup-preview-group-label">Group Assets</span>
               <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">

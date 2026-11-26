@@ -1008,6 +1008,14 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     resolveDisjointIsCurateM200 = Boolean(chk?.checked);
     const curateBoxEl = document.getElementById('resolve-disjoint-curate-box');
     if (curateBoxEl) curateBoxEl.style.display = resolveDisjointIsCurateM200 ? 'flex' : 'none';
+    if (resolveDisjointIsCurateM200 && resolveDisjointAssets.length > 0) {
+      const { expected } = computeExpectedCuratedStats(getCombinedPoolTotalCount());
+      if (resolveDisjointSelectedIds.size > expected) {
+        selectTopExpectedKeepersInDialog();
+        return;
+      }
+    }
+    renderResolveDisjointAssets();
     updateResolveDisjointSelectionSummary();
     updateResolveDisjointTargetPreview();
   });
@@ -5583,7 +5591,7 @@ function refreshExpectedCuratedUI(): void {
   const hrPreview = computeHighratedUnselectedPreview();
 
   if (pill) {
-    pill.textContent = `${selectedCount} / ${resolveDisjointAssets.length} selected (🎯 exp ${expected})`;
+    pill.textContent = `${selectedCount} / 🎯 ${expected} recommended (of ${resolveDisjointAssets.length} assets)`;
   }
 
   const expTextEl = document.getElementById('resolve-disjoint-expected-curated-text');
@@ -5599,7 +5607,9 @@ function refreshExpectedCuratedUI(): void {
             : 'badge-amber';
     const mismatchNote =
       resolveDisjointIsCurateM200 && diff !== 0 && poolTotal > 0
-        ? `<span class="text-amber">⚠️ Must match ${expected} keeper${expected === 1 ? '' : 's'} to mark Curated &amp; unlock Publish</span>`
+        ? `<div class="text-amber" style="width: 100%; font-size: 0.71rem;">⚠️ Must select exactly <strong>${expected}</strong> keeper${expected === 1 ? '' : 's'} (<code>round(ln(${poolTotal})) = ${expected}</code>) to mark Curated &amp; unlock Publish — ${
+            diff > 0 ? `uncheck ${diff} item(s) or click "Select Top ${expected}"` : `check ${Math.abs(diff)} more item(s)`
+          }.</div>`
         : '';
     const hrNote =
       resolveDisjointIsCurateM200 && hrPreview.highratedAssets.length > 0
@@ -5607,10 +5617,20 @@ function refreshExpectedCuratedUI(): void {
         : '';
     expTextEl.innerHTML =
       poolTotal > 0
-        ? `<span>🎯 <strong>Expected Curated: ${expected}</strong> <span class="text-muted">(ln(${poolTotal}) = ${lnRaw.toFixed(2)})</span></span>
-           <span class="badge badge-xs ${matchCls} font-mono">${diff === 0 ? '✓' : '⚠️'} ${totalSel} keeper${totalSel === 1 ? '' : 's'} selected${diff === 0 ? ' (matches ln target ✓)' : diff > 0 ? ` (+${diff} vs exp)` : ` (${diff} vs exp)`}</span>
-           <span class="text-muted">· Total Event Pool: <strong>${poolTotal}</strong></span>
-           ${hrNote}
+        ? `<div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; width: 100%;">
+             <span>📐 <strong>Logarithmic Curation Rule:</strong> <code>round(ln(${poolTotal})) = round(${lnRaw.toFixed(2)}) = ${expected}</code> Recommended Keeper${expected === 1 ? '' : 's'}</span>
+             <span class="badge badge-xs ${matchCls} font-mono">${
+               diff === 0
+                 ? `✅ ${totalSel} / 🎯 ${expected} Selected (Matches ln(${poolTotal}) ✓)`
+                 : diff > 0
+                   ? `⚠️ ${totalSel} / 🎯 ${expected} Selected (+${diff} over ln target)`
+                   : `⚠️ ${totalSel} / 🎯 ${expected} Selected (${diff} vs ln target)`
+             }</span>
+             ${hrNote}
+           </div>
+           <div class="text-muted" style="font-size: 0.67rem; width: 100%;">
+             📊 <strong>ln(N) Reference Scale:</strong> 1–4 assets ➜ <strong>1</strong> · 5–12 ➜ <strong>2</strong> · 13–33 ➜ <strong>3</strong> · 34–90 ➜ <strong>4</strong> · 91–244 ➜ <strong>5</strong> · 245+ ➜ <strong>6+</strong>
+           </div>
            ${mismatchNote}`
         : '<span>🎯 <strong>Expected Curated Target (ln N):</strong> —</span>';
   }
@@ -5677,6 +5697,15 @@ function renderResolveDisjointAssets(): void {
       : '👁️ Curated Only';
   }
 
+  const poolForCards = getCombinedPoolTotalCount();
+  const { expected: expForCards, lnRaw: lnForCards } = computeExpectedCuratedStats(poolForCards);
+  const nonDupCards = resolveDisjointAssets.filter(a => !a.is_duplicate_copy);
+  const rankedRecCards = [...(nonDupCards.length ? nonDupCards : resolveDisjointAssets)].sort(
+    (a, b) => b.score_normalized - a.score_normalized
+  );
+  const recommendedCardRank = new Map<string, number>();
+  rankedRecCards.slice(0, expForCards).forEach((a, idx) => recommendedCardRank.set(a.asset_id, idx + 1));
+
   const hrCardTargetName =
     ((document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null)?.value || '').trim() ||
     resolveDisjointMomentName ||
@@ -5690,9 +5719,17 @@ function renderResolveDisjointAssets(): void {
         return '';
       }
       const kRank = keeperRankMap.get(a.asset_id) || 0;
+      const recRank = recommendedCardRank.get(a.asset_id) || 0;
+      const recBadge =
+        recRank > 0
+          ? `<span class="badge badge-xs badge-purple font-mono" title="Top ${expForCards} recommended keeper by AI score: round(ln(${poolForCards})) = round(${lnForCards.toFixed(2)}) = ${expForCards}">🎯 Rec #${recRank}/${expForCards} (ln ${poolForCards})</span>`
+          : '';
       const isHighratedUnselected = !checked && Boolean(hrPreviewForCards?.highratedIds.has(a.asset_id));
+      const overTarget = resolveDisjointIsCurateM200 && totalSelected > expForCards;
       const keeperBadge = checked
-        ? `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Keeper ${kRank}/${totalSelected}</span>`
+        ? resolveDisjointIsCurateM200
+          ? `<span class="badge badge-xs ${overTarget ? 'badge-amber' : 'badge-green'} font-mono" style="font-weight: 700;">${overTarget ? '⚠️' : '★'} Keeper ${kRank} / 🎯 ${expForCards}</span>`
+          : `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Selected ${kRank}/${totalSelected}</span>`
         : isHighratedUnselected
           ? `<span class="badge badge-xs badge-purple font-mono" title="Score ${a.score_normalized.toFixed(4)} &gt; highest curated keeper (${(hrPreviewForCards?.maxKeeperScore ?? 0).toFixed(4)}) — will be copied to Highrated assets / ${escapeHtml(hrCardTargetName)} in Media Organizer">⚡ ➜ Highrated assets/${escapeHtml(hrCardTargetName)}</span>`
           : '<span class="badge badge-xs badge-amber font-mono">⏭️ Unselected</span>';
@@ -5743,6 +5780,7 @@ function renderResolveDisjointAssets(): void {
               </div>
               <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
                 ${keeperBadge}
+                ${recBadge}
                 ${qualBadge}
                 ${typeBadge}
                 ${dupBadge}
@@ -5772,11 +5810,16 @@ function renderResolveDisjointAssets(): void {
     btn.addEventListener('click', () => {
       const aid = btn.dataset.assetId || '';
       if (aid) {
+        const poolNow = getCombinedPoolTotalCount();
+        const { expected: expNow } = computeExpectedCuratedStats(poolNow);
         openCleanupPreviewModal(aid, {
           assetIds: allAssetIds,
           groupLabel: resolveDisjointMomentName,
           hideMarkRemoved: true,
           selectedIds: resolveDisjointSelectedIds,
+          targetSelectionCount: expNow,
+          logPoolTotal: poolNow,
+          defaultSort: 'score',
           onSelectionChange: () => {
             renderResolveDisjointAssets();
             updateResolveDisjointSelectionSummary();
@@ -7126,15 +7169,21 @@ export async function openResolveDisjointModal(
         is_duplicate_copy: Boolean(a.is_duplicate_copy)
       });
     });
-    if (isCurateM200 && assets.length > 0 && !srcGrouping?.manually_curated) {
-      // In Manual Curation mode, default keeper selection to the top ln(N) highest-scoring non-duplicate assets
+    if (isCurateM200 && assets.length > 0) {
       const { expected } = computeExpectedCuratedStats(assets.length);
-      const nonDups = assets.filter(a => !a.is_duplicate_copy);
-      const ranked = [...(nonDups.length ? nonDups : assets)].sort(
-        (a, b) => b.score_normalized - a.score_normalized
-      );
+      const existingOrgCurated = assets.filter(a => a.in_organizer_curated);
       resolveDisjointSelectedIds.clear();
-      ranked.slice(0, expected).forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
+      if (existingOrgCurated.length === expected && expected > 0) {
+        // Preserve already-curated Media Organizer keeper(s) when re-opening a curated Moment
+        existingOrgCurated.forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
+      } else {
+        // Default keeper selection to the top round(ln(N)) highest-scoring non-duplicate assets
+        const nonDups = assets.filter(a => !a.is_duplicate_copy);
+        const ranked = [...(nonDups.length ? nonDups : assets)].sort(
+          (a, b) => b.score_normalized - a.score_normalized
+        );
+        ranked.slice(0, expected).forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
+      }
     } else if (resolveDisjointSelectedIds.size === 0) {
       const nonDups = assets.filter(a => !a.is_duplicate_copy);
       (nonDups.length ? nonDups : assets).forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
@@ -8032,16 +8081,24 @@ async function ensureGroupingAssetsLoaded(g: UnifiedGroupingItem): Promise<Unifi
   return assets;
 }
 
-function getOrInitGroupingSelectedSet(gid: string, assets: UnifiedGroupingAssetItem[]): Set<string> {
+function getOrInitGroupingSelectedSet(
+  gid: string,
+  assets: UnifiedGroupingAssetItem[],
+  poolTotalHint?: number
+): Set<string> {
   if (!unifiedGroupingSelectedIds.has(gid)) {
     const sel = new Set<string>();
-    assets.forEach(a => {
-      if (!a.is_duplicate_copy && (a.qualified || assets.every(x => !x.qualified))) {
-        sel.add(a.asset_id);
-      }
-    });
-    if (sel.size === 0) {
-      assets.filter(a => !a.is_duplicate_copy).forEach(a => sel.add(a.asset_id));
+    const poolN = Math.max(poolTotalHint || 0, assets.length);
+    const { expected } = computeExpectedCuratedStats(poolN);
+    const existingCurated = assets.filter(a => a.in_curated && a.in_organizer_library);
+    if (existingCurated.length > 0 && existingCurated.length === expected) {
+      existingCurated.forEach(a => sel.add(a.asset_id));
+    } else {
+      const nonDups = assets.filter(a => !a.is_duplicate_copy);
+      const ranked = [...(nonDups.length ? nonDups : assets)].sort(
+        (a, b) => b.score_normalized - a.score_normalized
+      );
+      ranked.slice(0, expected).forEach(a => sel.add(a.asset_id));
     }
     unifiedGroupingSelectedIds.set(gid, sel);
   }
@@ -8052,7 +8109,7 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
   if (!assets.length) {
     return '<div class="text-muted font-mono" style="padding: 0.6rem;">No active assets found in this grouping.</div>';
   }
-  const selSet = getOrInitGroupingSelectedSet(g.grouping_id, assets);
+  const selSet = getOrInitGroupingSelectedSet(g.grouping_id, assets, g.event_total_assets || g.total_assets);
   const curatedOnly = unifiedGroupingCuratedOnly.has(g.grouping_id);
   const keeperRankMap = new Map<string, number>();
   let kCounter = 0;
@@ -8104,13 +8161,26 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
              ${g.is_tagged ? '' : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Consolidate</button>`}
              <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ${effectiveExpExp} keepers)">🎨 Manual Curate (${effectiveExpExp})</button>`;
 
+  const nonDupExp = assets.filter(a => !a.is_duplicate_copy);
+  const rankedRecExp = [...(nonDupExp.length ? nonDupExp : assets)].sort(
+    (a, b) => b.score_normalized - a.score_normalized
+  );
+  const expRecRankMap = new Map<string, number>();
+  rankedRecExp.slice(0, effectiveExpExp).forEach((a, idx) => expRecRankMap.set(a.asset_id, idx + 1));
+
   const rowsHtml = assets
     .map((a, idx) => {
       const checked = selSet.has(a.asset_id);
       if (curatedOnly && !checked) return '';
       const kRank = keeperRankMap.get(a.asset_id) || 0;
+      const expRecRank = expRecRankMap.get(a.asset_id) || 0;
+      const recBadge =
+        expRecRank > 0
+          ? `<span class="badge badge-xs badge-purple font-mono" title="Top ${effectiveExpExp} recommended keeper by AI score: round(ln(${evTotExp})) = round(${effectiveLnExp.toFixed(2)}) = ${effectiveExpExp}">🎯 Rec #${expRecRank}/${effectiveExpExp} (ln ${evTotExp})</span>`
+          : '';
+      const expOverTarget = selCount > effectiveExpExp;
       const keeperBadge = checked
-        ? `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Keeper ${kRank}/${selCount}</span>`
+        ? `<span class="badge badge-xs ${expOverTarget ? 'badge-amber' : 'badge-green'} font-mono" style="font-weight: 700;">${expOverTarget ? '⚠️' : '★'} Keeper ${kRank} / 🎯 ${effectiveExpExp}</span>`
         : '<span class="badge badge-xs badge-amber font-mono">⏭️ Unselected</span>';
       const qualBadge = a.qualified
         ? '<span class="badge badge-xs badge-green font-mono">★ QUALIFIED</span>'
@@ -8160,6 +8230,7 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
               </div>
               <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
                 ${keeperBadge}
+                ${recBadge}
                 ${qualBadge}
                 ${typeBadge}
                 ${batchBadge}
@@ -8276,11 +8347,15 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
     btn.addEventListener('click', () => {
       const aid = btn.dataset.assetId || '';
       if (!aid) return;
+      const poolN = Math.max(g.event_total_assets || g.total_assets, assets.length);
+      const { expected: expCnt } = computeExpectedCuratedStats(poolN);
       openCleanupPreviewModal(aid, {
         assetIds: assets.map(a => a.asset_id),
         groupLabel: `${g.name} (${g.moment_status})`,
         hideMarkRemoved: true,
         selectedIds: selSet,
+        targetSelectionCount: expCnt,
+        logPoolTotal: poolN,
         defaultSort: 'score',
         onSelectionChange: () => rerenderBody()
       });
@@ -8914,12 +8989,16 @@ function renderAllUnifiedGroupings(): void {
       if (!g || !aid) return;
       try {
         const assets = await ensureGroupingAssetsLoaded(g);
-        const selSet = getOrInitGroupingSelectedSet(gid, assets);
+        const poolN = Math.max(g.event_total_assets || g.total_assets, assets.length);
+        const { expected: expCnt } = computeExpectedCuratedStats(poolN);
+        const selSet = getOrInitGroupingSelectedSet(gid, assets, poolN);
         openCleanupPreviewModal(aid, {
           assetIds: assets.map(x => x.asset_id),
           groupLabel: `${g.name} (${g.moment_status})`,
           hideMarkRemoved: true,
           selectedIds: selSet,
+          targetSelectionCount: expCnt,
+          logPoolTotal: poolN,
           defaultSort: 'score',
           onSelectionChange: () => {
             if (expandedUnifiedGroupingIds.has(gid)) {

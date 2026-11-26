@@ -604,6 +604,7 @@ export interface DisjointDetailAsset {
   camera_model: string;
   primary_owner: string;
   qualified: boolean;
+  in_organizer_curated?: boolean;
   is_duplicate_copy?: boolean;
   duplicate_keeper_id?: string;
   duplicate_keeper_filename?: string;

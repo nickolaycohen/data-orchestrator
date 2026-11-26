@@ -32,6 +32,7 @@ export interface PreviewGroupContext {
   selectedIds?: Set<string>;
   selectableAssetIds?: Set<string>;
   targetSelectionCount?: number;
+  logPoolTotal?: number;
   defaultSort?: 'timestamp' | 'score';
   onSelectionChange?: (assetId: string, selected: boolean, selectedIds: Set<string>) => void;
 }
@@ -46,6 +47,7 @@ let previewRemoveFromGroupCb: ((assetId: string) => Promise<boolean | void>) | n
 let previewSelectedIds: Set<string> | null = null;
 let previewSelectableIds: Set<string> | null = null;
 let previewTargetCount: number | null = null;
+let previewLogPoolTotal: number | null = null;
 let previewSelectionChangeCb: ((assetId: string, selected: boolean, selectedIds: Set<string>) => void) | null = null;
 let previewSortMode: 'timestamp' | 'score' = 'timestamp';
 let previewFilterMode: 'all' | 'selected' | 'unselected' = 'all';
@@ -309,6 +311,10 @@ export function setupMediaCleanup(): void {
 
   document.getElementById('btn-preview-toggle-details')?.addEventListener('click', () => {
     togglePreviewDetailsExpanded();
+  });
+
+  document.getElementById('btn-preview-select-log-top')?.addEventListener('click', () => {
+    selectRecommendedLogTopInPreview();
   });
 
   document.getElementById('cleanup-preview-filmstrip')?.addEventListener(
@@ -1359,12 +1365,72 @@ function isPreviewAssetSelectable(assetId: string | null): boolean {
   return true;
 }
 
+function computePreviewLogarithmicStats(selectableIds: string[]): {
+  hasLogRule: boolean;
+  poolTotal: number;
+  lnRaw: number;
+  recommendedCount: number;
+  recommendedRankMap: Map<string, number>;
+} {
+  const poolTotal =
+    previewLogPoolTotal && previewLogPoolTotal > 0
+      ? previewLogPoolTotal
+      : previewTargetCount && previewTargetCount > 0
+        ? Math.max(selectableIds.length, previewTargetCount)
+        : 0;
+  if (poolTotal <= 0) {
+    return {
+      hasLogRule: false,
+      poolTotal: 0,
+      lnRaw: 0,
+      recommendedCount: 0,
+      recommendedRankMap: new Map<string, number>()
+    };
+  }
+  const lnRaw = Math.log(Math.max(1, poolTotal));
+  const recommendedCount =
+    previewTargetCount && previewTargetCount > 0
+      ? previewTargetCount
+      : Math.min(poolTotal, Math.max(1, Math.round(lnRaw)));
+  const nonDups = selectableIds.filter(id => !candidateAssetMeta.get(id)?.is_duplicate_copy);
+  const rankedByScore = [...(nonDups.length ? nonDups : selectableIds)].sort(compareAssetsByScore);
+  const recommendedRankMap = new Map<string, number>();
+  rankedByScore.slice(0, recommendedCount).forEach((id, idx) => recommendedRankMap.set(id, idx + 1));
+  return {
+    hasLogRule: Boolean(previewLogPoolTotal && previewLogPoolTotal > 0),
+    poolTotal,
+    lnRaw,
+    recommendedCount,
+    recommendedRankMap
+  };
+}
+
+function selectRecommendedLogTopInPreview(): void {
+  if (!previewSelectedIds) return;
+  const selectableIds = previewSelectableIds
+    ? previewGroupAssetIds.filter(id => previewSelectableIds!.has(id))
+    : previewGroupAssetIds;
+  const logStats = computePreviewLogarithmicStats(selectableIds);
+  if (!logStats.recommendedCount) return;
+  previewSelectedIds.clear();
+  logStats.recommendedRankMap.forEach((_rank, id) => previewSelectedIds!.add(id));
+  const firstId = Array.from(previewSelectedIds)[0] || previewModalAssetId || '';
+  if (firstId) {
+    previewSelectionChangeCb?.(firstId, true, previewSelectedIds);
+  }
+  syncPreviewSelectionControls();
+  updatePreviewGroupControls();
+}
+
 function syncPreviewSelectionControls(): void {
   const btnToggle = document.getElementById('btn-preview-toggle-select') as HTMLButtonElement | null;
   const curatedBadgeEl = document.getElementById('cleanup-preview-curated-badge');
   const stageEl = document.getElementById('cleanup-preview-stage');
   const stageRibbonEl = document.getElementById('cleanup-preview-stage-ribbon');
   const filterGroupEl = document.getElementById('cleanup-preview-filter-group');
+  const logBarEl = document.getElementById('cleanup-preview-log-curation-bar');
+  const logTextEl = document.getElementById('cleanup-preview-log-curation-text');
+  const logTopBtn = document.getElementById('btn-preview-select-log-top') as HTMLButtonElement | null;
 
   const selectableIds = previewSelectableIds
     ? previewGroupAssetIds.filter(id => previewSelectableIds!.has(id))
@@ -1378,26 +1444,76 @@ function syncPreviewSelectionControls(): void {
   const keeperRankMap = new Map<string, number>();
   selectedOrderedIds.forEach((id, idx) => keeperRankMap.set(id, idx + 1));
 
+  const logStats = computePreviewLogarithmicStats(selectableIds);
+  const selectedScores = selectedOrderedIds.map(id => candidateAssetMeta.get(id)?.score_normalized ?? 0);
+  const maxKeeperScore = selectedScores.length ? Math.max(...selectedScores) : 0;
+  const highratedPreviewSet = new Set<string>();
+  if (logStats.hasLogRule && selectedScores.length > 0 && logStats.poolTotal >= 2) {
+    selectableIds.forEach(id => {
+      if (!previewSelectedIds?.has(id)) {
+        const sc = candidateAssetMeta.get(id)?.score_normalized ?? 0;
+        if (sc > maxKeeperScore) highratedPreviewSet.add(id);
+      }
+    });
+  }
+
   const goalDenom =
-    previewTargetCount && previewTargetCount > 0 ? previewTargetCount : Math.max(1, selectedCount);
+    logStats.recommendedCount > 0 ? logStats.recommendedCount : previewTargetCount && previewTargetCount > 0 ? previewTargetCount : Math.max(1, selectedCount);
   const activeSelectable = Boolean(previewSelectedIds && isPreviewAssetSelectable(previewModalAssetId));
   const activeSelected = Boolean(activeSelectable && previewSelectedIds?.has(previewModalAssetId!));
   const activeKeeperRank = previewModalAssetId ? keeperRankMap.get(previewModalAssetId) || 0 : 0;
+  const activeRecRank = previewModalAssetId ? logStats.recommendedRankMap.get(previewModalAssetId) || 0 : 0;
+  const activeIsHighrated = Boolean(previewModalAssetId && highratedPreviewSet.has(previewModalAssetId));
+
+  if (logBarEl && logTextEl) {
+    if (logStats.hasLogRule && previewSelectedIds) {
+      logBarEl.style.display = 'flex';
+      const diff = selectedCount - logStats.recommendedCount;
+      const statusCls = diff === 0 ? 'badge-green' : 'badge-red';
+      const statusTxt =
+        diff === 0
+          ? `✅ ${selectedCount} / 🎯 ${logStats.recommendedCount} Keeper${logStats.recommendedCount === 1 ? '' : 's'} Selected (Matches ln(${logStats.poolTotal}) ✓)`
+          : diff > 0
+            ? `⚠️ ${selectedCount} / 🎯 ${logStats.recommendedCount} Selected (+${diff} over target — press Space to unselect ${diff})`
+            : `⚠️ ${selectedCount} / 🎯 ${logStats.recommendedCount} Selected (${Math.abs(diff)} more needed)`;
+      const hrPill =
+        highratedPreviewSet.size > 0
+          ? `<span class="badge badge-xs badge-purple font-mono" title="Unselected event asset(s) scoring above highest selected keeper (${maxKeeperScore.toFixed(4)}) copy to Highrated assets/[Moment]">⚡ ${highratedPreviewSet.size} (&gt; ${maxKeeperScore.toFixed(3)}) ➜ Highrated assets</span>`
+          : '';
+      logTextEl.innerHTML = `
+        <span>📐 <strong>Logarithmic Rule:</strong> <code>round(ln(${logStats.poolTotal})) = round(${logStats.lnRaw.toFixed(2)}) = ${logStats.recommendedCount}</code></span>
+        <span class="badge badge-xs ${statusCls} font-mono">${statusTxt}</span>
+        ${hrPill}
+        <span class="text-muted" title="Natural logarithm curation scale: round(ln(N))">📊 Scale: 1–4➜1 · 5–12➜2 · 13–33➜3 · 34–90➜4 · 91–244➜5</span>
+      `;
+      if (logTopBtn) {
+        logTopBtn.textContent = `🎯 Select Top ${logStats.recommendedCount} (ln ${logStats.poolTotal})`;
+      }
+    } else {
+      logBarEl.style.display = 'none';
+      logTextEl.innerHTML = '';
+    }
+  }
 
   if (curatedBadgeEl) {
     if (activeSelectable) {
       curatedBadgeEl.style.display = 'inline-flex';
       if (activeSelected) {
-        curatedBadgeEl.className = 'badge badge-xs badge-green font-mono';
-        const extraTarget =
-          previewTargetCount && selectedCount !== previewTargetCount
-            ? ` (${selectedCount}/${previewTargetCount})`
-            : '';
-        curatedBadgeEl.textContent = `★ Keeper ${activeKeeperRank} / ${goalDenom}${extraTarget}`;
+        const matchesGoal = !logStats.hasLogRule || selectedCount === goalDenom;
+        curatedBadgeEl.className = `badge badge-xs ${matchesGoal ? 'badge-green' : 'badge-amber'} font-mono`;
+        curatedBadgeEl.textContent = logStats.hasLogRule
+          ? matchesGoal
+            ? `★ Keeper ${activeKeeperRank} / 🎯 ${goalDenom} (ln ${logStats.poolTotal} ✓)`
+            : `⚠️ Keeper ${activeKeeperRank} · ${selectedCount} / 🎯 ${goalDenom} Selected (ln ${logStats.poolTotal} = ${logStats.lnRaw.toFixed(2)})`
+          : `★ Keeper ${activeKeeperRank} / ${goalDenom}`;
+      } else if (activeIsHighrated) {
+        curatedBadgeEl.className = 'badge badge-xs badge-purple font-mono';
+        curatedBadgeEl.textContent = `⚡ Unselected ➜ Highrated assets · ${selectedCount} / 🎯 ${goalDenom}`;
       } else {
         curatedBadgeEl.className = 'badge badge-xs badge-amber font-mono';
-        const denomLabel = previewTargetCount && previewTargetCount > 0 ? previewTargetCount : totalCount;
-        curatedBadgeEl.textContent = `⏭️ Excluded · ${selectedCount} / ${denomLabel} selected`;
+        curatedBadgeEl.textContent = logStats.hasLogRule
+          ? `⏭️ Unselected · ${selectedCount} / 🎯 ${goalDenom} (ln ${logStats.poolTotal})`
+          : `⏭️ Excluded · ${selectedCount} / ${goalDenom} selected`;
       }
     } else {
       curatedBadgeEl.style.display = 'none';
@@ -1412,7 +1528,7 @@ function syncPreviewSelectionControls(): void {
       btnToggle.textContent = activeSelected ? '☑ Selected (Space)' : '☐ Unselected (Space)';
       btnToggle.title = activeSelected
         ? 'Curated keeper — click or press Space to unselect'
-        : 'Excluded — click or press Space to select as keeper';
+        : 'Unselected — click or press Space to select as keeper';
     } else {
       btnToggle.style.display = 'none';
       btnToggle.classList.remove('is-selected', 'is-unselected');
@@ -1429,9 +1545,23 @@ function syncPreviewSelectionControls(): void {
       stageRibbonEl.style.display = 'inline-flex';
       stageRibbonEl.classList.toggle('is-selected', activeSelected);
       stageRibbonEl.classList.toggle('is-unselected', !activeSelected);
-      stageRibbonEl.textContent = activeSelected
-        ? `★ CURATED #${activeKeeperRank} / ${goalDenom}`
-        : '⏭️ UNSELECTED — Press Space to Keep';
+      const recTag =
+        logStats.hasLogRule && activeRecRank > 0
+          ? ` · 🎯 Top ln(${logStats.poolTotal}) Pick #${activeRecRank}/${goalDenom}`
+          : '';
+      if (activeSelected) {
+        if (logStats.hasLogRule && selectedCount !== goalDenom) {
+          stageRibbonEl.textContent = `⚠️ SELECTED (#${activeKeeperRank} of ${selectedCount}) — Target: 🎯 ${goalDenom} Keeper${goalDenom === 1 ? '' : 's'} (round(ln ${logStats.poolTotal}) = ${goalDenom})${recTag}`;
+        } else {
+          stageRibbonEl.textContent = logStats.hasLogRule
+            ? `★ CURATED #${activeKeeperRank} / 🎯 ${goalDenom} (ln(${logStats.poolTotal}) = ${logStats.lnRaw.toFixed(2)} ✓)${recTag}`
+            : `★ CURATED #${activeKeeperRank} / ${goalDenom}`;
+        }
+      } else if (activeIsHighrated) {
+        stageRibbonEl.textContent = `⚡ UNSELECTED ➜ Highrated assets (Score > Max Keeper ${maxKeeperScore.toFixed(4)})${recTag}`;
+      } else {
+        stageRibbonEl.textContent = `⏭️ UNSELECTED — Press Space to Keep (${selectedCount} / 🎯 ${goalDenom} selected)${recTag}`;
+      }
     } else {
       stageRibbonEl.style.display = 'none';
     }
@@ -1479,13 +1609,16 @@ function syncPreviewSelectionControls(): void {
       item.classList.toggle('filtered-hidden', hideByFilter);
 
       const idxBadge = item.querySelector<HTMLElement>('.cleanup-preview-thumb-idx');
+      const recRank = logStats.recommendedRankMap.get(aid) || 0;
+      const recMark = logStats.hasLogRule && recRank > 0 ? ' 🎯' : '';
+      const hrMark = highratedPreviewSet.has(aid) ? ' ⚡' : '';
       if (idxBadge) {
         if (selectable && isSelected && kRank > 0) {
           idxBadge.classList.add('is-keeper-rank');
-          idxBadge.textContent = `★ #${kRank}${isDup ? ' ♻️' : ''}`;
+          idxBadge.textContent = `★ #${kRank}${recMark}${isDup ? ' ♻️' : ''}`;
         } else {
           idxBadge.classList.remove('is-keeper-rank');
-          idxBadge.textContent = `#${idx + 1}${isDup ? ' ♻️' : ''}`;
+          idxBadge.textContent = `#${idx + 1}${recMark}${hrMark}${isDup ? ' ♻️' : ''}`;
         }
       }
 
@@ -1933,6 +2066,7 @@ export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupC
   previewSelectedIds = context?.selectedIds || null;
   previewSelectableIds = context?.selectableAssetIds || null;
   previewTargetCount = context?.targetSelectionCount ?? null;
+  previewLogPoolTotal = context?.logPoolTotal ?? null;
   previewSelectionChangeCb = context?.onSelectionChange || null;
   previewFilterMode = 'all';
   if (context?.defaultSort) {
@@ -1978,6 +2112,7 @@ export function closeCleanupPreviewModal(): void {
   previewSelectedIds = null;
   previewSelectableIds = null;
   previewTargetCount = null;
+  previewLogPoolTotal = null;
   previewSelectionChangeCb = null;
   previewFilterMode = 'all';
   togglePreviewDetailsExpanded(false);

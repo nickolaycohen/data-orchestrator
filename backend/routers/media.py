@@ -9597,6 +9597,24 @@ def _load_moment_detail_core(
         query_params,
     )
     raw_assets = cur.fetchall()
+    org_curated_aids: set[str] = set()
+    try:
+        for (c_aid,) in cur.execute(
+            """
+            SELECT DISTINCT moaa.asset_id
+            FROM media_organizer_album_assets moaa
+            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+            WHERE moa.is_folder = 0
+              AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
+              AND LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
+              AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+            """,
+            (m_name,),
+        ).fetchall():
+            if c_aid:
+                org_curated_aids.add(c_aid)
+    except sqlite3.OperationalError:
+        pass
     assets_out = []
     qual_dates: list[datetime] = []
     for r in raw_assets:
@@ -9622,6 +9640,7 @@ def _load_moment_detail_core(
                 "camera_model": cam or "Unknown",
                 "primary_owner": owner or "Shared/Other",
                 "qualified": is_qual,
+                "in_organizer_curated": aid in org_curated_aids,
             }
         )
 
