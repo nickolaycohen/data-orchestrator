@@ -8059,17 +8059,29 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
   const isCompletedM500Exp = g.moment_status === 'M500' && g.published_count > 0;
   const pendingPubExp = isCuratedExp ? (g.pending_publish_count ?? Math.max(0, g.curated_count - g.published_count)) : 0;
 
-  const primaryActionBtn =
-    isCuratedExp && pendingPubExp > 0
+  const expAllMediaFolder =
+    (g.photos_folders || []).find(pf => pf.library_scope !== 'organizer') || (g.source_all_media_folders || [])[0];
+  const expRemoveAlbum = expAllMediaFolder?.album_name || g.name;
+  const expRemovePath = expAllMediaFolder?.full_path || '';
+  const expSampleAid = assets[0]?.asset_id || g.preview_assets?.[0]?.asset_id || '';
+  const expDedupBtn =
+    g.is_duplicate_group && !g.is_deduped_group && g.duplicate_of_moment
+      ? `<button type="button" class="btn btn-xs btn-amber btn-ugrp-exp-dedup" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(`Deduplicate against '${g.duplicate_of_moment}' — merges DB tags & switches button to Remove (All-Media link)`)}">♻️ Dedup</button>`
+      : '';
+
+  const primaryActionBtn = g.is_deduped_group
+    ? `<button type="button" class="btn btn-xs btn-red btn-ugrp-exp-open-photos" data-is-remove-link="1" data-library-scope="all_media" data-album-name="${escapeHtml(expRemoveAlbum)}" data-full-path="${escapeHtml(expRemovePath)}" data-sample-aid="${escapeHtml(expSampleAid)}" title="${escapeHtml(`Deduped into '${g.duplicate_of_moment || ''}' — open '${expRemoveAlbum}' in All-Media.photoslibrary to manually delete this Moment in Photos`)}">🗑️ Remove in All-Media ↗</button>`
+    : isCuratedExp && pendingPubExp > 0
       ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Review & publish curated batch (Step 2B)">🚀 Publish (${g.propose_next_str || pendingPubExp})</button>
          <button type="button" class="btn btn-xs btn-outline btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Re-Curate / Tag</button>`
       : isCompletedM500Exp
         ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🔄 Republish</button>
            <button type="button" class="btn btn-xs btn-outline btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Re-Curate / Tag</button>`
         : g.kind === 'unassigned'
-          ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-assign-selected" data-grouping-id="${escapeHtml(g.grouping_id)}">✨ Tag &amp; Assign (${selCount})</button>
+          ? `${g.is_tagged ? '' : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-assign-selected" data-grouping-id="${escapeHtml(g.grouping_id)}">✨ Tag &amp; Assign (${selCount})</button>`}
              <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate-selected" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ${effectiveExpExp} keepers)">🎨 Manual Curate (${effectiveExpExp})</button>`
-          : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Consolidate</button>
+          : `${expDedupBtn}
+             ${g.is_tagged ? '' : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Consolidate</button>`}
              <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ${effectiveExpExp} keepers)">🎨 Manual Curate (${effectiveExpExp})</button>`;
 
   const rowsHtml = assets
@@ -8277,6 +8289,11 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
     void openPublishMomentModal(g.name);
   });
 
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-exp-dedup')?.addEventListener('click', async e => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    await triggerDedupMomentGrouping(g, btn);
+  });
+
   bodyEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-exp-open-photos').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
@@ -8284,12 +8301,11 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
       const fullPath = btn.dataset.fullPath || '';
       const sampleAid = btn.dataset.sampleAid || '';
       const libScope = btn.dataset.libraryScope || 'organizer';
-      if (
-        libScope === 'all_media' &&
-        !window.confirm(
-          `Switch Apple Photos to All-Media.photoslibrary (Read-Only) and spotlight "${albName}"?\n\nData Orchestrator never modifies All-Media — you can inspect or manually delete the legacy album in Photos, then switch back to Media Organizer when ready.`
-        )
-      ) {
+      const isRemoveLink = btn.dataset.isRemoveLink === '1';
+      const confirmMsg = isRemoveLink
+        ? `Open All-Media.photoslibrary (Read-Only) and spotlight "${albName}" so you can manually delete this duplicate Moment in Apple Photos?\n\n(Data Orchestrator never deletes from All-Media directly — once you delete the album in Photos, switch back to Media Organizer.)`
+        : `Switch Apple Photos to All-Media.photoslibrary (Read-Only) and spotlight "${albName}"?\n\nData Orchestrator never modifies All-Media — you can inspect or manually delete the legacy album in Photos, then switch back to Media Organizer when ready.`;
+      if (libScope === 'all_media' && !window.confirm(confirmMsg)) {
         return;
       }
       btn.disabled = true;
@@ -8314,6 +8330,33 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
     const ids = assets.filter(a => selSet.has(a.asset_id)).map(a => a.asset_id);
     void openResolveDisjointModal(g.name, '', { assetIds: ids, isHistoricalMoment: true });
   });
+}
+
+async function triggerDedupMomentGrouping(g: UnifiedGroupingItem, btn?: HTMLButtonElement | null): Promise<void> {
+  const canonical = (g.duplicate_of_moment || '').trim();
+  if (!canonical) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/media/memories/dedup-grouping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        duplicate_moment: g.name,
+        canonical_moment: canonical
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      alert(`Failed deduplicating "${g.name}": ${data.error || `HTTP ${res.status}`}`);
+      return;
+    }
+    unifiedGroupingAssetsCache.clear();
+    await fetchAllUnifiedGroupings(true);
+  } catch (err: any) {
+    alert(`Network error deduplicating "${g.name}": ${err?.message || 'Unknown error'}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function renderAllUnifiedGroupings(): void {
@@ -8375,6 +8418,7 @@ function renderAllUnifiedGroupings(): void {
     { key: 'M400', label: `✅ M400 Curated (${bySt['M400'] || 0})` },
     { key: 'M450', label: `🚀 M450 Part-Pub (${bySt['M450'] || 0})` },
     { key: 'M500', label: `🏁 M500 Complete (${bySt['M500'] || 0})` },
+    { key: 'Duplicates', label: `♻️ Duplicates (${bySt['Duplicates'] || 0})` },
     { key: 'Disjoint', label: `🔀 Disjoint <2 (${bySt['Disjoint'] || 0})` }
   ];
 
@@ -8397,6 +8441,8 @@ function renderAllUnifiedGroupings(): void {
     if (allGroupingsStatusFilter !== 'all') {
       if (allGroupingsStatusFilter === 'Disjoint') {
         if (!g.is_disjoint) return false;
+      } else if (allGroupingsStatusFilter === 'Duplicates') {
+        if (!g.is_duplicate_group && !g.is_deduped_group) return false;
       } else if (allGroupingsStatusFilter === 'ReadyToPublish') {
         const pend = g.pending_publish_count ?? 0;
         if (!g.curation_matches_log || !['M300', 'M400', 'M450'].includes(g.moment_status) || pend <= 0) return false;
@@ -8443,20 +8489,28 @@ function renderAllUnifiedGroupings(): void {
     return true;
   });
 
+  const tieBreakGroupOrder = (a: UnifiedGroupingItem, b: UnifiedGroupingItem): number =>
+    (a.is_deduped_group ? 1 : 0) - (b.is_deduped_group ? 1 : 0) ||
+    (a.is_duplicate_group ? 1 : 0) - (b.is_duplicate_group ? 1 : 0) ||
+    (a.in_organizer_library ? 0 : 1) - (b.in_organizer_library ? 0 : 1) ||
+    b.total_assets - a.total_assets ||
+    (b.published_count || 0) - (a.published_count || 0) ||
+    a.name.localeCompare(b.name);
+
   filtered.sort((a, b) => {
     if (allGroupingsSortMode === 'qual_avg') {
-      return b.qualified_avg_score - a.qualified_avg_score || b.avg_score - a.avg_score;
+      return b.qualified_avg_score - a.qualified_avg_score || b.avg_score - a.avg_score || tieBreakGroupOrder(a, b);
     }
     if (allGroupingsSortMode === 'count') {
-      return b.total_assets - a.total_assets || b.avg_score - a.avg_score;
+      return b.total_assets - a.total_assets || b.avg_score - a.avg_score || tieBreakGroupOrder(a, b);
     }
     if (allGroupingsSortMode === 'rank_score') {
-      return b.rank_score - a.rank_score || b.avg_score - a.avg_score;
+      return b.rank_score - a.rank_score || b.avg_score - a.avg_score || tieBreakGroupOrder(a, b);
     }
     if (allGroupingsSortMode === 'date') {
-      return (b.earliest_date || '').localeCompare(a.earliest_date || '') || b.avg_score - a.avg_score;
+      return (b.earliest_date || '').localeCompare(a.earliest_date || '') || b.avg_score - a.avg_score || tieBreakGroupOrder(a, b);
     }
-    return b.avg_score - a.avg_score || b.total_assets - a.total_assets;
+    return b.avg_score - a.avg_score || tieBreakGroupOrder(a, b);
   });
 
   if (visiblePill) {
@@ -8653,17 +8707,39 @@ function renderAllUnifiedGroupings(): void {
         Boolean(g.in_organizer_library) &&
         ((g.organizer_mapped_count || 0) >= g.total_assets && g.total_assets > 0);
       const tagBtnLabel = allCopiedToOrganizer ? '🏷️ Tag / Merge' : '🏷️ Tag &amp; Copy';
-      const quickActionHtml =
-        isCuratedRow && pendingPubCnt > 0
+      const dupGroupPillHtml = g.is_deduped_group
+        ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(
+            `Deduplicated into '${g.duplicate_of_moment || ''}' — click Remove on the right to open All-Media.photoslibrary and manually delete this legacy Moment in Photos`
+          )}">♻️ Deduped → ${escapeHtml(g.duplicate_of_moment || 'Primary')}</span>`
+        : g.is_duplicate_group && g.duplicate_of_moment
+          ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(
+              `100% of this group's active assets already belong to '${g.duplicate_of_moment}' — click Dedup to reconcile DB tags & switch button to Remove (All-Media link)`
+            )}">♻️ Dup of: ${escapeHtml(g.duplicate_of_moment)}</span>`
+          : '';
+      const removeTargetFolder = legacyFolders[0] || srcAllMedia[0];
+      const removeAlbumName = removeTargetFolder?.album_name || g.name;
+      const removeFullPath = removeTargetFolder?.full_path || '';
+      const dedupRowBtnHtml =
+        g.is_duplicate_group && !g.is_deduped_group && g.duplicate_of_moment
+          ? `<button type="button" class="btn btn-xs btn-amber btn-ugrp-row-action" data-action="dedup" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(
+              `Deduplicate '${g.name}' into '${g.duplicate_of_moment}' — merges DB tags & changes button to Remove (All-Media link)`
+            )}">♻️ Dedup</button>`
+          : '';
+      const quickActionHtml = g.is_deduped_group
+        ? `<button type="button" class="btn btn-xs btn-red btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-is-remove-link="1" data-library-scope="all_media" data-album-name="${escapeHtml(removeAlbumName)}" data-full-path="${escapeHtml(removeFullPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
+            `Deduped into '${g.duplicate_of_moment || ''}' — click to open '${removeAlbumName}' in All-Media.photoslibrary (Read-Only) so you can manually delete the Moment from Apple Photos`
+          )}">🗑️ Remove</button>`
+        : isCuratedRow && pendingPubCnt > 0
           ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(propTooltip || `Review & publish batch for '${g.name}'`)}">🚀 Publish</button>
              <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation or tags">🎨 Curate</button>`
           : isCompletedM500Row
             ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Publish / Republish dialog">🔄 Republish</button>
                <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation or tags">🎨 Curate</button>`
             : g.kind === 'unassigned'
-              ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & assign selected assets into Moments">✨ Tag &amp; Assign</button>
+              ? `${g.is_tagged ? '' : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & assign selected assets into Moments">✨ Tag &amp; Assign</button>`}
                  <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & manually curate ${expCurCnt} keepers (ln ${evTot}) directly into Curated & Ready to Publish">🎨 Curate (${expCurCnt})</button>`
-              : `<button type="button" class="btn btn-xs ${allCopiedToOrganizer ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & copy/consolidate into Moments">${tagBtnLabel}</button>
+              : `${dedupRowBtnHtml}
+                 ${g.is_tagged ? '' : `<button type="button" class="btn btn-xs ${allCopiedToOrganizer ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & copy/consolidate into Moments">${tagBtnLabel}</button>`}
                  <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & manually curate ${expCurCnt} keepers (ln ${evTot}) directly into Curated & Ready to Publish">🎨 Curate (${expCurCnt})</button>`;
 
       const cachedAssets = unifiedGroupingAssetsCache.get(g.grouping_id);
@@ -8683,6 +8759,7 @@ function renderAllUnifiedGroupings(): void {
                   <strong style="font-size: 0.85rem; color: var(--text-primary);">${escapeHtml(g.name)}</strong>
                   <span class="badge badge-xs ${stCls} font-mono">${escapeHtml(g.moment_status)}</span>
                   ${expCurPillHtml}
+                  ${dupGroupPillHtml}
                   ${mismatchPillHtml}
                   ${disjHtml}
                   ${batchesHtml}
@@ -8817,7 +8894,9 @@ function renderAllUnifiedGroupings(): void {
       const act = btn.dataset.action || '';
       const g = itemById.get(gid);
       if (!g) return;
-      if (act === 'assign') {
+      if (act === 'dedup') {
+        void triggerDedupMomentGrouping(g, btn);
+      } else if (act === 'assign') {
         const assets = g.inline_assets || unifiedGroupingAssetsCache.get(gid) || [];
         const selSet = getOrInitGroupingSelectedSet(gid, assets);
         const ids = assets.filter(a => selSet.has(a.asset_id)).map(a => a.asset_id);
@@ -8854,12 +8933,11 @@ function renderAllUnifiedGroupings(): void {
       const fullPath = btn.dataset.fullPath || '';
       const sampleAid = btn.dataset.sampleAid || '';
       const libScope = btn.dataset.libraryScope || 'organizer';
-      if (
-        libScope === 'all_media' &&
-        !window.confirm(
-          `Switch Apple Photos to All-Media.photoslibrary (Read-Only) and spotlight "${albName}"?\n\nData Orchestrator never modifies All-Media — you can inspect or manually delete the legacy album in Photos, then switch back to Media Organizer when ready.`
-        )
-      ) {
+      const isRemoveLink = btn.dataset.isRemoveLink === '1';
+      const confirmMsg = isRemoveLink
+        ? `Open All-Media.photoslibrary (Read-Only) and spotlight "${albName}" so you can manually delete this duplicate Moment in Apple Photos?\n\n(Data Orchestrator never deletes from All-Media directly — once you delete the album in Photos, switch back to Media Organizer.)`
+        : `Switch Apple Photos to All-Media.photoslibrary (Read-Only) and spotlight "${albName}"?\n\nData Orchestrator never modifies All-Media — you can inspect or manually delete the legacy album in Photos, then switch back to Media Organizer when ready.`;
+      if (libScope === 'all_media' && !window.confirm(confirmMsg)) {
         return;
       }
       btn.disabled = true;

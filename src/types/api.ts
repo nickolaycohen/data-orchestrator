@@ -898,6 +898,9 @@ export interface UnifiedGroupingItem {
   rule_id?: string;
   rule_reason?: string;
   is_disjoint: boolean;
+  is_duplicate_group?: boolean;
+  is_deduped_group?: boolean;
+  duplicate_of_moment?: string;
   manually_curated?: boolean;
   curation_matches_log?: boolean;
   curation_mismatch_count?: number;
