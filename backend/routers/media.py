@@ -3532,7 +3532,10 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         SELECT moa.album_name, moaa.asset_id
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-        WHERE moa.full_path LIKE 'Media Organizer on LaCie/ToBeCurated/%'
+        WHERE (
+            moa.full_path LIKE 'Media Organizer on LaCie/ToBeCurated/%'
+            OR LOWER(COALESCE(moa.parent_folder_name, '')) = 'tobecurated'
+        )
           AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore')
         """
     )
@@ -3548,7 +3551,11 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         SELECT moa.album_name, moaa.asset_id
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-        WHERE moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
+        WHERE (
+            moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
+            OR LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
+        )
+          AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore')
         """
     )
     curated_aids_by_album = {}
@@ -6915,6 +6922,15 @@ def _mark_assets_ignored_in_db(cur: sqlite3.Cursor, asset_ids: list[str]) -> int
     return len(clean_ids)
 
 
+def _compute_expected_curated_stats(event_total: int) -> tuple[int, float]:
+    """Compute expected curated keeper count as natural logarithm ln(total_assets), rounded (min 1 when non-empty)."""
+    if event_total <= 0:
+        return 0, 0.0
+    raw_ln = math.log(max(1, event_total))
+    exp_cnt = min(event_total, max(1, int(round(raw_ln))))
+    return exp_cnt, round(raw_ln, 2)
+
+
 def _export_curated_originals_from_source(
     cur: sqlite3.Cursor, moment_name: str, selected_ids: list[str]
 ) -> tuple[bool, Optional[str]]:
@@ -6934,23 +6950,35 @@ def _export_curated_originals_from_source(
                 album_name TEXT,
                 exported_filename TEXT,
                 exported_at_utc TEXT,
+                curation_stage TEXT DEFAULT 'curated',
                 PRIMARY KEY (asset_id, album_name)
             )
             """
         )
+        me_cols = {r[1] for r in cur.execute("PRAGMA table_info(moment_exports)").fetchall()}
+        has_cur_stage = "curation_stage" in me_cols
         for aid, (src_file, orig_fn) in src_map.items():
             safe_fn = os.path.basename(orig_fn) or src_file.name
             target_file = dest_dir / safe_fn
             if not target_file.exists():
                 shutil.copy2(src_file, target_file)
             try:
-                cur.execute(
-                    """
-                    INSERT OR REPLACE INTO moment_exports (asset_id, album_name, exported_filename, exported_at_utc)
-                    VALUES (?, ?, ?, datetime('now'))
-                    """,
-                    (aid, moment_name, safe_fn),
-                )
+                if has_cur_stage:
+                    cur.execute(
+                        """
+                        INSERT OR REPLACE INTO moment_exports (asset_id, album_name, exported_filename, exported_at_utc, curation_stage)
+                        VALUES (?, ?, ?, datetime('now'), 'curated')
+                        """,
+                        (aid, moment_name, safe_fn),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT OR REPLACE INTO moment_exports (asset_id, album_name, exported_filename, exported_at_utc)
+                        VALUES (?, ?, ?, datetime('now'))
+                        """,
+                        (aid, moment_name, safe_fn),
+                    )
             except sqlite3.OperationalError:
                 pass
         cur.execute(
@@ -6962,6 +6990,10 @@ def _export_curated_originals_from_source(
             """,
             (moment_name,),
         )
+        try:
+            _sync_publishing_recommendation_for_moment(cur, moment_name)
+        except Exception:
+            pass
         return True, None
     except Exception as e:
         return False, str(e)
@@ -7188,6 +7220,7 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
         WHERE moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
+           OR LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
         """
     )
     all_curated_album_aids = {r[0] for r in cur.fetchall()}
@@ -7209,7 +7242,7 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
     min_row = cur.fetchone()
     hist_min_raw = float(min_row[0]) if min_row and min_row[0] else 0.5315
 
-    # Match the same curated set used in _compute_mode_m_from_db
+    # Match curated assets from pipeline ranked view, Media Organizer 'Curated/<moment>' albums, assets.curated_album, and moment_exports
     by_aid: dict[str, tuple[str, str, float]] = {}
     cur.execute(
         """
@@ -7218,7 +7251,7 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
         JOIN month_batches mb ON v.month = mb.month
         LEFT JOIN assets a ON a.asset_id = v.asset_id
         WHERE mb.status_code >= '600'
-          AND TRIM(COALESCE(v.MomentsAlbumName, '')) = TRIM(?)
+          AND TRIM(LOWER(COALESCE(v.MomentsAlbumName, ''))) = TRIM(LOWER(?))
           AND v.score_normalized > ?
         """,
         (moment_name, hist_min_raw),
@@ -7228,21 +7261,53 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
             continue
         by_aid[aid] = (aid, fn or "", float(sc or 0.0))
 
-    # Also include rows recorded directly in moment_exports (curation_stage='curated') if missing above
-    cur.execute(
-        """
-        SELECT me.asset_id, COALESCE(v.original_filename, a.original_filename, ''), COALESCE(v.score_normalized, 0.0)
-        FROM moment_exports me
-        LEFT JOIN ranked_assets_view v ON me.asset_id = v.asset_id
-        LEFT JOIN assets a ON me.asset_id = a.asset_id
-        WHERE TRIM(me.album_name) = TRIM(?) AND me.curation_stage = 'curated'
-        """,
-        (moment_name,),
-    )
-    for aid, fn, sc in cur.fetchall():
-        if aid in excluded_aids or aid in by_aid:
-            continue
-        by_aid[aid] = (aid, fn or "", float(sc or 0.0))
+    # Directly include manually curated assets placed in Curated/<moment> (Media Organizer library or assets.curated_album)
+    try:
+        for aid, fn, sc in cur.execute(
+            """
+            SELECT DISTINCT a.asset_id,
+                   COALESCE(v.original_filename, a.original_filename, ''),
+                   COALESCE(v.score_normalized, 0.0)
+            FROM assets a
+            LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+            WHERE TRIM(LOWER(COALESCE(a.curated_album, ''))) = TRIM(LOWER(?))
+               OR a.asset_id IN (
+                   SELECT moaa.asset_id
+                   FROM media_organizer_album_assets moaa
+                   JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                   WHERE moa.is_folder = 0
+                     AND LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
+                     AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+               )
+            """,
+            (moment_name, moment_name),
+        ).fetchall():
+            if not aid or aid in excluded_aids or aid in by_aid:
+                continue
+            by_aid[aid] = (aid, fn or "", float(sc or 0.0))
+    except sqlite3.OperationalError:
+        pass
+
+    # Also include rows recorded directly in moment_exports if missing above
+    try:
+        me_cols = {r[1] for r in cur.execute("PRAGMA table_info(moment_exports)").fetchall()}
+        stage_clause = "AND COALESCE(me.curation_stage, 'curated') = 'curated'" if "curation_stage" in me_cols else ""
+        cur.execute(
+            f"""
+            SELECT me.asset_id, COALESCE(v.original_filename, a.original_filename, ''), COALESCE(v.score_normalized, 0.0)
+            FROM moment_exports me
+            LEFT JOIN ranked_assets_view v ON me.asset_id = v.asset_id
+            LEFT JOIN assets a ON me.asset_id = a.asset_id
+            WHERE TRIM(LOWER(me.album_name)) = TRIM(LOWER(?)) {stage_clause}
+            """,
+            (moment_name,),
+        )
+        for aid, fn, sc in cur.fetchall():
+            if aid in excluded_aids or aid in by_aid:
+                continue
+            by_aid[aid] = (aid, fn or "", float(sc or 0.0))
+    except sqlite3.OperationalError:
+        pass
 
     rows = []
     for aid, fn, sc in by_aid.values():
@@ -7281,7 +7346,26 @@ def _sync_publishing_recommendation_for_moment(
     else:
         top_batch = unpublished_rows[:9]
 
-    if not top_batch or len(rows) < 2:
+    is_org_curated = False
+    try:
+        is_org_curated = bool(
+            cur.execute(
+                """
+                SELECT 1 FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND COALESCE(library_scope, 'all_media') = 'organizer'
+                  AND LOWER(COALESCE(parent_folder_name, '')) = 'curated'
+                  AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                LIMIT 1
+                """,
+                (moment_name,),
+            ).fetchone()
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    min_rows_req = 1 if is_org_curated else 2
+    if not top_batch or len(rows) < min_rows_req:
         removed_folder = False
         if dest_dir.exists() and dest_dir.is_dir():
             try:
@@ -7936,6 +8020,8 @@ class CurateMomentRequest(BaseModel):
     unselected_action: str = "ignore"  # "ignore" | "skip_publishing" | "none"
     delete_tbc_album: bool = True
     export_to_lacie: bool = True
+    is_unassigned_cluster: bool = False
+    event_total_assets: Optional[int] = None
     apply_tags: list[SaveMomentTagItem] = []
     moment_tag_groups: list[MomentAssetTagGroup] = []
 
@@ -11069,7 +11155,9 @@ def _upsert_album_and_assets_in_db(
 
 @router.post("/memories/curate-moment")
 def curate_moment_action(req: CurateMomentRequest):
-    """Curate an M200/ToBeCurated Moment into Curated (only when original folder name is kept)."""
+    """Manually curate any Moment or Unassigned Grouping into Media Organizer.photoslibrary / Curated / <target_moment>
+    (and optionally export to LaCie -> M400 Ready to Publish), keeping All-Media 100% read-only.
+    """
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
         return {"ok": False, "error": "Media database unavailable"}
 
@@ -11080,16 +11168,9 @@ def curate_moment_action(req: CurateMomentRequest):
         return {"ok": False, "error": "Both source_moment and target_moment are required"}
     if "/" in target_moment:
         return {"ok": False, "error": "Target Moment name cannot contain '/'"}
-    if target_moment.lower() != src_moment.lower():
-        return {
-            "ok": False,
-            "error": (
-                f"New folder '{target_moment}' cannot be copied directly to Curated. "
-                f"Keep original name '{src_moment}' to move to Curated, or consolidate into Moments for a new folder."
-            ),
-        }
     if unselected_action not in ("ignore", "skip_publishing", "none"):
         return {"ok": False, "error": f"Unsupported unselected_action: {unselected_action}"}
+    is_renamed = target_moment.lower() != src_moment.lower()
 
     primary_selected_ids: list[str] = []
     seen_sel: set[str] = set()
@@ -11148,7 +11229,7 @@ def curate_moment_action(req: CurateMomentRequest):
             _ensure_organizer_library_tables(cur)
 
             del_org_names = list(extra_moments)
-            if req.delete_tbc_album:
+            if (req.delete_tbc_album or is_renamed) and not req.is_unassigned_cluster:
                 del_org_names.append(src_moment)
             sync_cur = _sync_assets_to_organizer_library(
                 cur,
@@ -11160,31 +11241,27 @@ def curate_moment_action(req: CurateMomentRequest):
             )
             if not sync_cur.get("ok"):
                 return sync_cur
+            cur_alb_pk = int(sync_cur["album_pk"])
             target_action = sync_cur["action_state"]
             photos_added = int(sync_cur.get("photos_added", 0))
             albums_deleted = int(sync_cur.get("albums_deleted", 0))
             newly_imported = int(sync_cur.get("newly_imported", 0))
 
-            if extra_asset_ids:
-                _sync_assets_to_organizer_library(
-                    cur,
-                    "Moments",
-                    target_moment,
-                    extra_asset_ids,
-                    allow_existing=True,
+            if selected_ids:
+                ph_sel = ",".join("?" for _ in selected_ids)
+                cur.execute(
+                    f"UPDATE assets SET MomentsAlbumName = ?, curated_album = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_sel})",
+                    [target_moment, target_moment, *selected_ids],
                 )
 
-            if primary_selected_ids:
-                ph_pri = ",".join("?" for _ in primary_selected_ids)
+            m_exists = cur.execute(
+                "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
+                (target_moment,),
+            ).fetchone()
+            if not m_exists:
                 cur.execute(
-                    f"UPDATE assets SET curated_album = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_pri})",
-                    [target_moment, *primary_selected_ids],
-                )
-            if extra_asset_ids:
-                ph_ext = ",".join("?" for _ in extra_asset_ids)
-                cur.execute(
-                    f"UPDATE assets SET MomentsAlbumName = ?, curated_album = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_ext})",
-                    [target_moment, target_moment, *extra_asset_ids],
+                    "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, 'Curated')",
+                    (cur_alb_pk, target_moment),
                 )
 
             if unselected_ids:
@@ -11199,25 +11276,38 @@ def curate_moment_action(req: CurateMomentRequest):
                     _upsert_organizer_album_in_db(cur, "Moments", "SkipPublishing", unselected_ids)
                     unselected_count_done = len(unselected_ids)
 
-            # Remove ToBeCurated staging album entries in Media Organizer library only (never All-Media)
-            if req.delete_tbc_album:
-                tbc_pks = [
-                    int(r[0])
-                    for r in cur.execute(
-                        """
-                        SELECT album_pk FROM media_organizer_albums
-                        WHERE is_folder = 0
-                          AND COALESCE(library_scope, 'all_media') = 'organizer'
-                          AND LOWER(COALESCE(parent_folder_name, '')) = 'tobecurated'
-                          AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-                        """,
-                        (src_moment,),
-                    ).fetchall()
-                ]
-                if tbc_pks:
-                    ph_t = ",".join("?" for _ in tbc_pks)
-                    cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_t})", tbc_pks)
-                    cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_t})", tbc_pks)
+            # Remove superseded Moments/ToBeCurated organizer album entries inside Media Organizer library only (never All-Media)
+            superseded_pks = [
+                int(r[0])
+                for r in cur.execute(
+                    """
+                    SELECT album_pk FROM media_organizer_albums
+                    WHERE is_folder = 0
+                      AND COALESCE(library_scope, 'all_media') = 'organizer'
+                      AND album_pk != ?
+                      AND (
+                        (TRIM(LOWER(album_name)) = TRIM(LOWER(?)) AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'tobecurated'))
+                        OR (TRIM(LOWER(album_name)) = TRIM(LOWER(?)) AND ? = 1)
+                      )
+                    """,
+                    (cur_alb_pk, target_moment, src_moment, 1 if (is_renamed and not req.is_unassigned_cluster) else 0),
+                ).fetchall()
+            ]
+            if superseded_pks:
+                ph_s = ",".join("?" for _ in superseded_pks)
+                cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_s})", superseded_pks)
+                cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_s})", superseded_pks)
+
+            if is_renamed and not req.is_unassigned_cluster:
+                cur.execute(
+                    """
+                    UPDATE OR IGNORE moment_tags
+                    SET moment_name = ?, updated_at_utc = datetime('now')
+                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                    """,
+                    (target_moment, src_moment),
+                )
+                cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (src_moment,))
 
             for am in extra_moments:
                 cur.execute(
@@ -11231,32 +11321,52 @@ def curate_moment_action(req: CurateMomentRequest):
                 cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (am,))
                 _delete_source_albums_from_db(cur, am)
 
+            cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+            if "manually_curated" not in cm_cols:
+                try:
+                    cur.execute("ALTER TABLE curated_moments ADD COLUMN manually_curated INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
+            if "event_total_assets" not in cm_cols:
+                try:
+                    cur.execute("ALTER TABLE curated_moments ADD COLUMN event_total_assets INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
+
+            recorded_event_total = max(
+                int(req.event_total_assets or 0),
+                len(selected_ids) + len(unselected_ids),
+            )
             cm_row = cur.execute(
-                "SELECT COALESCE(memory_stage, '') FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+                "SELECT COALESCE(memory_stage, ''), COALESCE(event_total_assets, 0) FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
                 (target_moment,),
             ).fetchone()
             cur_stage = (cm_row[0] if cm_row else "") or ""
+            prev_ev_tot = int(cm_row[1] or 0) if cm_row else 0
+            recorded_event_total = max(recorded_event_total, prev_ev_tot)
             next_stage = cur_stage if cur_stage in ("M400", "M450", "M500") else "M300"
             cur.execute(
                 """
                 INSERT INTO curated_moments (
                     moment_name, to_be_curated_count, curated_count, memory_stage,
-                    last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists
-                ) VALUES (?, 0, ?, ?, datetime('now'), 0, 1)
+                    last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists,
+                    manually_curated, event_total_assets
+                ) VALUES (?, 0, ?, ?, datetime('now'), 0, 1, 1, ?)
                 ON CONFLICT(moment_name) DO UPDATE SET
-                    to_be_curated_count = CASE WHEN ? = 1 THEN 0 ELSE curated_moments.to_be_curated_count END,
-                    photos_to_be_curated_exists = CASE WHEN ? = 1 THEN 0 ELSE curated_moments.photos_to_be_curated_exists END,
+                    to_be_curated_count = 0,
+                    photos_to_be_curated_exists = 0,
                     curated_count = excluded.curated_count,
                     photos_curated_exists = 1,
                     memory_stage = ?,
+                    manually_curated = 1,
+                    event_total_assets = MAX(COALESCE(curated_moments.event_total_assets, 0), excluded.event_total_assets),
                     last_pipeline_sync = datetime('now')
                 """,
                 (
                     target_moment,
                     len(selected_ids),
                     next_stage,
-                    1 if req.delete_tbc_album else 0,
-                    1 if req.delete_tbc_album else 0,
+                    recorded_event_total,
                     next_stage,
                 ),
             )
@@ -11348,7 +11458,7 @@ def curate_moment_action(req: CurateMomentRequest):
         "action": "curate",
         "source_moment": src_moment,
         "target_moment": target_moment,
-        "renamed": False,
+        "renamed": is_renamed,
         "combined_moments": [src_moment, *extra_moments],
         "selected_count": len(selected_ids),
         "photos_added": photos_added,
@@ -11518,11 +11628,13 @@ def get_all_unified_groupings():
                 cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
                 sf_col_expr = "COALESCE(shutterfly_url, '')" if "shutterfly_url" in cm_cols else "''"
                 yt_col_expr = "COALESCE(youtube_url, '')" if "youtube_url" in cm_cols else "''"
-                for m_nm, stg, cur_cnt, tbc_ex, cur_ex, sf_u, yt_u in cur.execute(
+                mc_col_expr = "COALESCE(manually_curated, 0)" if "manually_curated" in cm_cols else "0"
+                ev_col_expr = "COALESCE(event_total_assets, 0)" if "event_total_assets" in cm_cols else "0"
+                for m_nm, stg, cur_cnt, tbc_ex, cur_ex, sf_u, yt_u, man_cur, ev_tot in cur.execute(
                     f"""
                     SELECT moment_name, COALESCE(memory_stage, ''), COALESCE(curated_count, 0),
                            COALESCE(photos_to_be_curated_exists, 0), COALESCE(photos_curated_exists, 0),
-                           {sf_col_expr}, {yt_col_expr}
+                           {sf_col_expr}, {yt_col_expr}, {mc_col_expr}, {ev_col_expr}
                     FROM curated_moments
                     """
                 ).fetchall():
@@ -11541,6 +11653,8 @@ def get_all_unified_groupings():
                         "curated_exists": bool(cur_ex),
                         "shutterfly_url": (sf_u or "").strip(),
                         "youtube_url": (yt_u or "").strip(),
+                        "manually_curated": bool(man_cur),
+                        "event_total_assets": int(ev_tot or 0),
                     }
             except sqlite3.OperationalError:
                 pass
@@ -11794,11 +11908,39 @@ def get_all_unified_groupings():
 
                 has_unpub_cur = cur_cnt > pub_cnt and cur_cnt > 0
                 if not has_unpub_cur:
-                    can_pub_str, can_pub_ok = "—", False
+                    can_pub_str, can_pub_ok = ("✅ Complete" if (pub_cnt > 0 and cur_cnt > 0) else "—"), False
                 elif too_recent:
                     can_pub_str, can_pub_ok = f"⏳ {days_rem}d", False
                 else:
                     can_pub_str, can_pub_ok = "✅ Yes", True
+
+                # Step 2B pending publishing breakdown (curated unpublished queue + proposed next batch)
+                cur_candidate_aids = [
+                    aid for aid in valid_members
+                    if (aid in cur_set or (in_org_lib and m_status in ("M300", "M400", "M450"))) and aid not in pub_set
+                ]
+                pending_pub_cnt = len(cur_candidate_aids) if cur_candidate_aids else max(0, cur_cnt - pub_cnt)
+                if pending_pub_cnt > 0 and m_status in ("M300", "M400", "M450"):
+                    propose_next_cnt = pending_pub_cnt if pending_pub_cnt < 9 else min(9, math.ceil(pending_pub_cnt / 4))
+                    propose_next_str = (
+                        f"All ({pending_pub_cnt})"
+                        if pending_pub_cnt < 9
+                        else f"Top {propose_next_cnt} (1/4 of {pending_pub_cnt})"
+                    )
+                    proposed_pub_preview = [
+                        {"filename": asset_info_map[aid][0], "score": round(asset_info_map[aid][1], 4)}
+                        for aid in cur_candidate_aids[:propose_next_cnt]
+                    ]
+                    by_status_counts["ReadyToPublish"] = by_status_counts.get("ReadyToPublish", 0) + 1
+                else:
+                    propose_next_cnt = 0
+                    propose_next_str = "—"
+                    proposed_pub_preview = []
+
+                inferred_src_tot = sum(x["source_total_count"] for x in source_all_media_list if x.get("all_migrated"))
+                event_total_cnt = max(total_cnt, int(cm.get("event_total_assets") or 0), inferred_src_tot)
+                exp_cur_cnt, exp_cur_ln = _compute_expected_curated_stats(event_total_cnt)
+                man_cur_flag = bool(cm.get("manually_curated")) or (in_org_lib and m_status in ("M300", "M400", "M450", "M500") and cur_cnt > 0)
 
                 dates_clean = sorted(
                     asset_info_map[aid][2][:10]
@@ -11852,8 +11994,13 @@ def get_all_unified_groupings():
                         "moment_status": m_status,
                         "status_detail": st_detail,
                         "is_disjoint": is_disj,
+                        "manually_curated": man_cur_flag,
                         "can_publish_str": can_pub_str,
                         "can_publish_ok": can_pub_ok,
+                        "pending_publish_count": pending_pub_cnt,
+                        "propose_next_count": propose_next_cnt,
+                        "propose_next_str": propose_next_str,
+                        "proposed_publish_preview": proposed_pub_preview,
                         "parent_folders": parents_sorted,
                         "photos_folders": photos_folders_list,
                         "organizer_target_folders": org_target_folders_list,
@@ -11863,6 +12010,9 @@ def get_all_unified_groupings():
                         "curated_folder_exists": fs_curated_exists,
                         "pub_rec_folder_exists": fs_pub_rec_exists,
                         "total_assets": total_cnt,
+                        "event_total_assets": event_total_cnt,
+                        "expected_curated_count": exp_cur_cnt,
+                        "expected_curated_ln": exp_cur_ln,
                         "qualified_assets": qual_cnt,
                         "unique_count": total_cnt,
                         "curated_count": cur_cnt,
@@ -11994,6 +12144,7 @@ def get_all_unified_groupings():
                 if uniq_c < 2:
                     by_status_counts["Disjoint"] = by_status_counts.get("Disjoint", 0) + 1
 
+                exp_c_cnt, exp_c_ln = _compute_expected_curated_stats(total_c)
                 unified_groupings.append(
                     {
                         "grouping_id": f"unassigned::{folder_nm}",
@@ -12004,8 +12155,13 @@ def get_all_unified_groupings():
                         "rule_id": grp.get("rule_id") or "",
                         "rule_reason": grp.get("rule_reason") or "",
                         "is_disjoint": uniq_c < 2,
+                        "manually_curated": False,
                         "can_publish_str": "—",
                         "can_publish_ok": False,
+                        "pending_publish_count": 0,
+                        "propose_next_count": 0,
+                        "propose_next_str": "—",
+                        "proposed_publish_preview": [],
                         "parent_folders": [],
                         "organizer_target_folders": sorted(
                             unass_org_targets_agg.values(),
@@ -12013,6 +12169,9 @@ def get_all_unified_groupings():
                         ),
                         "organizer_mapped_count": unass_org_mapped_cnt,
                         "total_assets": total_c,
+                        "event_total_assets": total_c,
+                        "expected_curated_count": exp_c_cnt,
+                        "expected_curated_ln": exp_c_ln,
                         "qualified_assets": qual_c,
                         "unique_count": uniq_c,
                         "curated_count": 0,

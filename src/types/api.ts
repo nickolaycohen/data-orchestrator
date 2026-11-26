@@ -884,6 +884,11 @@ export interface UnifiedGroupingAssetItem {
   asset_tags?: MomentTagItem[];
 }
 
+export interface ProposedPublishPreviewItem {
+  filename: string;
+  score: number;
+}
+
 export interface UnifiedGroupingItem {
   grouping_id: string;
   kind: 'moment' | 'unassigned';
@@ -893,8 +898,13 @@ export interface UnifiedGroupingItem {
   rule_id?: string;
   rule_reason?: string;
   is_disjoint: boolean;
+  manually_curated?: boolean;
   can_publish_str: string;
   can_publish_ok: boolean;
+  pending_publish_count?: number;
+  propose_next_count?: number;
+  propose_next_str?: string;
+  proposed_publish_preview?: ProposedPublishPreviewItem[];
   parent_folders: string[];
   photos_folders?: UnifiedGroupingPhotosFolder[];
   organizer_target_folders?: OrganizerTargetFolderRef[];
@@ -904,6 +914,9 @@ export interface UnifiedGroupingItem {
   curated_folder_exists?: boolean;
   pub_rec_folder_exists?: boolean;
   total_assets: number;
+  event_total_assets?: number;
+  expected_curated_count?: number;
+  expected_curated_ln?: number;
   qualified_assets: number;
   unique_count: number;
   curated_count: number;

@@ -2703,9 +2703,22 @@
           <div id="resolve-disjoint-source-tagging-mount"></div>
 
           <div>
+            <div id="resolve-disjoint-expected-curated-bar"
+              style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; padding: 0.48rem 0.7rem; margin-bottom: 0.45rem; border-radius: 8px; background: rgba(139, 92, 246, 0.11); border: 1px solid rgba(139, 92, 246, 0.38);">
+              <div class="font-mono" id="resolve-disjoint-expected-curated-text"
+                style="font-size: 0.73rem; display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; color: #ddd6fe;">
+                <span>🎯 <strong>Expected Curated Target (ln N):</strong> —</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+                <button type="button" class="btn btn-xs btn-purple" id="btn-disjoint-select-expected"
+                  title="Auto-select the top ln(N) highest-scoring non-duplicate assets as curated keepers">🎯 Select Top ln(N)</button>
+                <button type="button" class="btn btn-xs btn-outline" id="btn-disjoint-select-qualified"
+                  title="Select all qualified non-duplicate assets">★ All Qualified</button>
+              </div>
+            </div>
             <div
               style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
-              <strong style="font-size: 0.8rem;">Assets in Disjoint Moment (click thumbnail to preview)</strong>
+              <strong style="font-size: 0.8rem;">Assets in Grouping / Moment (click thumbnail to preview, check keepers)</strong>
               <div style="display: flex; align-items: center; gap: 0.4rem;">
                 <span class="badge badge-xs badge-purple font-mono" id="resolve-disjoint-selected-pill">0
                   selected</span>
@@ -2857,20 +2870,23 @@
               <span>Clean up superseded album inside <code>Media Organizer</code> library (<code>All-Media</code> is never modified)</span>
             </label>
 
+            <label id="resolve-disjoint-manual-curate-toggle-bar"
+              style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; padding: 0.52rem 0.75rem; border-radius: 8px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.38); cursor: pointer;">
+              <span style="display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.76rem; font-weight: 600; color: #a7f3d0;">
+                <input type="checkbox" id="resolve-disjoint-manual-curate-toggle" />
+                <span>🎨 Manual Curation Step — Approve Selected Keepers directly into <code>Curated</code> &amp; Ready to Publish</span>
+              </span>
+              <span id="resolve-disjoint-manual-curate-target-pill" class="badge badge-xs badge-green font-mono">🎯 Target: —</span>
+            </label>
+
             <div id="resolve-disjoint-curate-box"
               style="display: none; padding: 0.6rem 0.75rem; border-radius: 8px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.32); flex-direction: column; gap: 0.45rem;">
               <div
                 style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
-                <strong id="curate-m200-box-title" style="font-size: 0.77rem; color: #a7f3d0;">🎨 M200 Curation
-                  Workflow (ToBeCurated ➜ Curated ➜ Export)</strong>
+                <strong id="curate-m200-box-title" style="font-size: 0.77rem; color: #a7f3d0;">🎨 Manual Curation
+                  Workflow (Keepers ➜ Curated ➜ Export &amp; Ready to Publish)</strong>
                 <span id="curate-m200-counts-summary" class="badge badge-xs badge-green font-mono">0 keepers · 0
                   unselected</span>
-              </div>
-              <div id="curate-m200-new-folder-notice" class="font-mono"
-                style="display: none; font-size: 0.71rem; padding: 0.38rem 0.55rem; border-radius: 6px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.42); color: #fde68a;">
-                🔀 New folder name introduced — new folders cannot be copied directly to <code>Curated</code>.
-                Submitting will consolidate all selected Moments into <code>Moments</code> (<code>M100</code>) and
-                clean up prior <code>ToBeCurated</code> / source albums.
               </div>
               <div
                 style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; font-size: 0.74rem; color: var(--text-secondary);">
@@ -2888,13 +2904,12 @@
               <label id="curate-m200-delete-tbc-row"
                 style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
                 <input type="checkbox" id="curate-m200-delete-tbc" checked />
-                <span>Clean up <code>ToBeCurated</code> staging album inside <code>Media Organizer</code> library (<code>All-Media</code> is never modified)</span>
+                <span>Clean up superseded <code>Moments / ToBeCurated</code> staging album inside <code>Media Organizer</code> library (<code>All-Media</code> is never modified)</span>
               </label>
               <label id="curate-m200-export-row"
                 style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">
                 <input type="checkbox" id="curate-m200-export-lacie" checked />
-                <span>Run final step: export <code>Curated / Target</code> to LaCie &amp; promote stage to
-                  <code>M400</code> (Option [2])</span>
+                <span>Export <code>Curated / Target</code> to LaCie &amp; sync <code>Publishing Recommendation</code> (promotes to <code>M400</code> Ready to Publish)</span>
               </label>
             </div>
           </div>
