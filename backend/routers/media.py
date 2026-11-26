@@ -2887,6 +2887,39 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     )
     excluded_aids = {r[0] for r in cur.fetchall()}
 
+    # Assets already belonging to a non-deleted Moment via publications, curated/TBC columns, or Moment albums
+    assigned_moment_aids: set[str] = set()
+    for q_assigned in (
+        """
+        SELECT DISTINCT p.asset_uuid
+        FROM publications p
+        LEFT JOIN curated_moments cm ON TRIM(LOWER(cm.moment_name)) = TRIM(LOWER(p.moment_name))
+        WHERE p.asset_uuid IS NOT NULL AND p.asset_uuid != ''
+          AND LOWER(COALESCE(cm.memory_stage, '')) != 'deleted'
+        """,
+        """
+        SELECT DISTINCT moaa.asset_id
+        FROM media_organizer_album_assets moaa
+        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+        WHERE moa.is_folder = 0
+          AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'memories', 'generic moments')
+        """,
+        """
+        SELECT a.asset_id
+        FROM assets a
+        LEFT JOIN curated_moments cm ON TRIM(LOWER(cm.moment_name)) = TRIM(LOWER(COALESCE(NULLIF(TRIM(a.curated_album), ''), NULLIF(TRIM(a.to_be_curated_album), ''))))
+        WHERE (COALESCE(TRIM(a.curated_album), '') != '' OR COALESCE(TRIM(a.to_be_curated_album), '') != '')
+          AND LOWER(COALESCE(cm.memory_stage, '')) != 'deleted'
+        """,
+    ):
+        try:
+            for (a_id_m,) in cur.execute(q_assigned).fetchall():
+                if a_id_m:
+                    assigned_moment_aids.add(a_id_m)
+        except sqlite3.OperationalError:
+            pass
+    excluded_or_assigned_aids = excluded_aids | assigned_moment_aids
+
     # 1. Dynamic threshold: top unassigned score among batches >= 600 (excluding trashed)
     cur.execute(
         """
@@ -2904,7 +2937,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     live_curr_th = None
     live_curr_th_aid = None
     for aid, sc in cur.fetchall():
-        if aid not in excluded_aids and sc is not None:
+        if aid not in excluded_or_assigned_aids and sc is not None:
             live_curr_th = float(sc)
             live_curr_th_aid = aid
             break
@@ -2953,7 +2986,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         """,
         (hist_min_raw,),
     )
-    unassigned_rows = [r for r in cur.fetchall() if r[0] not in excluded_aids]
+    unassigned_rows = [r for r in cur.fetchall() if r[0] not in excluded_or_assigned_aids]
 
     cur.execute("SELECT DISTINCT album_name FROM moments WHERE parent_folder_name = 'Moments'")
     valid_moment_albums = {r[0] for r in cur.fetchall() if r[0]}
@@ -12754,7 +12787,12 @@ def get_all_unified_groupings():
                     }
                 )
 
-            # 6. Add Unassigned Groupings from Mode [M] clustering engine
+            # 6. Add Unassigned Groupings from Mode [M] clustering engine (excluding any asset already in a Moment grouping)
+            moment_grouped_aids: set[str] = set()
+            for lc_m, s_m in valid_members_by_lc.items():
+                if is_true_moment_by_lc.get(lc_m):
+                    moment_grouped_aids.update(s_m)
+
             try:
                 mode_m_data = _compute_mode_m_from_db(cur, hist_min, None)
             except sqlite3.OperationalError:
@@ -12762,8 +12800,10 @@ def get_all_unified_groupings():
             unassigned_clusters = mode_m_data.get("unassigned_clusters", [])
             for grp in unassigned_clusters:
                 c_assets = [
-                    a for a in (grp.get("assets") or [])
+                    a
+                    for a in (grp.get("assets") or [])
                     if (a.get("asset_id") or "") not in migrated_aids
+                    and (a.get("asset_id") or "") not in moment_grouped_aids
                 ]
                 if not c_assets:
                     continue
