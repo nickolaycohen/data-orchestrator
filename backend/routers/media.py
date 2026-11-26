@@ -6931,6 +6931,79 @@ def _compute_expected_curated_stats(event_total: int) -> tuple[int, float]:
     return exp_cnt, round(raw_ln, 2)
 
 
+def _compute_moment_event_pool_count(cur: sqlite3.Cursor, moment_name: str, fallback_min: int = 0) -> int:
+    """Compute full pre-curation event asset pool size N for a Moment across Media Organizer + All-Media."""
+    m_clean = (moment_name or "").strip()
+    if not m_clean:
+        return max(0, fallback_min)
+    m_lc = m_clean.lower()
+    ev_db = 0
+    try:
+        cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+        if "event_total_assets" in cm_cols:
+            row_ev = cur.execute(
+                "SELECT COALESCE(event_total_assets, 0) FROM curated_moments WHERE TRIM(LOWER(moment_name)) = ? LIMIT 1",
+                (m_lc,),
+            ).fetchone()
+            if row_ev and row_ev[0]:
+                ev_db = int(row_ev[0])
+    except sqlite3.OperationalError:
+        pass
+
+    other_org_aids: set[str] = set()
+    try:
+        for (o_aid,) in cur.execute(
+            """
+            SELECT DISTINCT moaa.asset_id
+            FROM media_organizer_album_assets moaa
+            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+            WHERE moa.is_folder = 0
+              AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
+              AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded')
+              AND LOWER(TRIM(moa.album_name)) != ?
+            """,
+            (m_lc,),
+        ).fetchall():
+            if o_aid:
+                other_org_aids.add(o_aid)
+    except sqlite3.OperationalError:
+        pass
+
+    pool_aids: set[str] = set()
+    try:
+        for (aid,) in cur.execute(
+            """
+            SELECT DISTINCT moaa.asset_id
+            FROM media_organizer_album_assets moaa
+            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+            WHERE moa.is_folder = 0
+              AND LOWER(TRIM(moa.album_name)) = ?
+              AND LOWER(COALESCE(moa.parent_folder_name, 'moments')) IN ('moments', 'curated', 'tobecurated', 'memories', 'generic moments')
+            """,
+            (m_lc,),
+        ).fetchall():
+            if aid and aid not in other_org_aids:
+                pool_aids.add(aid)
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        for (aid,) in cur.execute(
+            """
+            SELECT asset_id FROM assets
+            WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = ?
+              AND COALESCE(removed_from_source, 0) = 0
+            """,
+            (m_lc,),
+        ).fetchall():
+            if aid and aid not in other_org_aids:
+                pool_aids.add(aid)
+    except sqlite3.OperationalError:
+        pass
+
+    return max(fallback_min, ev_db, len(pool_aids))
+
+
 def _export_curated_originals_from_source(
     cur: sqlite3.Cursor, moment_name: str, selected_ids: list[str]
 ) -> tuple[bool, Optional[str]]:
@@ -7609,6 +7682,17 @@ def get_moment_publish_info(moment_name: str):
 
             rows, moment_pub_aids = _get_curated_asset_rows_for_moment(cur, m_name)
             curated_total = len(rows)
+            event_pool_tot = _compute_moment_event_pool_count(cur, m_name, fallback_min=curated_total)
+            exp_cur_cnt, exp_cur_ln = _compute_expected_curated_stats(event_pool_tot)
+            is_completed_m500 = curated_total > 0 and len(moment_pub_aids) >= curated_total
+            if curated_total != exp_cur_cnt and not is_completed_m500:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Moment '{m_name}' has {curated_total} curated item(s), which does not match expected logarithmic target "
+                        f"{exp_cur_cnt} (ln({event_pool_tot}) = {exp_cur_ln:.2f}). Curate '{m_name}' to {exp_cur_cnt} keeper(s) before publishing."
+                    ),
+                }
             unpublished_rows = [(aid, fn, sc) for aid, fn, sc, is_pub in rows if not is_pub]
 
             moment_dir = CURATED_LACIE_DIR / m_name
@@ -7686,6 +7770,17 @@ def curate_publish_batch_action(req: CuratePublishBatchRequest):
 
             rows, moment_pub_aids = _get_curated_asset_rows_for_moment(cur, m_name)
             curated_total = len(rows)
+            event_pool_tot = _compute_moment_event_pool_count(cur, m_name, fallback_min=curated_total)
+            exp_cur_cnt, exp_cur_ln = _compute_expected_curated_stats(event_pool_tot)
+            is_completed_m500 = curated_total > 0 and len(moment_pub_aids) >= curated_total
+            if curated_total != exp_cur_cnt and not is_completed_m500:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Moment '{m_name}' has {curated_total} curated item(s), which does not match expected logarithmic target "
+                        f"{exp_cur_cnt} (ln({event_pool_tot}) = {exp_cur_ln:.2f}). Curate '{m_name}' to {exp_cur_cnt} keeper(s) before publishing."
+                    ),
+                }
             unpublished_rows = [(aid, fn, sc) for aid, fn, sc, is_pub in rows if not is_pub]
 
             # Update curated_moments stage if skipping remaining unpublished items completed M500
@@ -7854,6 +7949,18 @@ def publish_moment_assets(req: PublishMomentRequest):
         conn.execute("PRAGMA busy_timeout = 30000")
         try:
             cur = conn.cursor()
+            cur_rows_chk, pub_aids_chk = _get_curated_asset_rows_for_moment(cur, m_name)
+            cur_tot_chk = len(cur_rows_chk)
+            ev_pool_chk = _compute_moment_event_pool_count(cur, m_name, fallback_min=cur_tot_chk)
+            exp_chk, exp_ln_chk = _compute_expected_curated_stats(ev_pool_chk)
+            if cur_tot_chk != exp_chk and not (cur_tot_chk > 0 and len(pub_aids_chk) >= cur_tot_chk):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Cannot publish '{m_name}': curated count ({cur_tot_chk}) does not match logarithmic target "
+                        f"{exp_chk} (ln({ev_pool_chk}) = {exp_ln_chk:.2f}). Curate '{m_name}' first."
+                    ),
+                }
             skip_candidates = [
                 s.strip()
                 for s in (req.skip_publishing_asset_ids or [])
@@ -11519,11 +11626,19 @@ def get_all_unified_groupings():
             # 3. Album memberships across Apple Photos (Media Organizer target library + All-Media source library)
             mapped_src_aids, org_folders_by_src_aid = _reconcile_organizer_albums_from_photos_db(cur)
             migrated_aids: set[str] = set(mapped_src_aids) | set(org_folders_by_src_aid.keys())
+            migrated_moment_lcs_by_aid: dict[str, set[str]] = {
+                aid_k: {x["album_name"].lower() for x in refs if x.get("album_name")}
+                for aid_k, refs in org_folders_by_src_aid.items()
+            }
             album_parents_by_lc: dict[str, set[str]] = {}
             photos_folders_by_lc: dict[str, dict[str, dict]] = {}
             canonical_name_by_lc: dict[str, str] = {}
             tbc_aids_by_lc: dict[str, set[str]] = {}
             cur_aids_by_lc: dict[str, set[str]] = {}
+            org_cur_aids_by_lc: dict[str, set[str]] = {}
+            org_tbc_aids_by_lc: dict[str, set[str]] = {}
+            all_media_cur_aids_by_lc: dict[str, set[str]] = {}
+            raw_all_media_moment_aids_by_lc: dict[str, set[str]] = {}
             album_aids_by_lc: dict[str, set[str]] = {}
             org_album_aids_by_lc: dict[str, set[str]] = {}
             all_media_folders_by_aid: dict[str, list[dict]] = {}
@@ -11570,15 +11685,27 @@ def get_all_unified_groupings():
                             "_aids": set(),
                         },
                     )
+                    par_lc = par_clean.lower()
+                    if aid and scope_clean == "all_media" and par_lc not in _non_moment_src_parents:
+                        # Record pre-curation raw All-Media Moment pool (excluding items migrated to a DIFFERENT organizer moment)
+                        aid_org_lcs = migrated_moment_lcs_by_aid.get(aid, set())
+                        if not aid_org_lcs or lc in aid_org_lcs:
+                            raw_all_media_moment_aids_by_lc.setdefault(lc, set()).add(aid)
                     if aid and aid not in excluded_aids:
                         entry["_aids"].add(aid)
                         album_aids_by_lc.setdefault(lc, set()).add(aid)
                         if scope_clean == "organizer":
                             org_album_aids_by_lc.setdefault(lc, set()).add(aid)
+                            if par_lc == "curated":
+                                org_cur_aids_by_lc.setdefault(lc, set()).add(aid)
+                            elif par_lc == "tobecurated":
+                                org_tbc_aids_by_lc.setdefault(lc, set()).add(aid)
                         else:
                             fp_lc = fp_clean.lower()
                             all_media_album_aids_by_fp.setdefault(fp_lc, set()).add(aid)
-                            if par_clean.lower() not in _non_moment_src_parents:
+                            if par_lc == "curated":
+                                all_media_cur_aids_by_lc.setdefault(lc, set()).add(aid)
+                            if par_lc not in _non_moment_src_parents:
                                 am_bucket = all_media_folders_by_aid.setdefault(aid, [])
                                 if not any(x["full_path"].lower() == fp_lc for x in am_bucket):
                                     am_bucket.append(
@@ -11588,7 +11715,6 @@ def get_all_unified_groupings():
                                             "full_path": fp_clean,
                                         }
                                     )
-                        par_lc = par_clean.lower()
                         if par_lc == "tobecurated":
                             tbc_aids_by_lc.setdefault(lc, set()).add(aid)
                         elif par_lc == "curated":
@@ -11773,79 +11899,31 @@ def get_all_unified_groupings():
                     | album_aids_by_lc.get(lc, set())
                     | pub_aids_by_lc.get(lc, set())
                 )
-                if in_org_lib:
-                    org_members = org_album_aids_by_lc.get(lc, set()) | pub_aids_by_lc.get(lc, set())
-                    base_members = org_members if org_members else member_aids
-                    valid_members = [aid for aid in base_members if aid in asset_info_map]
-                else:
-                    # Omit assets already migrated to Media Organizer library; omit source Moment line item once 0 unmigrated remain
-                    valid_members = [
-                        aid for aid in member_aids if aid in asset_info_map and aid not in migrated_aids
-                    ]
-                if not valid_members:
+                # Include all active assets belonging to THIS Moment (including unmigrated All-Media assets of a same-named prior Moment),
+                # while omitting assets that were migrated away into a DIFFERENT Media Organizer Moment.
+                own_active_aids = [
+                    aid
+                    for aid in member_aids
+                    if aid in asset_info_map
+                    and (aid not in migrated_aids or lc in migrated_moment_lcs_by_aid.get(aid, set()))
+                ]
+                if not own_active_aids:
                     continue
-
-                valid_members.sort(key=lambda x: (-asset_info_map[x][1], asset_info_map[x][2], x))
-                scores_all = [asset_info_map[aid][1] for aid in valid_members]
-                qual_scores = [s for s in scores_all if s > hist_min]
-                total_cnt = len(valid_members)
-                qual_cnt = len(qual_scores)
-                avg_sc = sum(scores_all) / total_cnt if total_cnt else 0.0
-                qual_avg_sc = sum(qual_scores) / qual_cnt if qual_cnt else avg_sc
-                min_sc = min(scores_all) if scores_all else 0.0
-                max_sc = max(scores_all) if scores_all else 0.0
-                rank_sc = qual_avg_sc * math.log(max(1, qual_cnt) + 1)
 
                 cm = cm_by_lc.get(lc, {})
                 raw_stage = cm.get("stage", "M100")
-                tbc_cnt = len(tbc_aids_by_lc.get(lc, set()))
-                cur_set = cur_aids_by_lc.get(lc, set())
                 pub_set = pub_aids_by_lc.get(lc, set())
                 pub_cnt = len(pub_set)
+                org_cur_set = {aid for aid in org_cur_aids_by_lc.get(lc, set()) if aid in asset_info_map}
+                legacy_cur_set = {aid for aid in all_media_cur_aids_by_lc.get(lc, set()) if aid in asset_info_map}
+                tbc_cnt = len(org_tbc_aids_by_lc.get(lc, set())) if in_org_lib else len(tbc_aids_by_lc.get(lc, set()))
+                tbc_exists = bool(tbc_cnt > 0 or (not in_org_lib and cm.get("tbc_exists")))
                 fs_curated_exists = bool(lacie_mounted and (CURATED_LACIE_DIR / name).is_dir())
                 fs_pub_rec_exists = bool(lacie_mounted and (PUBLISHING_RECOMMENDATION_DIR / name).is_dir())
-                cur_exists = bool(cm.get("curated_exists") or cur_set or cm.get("curated_count", 0) > 0)
-                tbc_exists = bool(tbc_cnt > 0 or cm.get("tbc_exists"))
-                cur_cnt = max(len(cur_set), cm.get("curated_count", 0))
-
-                raw_f_bucket = photos_folders_by_lc.get(lc, {})
-                photos_folders_list = [
-                    {
-                        "album_name": fv.get("album_name") or name,
-                        "parent_folder": fv["parent_folder"],
-                        "full_path": fv["full_path"],
-                        "asset_count": max(int(fv["asset_count"] or 0), len(fv["_aids"])),
-                        "library_scope": fv.get("library_scope", "all_media"),
-                    }
-                    for fv in sorted(
-                        raw_f_bucket.values(),
-                        key=lambda x: (0 if x.get("library_scope") == "organizer" else 1, x["full_path"].lower()),
-                    )
-                ]
-                in_org_lib = any(pf.get("library_scope") == "organizer" for pf in photos_folders_list)
-                org_mapped_cnt = sum(1 for aid in valid_members if aid in mapped_src_aids)
-                org_targets_agg: dict[str, dict] = {}
-                for aid in valid_members:
-                    for oref in org_folders_by_src_aid.get(aid, []):
-                        k_fp = oref["full_path"].lower()
-                        t_ent = org_targets_agg.setdefault(
-                            k_fp,
-                            {
-                                "album_name": oref["album_name"],
-                                "parent_folder": oref["parent_folder"],
-                                "full_path": oref["full_path"],
-                                "matched_count": 0,
-                            },
-                        )
-                        t_ent["matched_count"] += 1
-                org_target_folders_list = sorted(
-                    org_targets_agg.values(),
-                    key=lambda x: (-x["matched_count"], x["full_path"].lower()),
-                )
 
                 src_am_agg: dict[str, dict] = {}
                 if in_org_lib:
-                    for aid in valid_members:
+                    for aid in own_active_aids:
                         for am_ref in all_media_folders_by_aid.get(aid, []):
                             k_am = am_ref["full_path"].lower()
                             am_set = all_media_album_aids_by_fp.get(k_am, set())
@@ -11867,6 +11945,89 @@ def get_all_unified_groupings():
                     src_am_agg.values(),
                     key=lambda x: (0 if x["all_migrated"] else 1, -x["matched_count"], x["full_path"].lower()),
                 )
+
+                inferred_src_tot = sum(x["source_total_count"] for x in source_all_media_list if x.get("all_migrated"))
+                raw_am_tot = len(raw_all_media_moment_aids_by_lc.get(lc, set()))
+                event_total_cnt = max(
+                    len(own_active_aids),
+                    int(cm.get("event_total_assets") or 0),
+                    inferred_src_tot,
+                    raw_am_tot,
+                )
+                exp_cur_cnt, exp_cur_ln = _compute_expected_curated_stats(event_total_cnt)
+
+                # Evaluate whether curated items strictly match logarithmic expectation ln(N)
+                if in_org_lib:
+                    candidate_cur_set = org_cur_set
+                    has_uncurated_active = any(
+                        aid not in org_cur_set and aid not in pub_set for aid in own_active_aids
+                    )
+                else:
+                    candidate_cur_set = legacy_cur_set if raw_stage not in ("M100", "M200") else set()
+                    has_uncurated_active = False
+
+                candidate_cur_cnt = len(candidate_cur_set)
+                prior_cur_cnt = max(
+                    len(org_cur_set),
+                    len(legacy_cur_set),
+                    int(cm.get("curated_count") or 0),
+                )
+                curation_matches_log = (
+                    candidate_cur_cnt > 0
+                    and candidate_cur_cnt == exp_cur_cnt
+                    and not has_uncurated_active
+                )
+
+                if curation_matches_log and in_org_lib and org_cur_set:
+                    valid_members = [aid for aid in (org_cur_set | pub_set) if aid in asset_info_map]
+                else:
+                    valid_members = list(own_active_aids)
+                if not valid_members:
+                    continue
+
+                valid_members.sort(key=lambda x: (-asset_info_map[x][1], asset_info_map[x][2], x))
+                scores_all = [asset_info_map[aid][1] for aid in valid_members]
+                qual_scores = [s for s in scores_all if s > hist_min]
+                total_cnt = len(valid_members)
+                qual_cnt = len(qual_scores)
+                avg_sc = sum(scores_all) / total_cnt if total_cnt else 0.0
+                qual_avg_sc = sum(qual_scores) / qual_cnt if qual_cnt else avg_sc
+                min_sc = min(scores_all) if scores_all else 0.0
+                max_sc = max(scores_all) if scores_all else 0.0
+                rank_sc = qual_avg_sc * math.log(max(1, qual_cnt) + 1)
+
+                photos_folders_list = [
+                    {
+                        "album_name": fv.get("album_name") or name,
+                        "parent_folder": fv["parent_folder"],
+                        "full_path": fv["full_path"],
+                        "asset_count": max(int(fv["asset_count"] or 0), len(fv["_aids"])),
+                        "library_scope": fv.get("library_scope", "all_media"),
+                    }
+                    for fv in sorted(
+                        raw_f_bucket.values(),
+                        key=lambda x: (0 if x.get("library_scope") == "organizer" else 1, x["full_path"].lower()),
+                    )
+                ]
+                org_mapped_cnt = sum(1 for aid in valid_members if aid in mapped_src_aids)
+                org_targets_agg: dict[str, dict] = {}
+                for aid in valid_members:
+                    for oref in org_folders_by_src_aid.get(aid, []):
+                        k_fp = oref["full_path"].lower()
+                        t_ent = org_targets_agg.setdefault(
+                            k_fp,
+                            {
+                                "album_name": oref["album_name"],
+                                "parent_folder": oref["parent_folder"],
+                                "full_path": oref["full_path"],
+                                "matched_count": 0,
+                            },
+                        )
+                        t_ent["matched_count"] += 1
+                org_target_folders_list = sorted(
+                    org_targets_agg.values(),
+                    key=lambda x: (-x["matched_count"], x["full_path"].lower()),
+                )
                 parents_sorted = sorted(album_parents_by_lc.get(lc, set()))
 
                 sf_url_final = cm.get("shutterfly_url") or pub_sf_url_by_lc.get(lc, "")
@@ -11876,27 +12037,46 @@ def get_all_unified_groupings():
                 last_pub_raw = last_pub_by_lc.get(lc, "")
                 pub_local_str = last_pub_raw[:10] if last_pub_raw else ""
 
-                if raw_stage == "M500" or (pub_cnt > 0 and qual_cnt > 0 and pub_cnt >= max(qual_cnt, cur_cnt)):
+                is_historical_m500 = (
+                    raw_stage == "M500"
+                    and pub_cnt > 0
+                    and not has_uncurated_active
+                )
+
+                if is_historical_m500 or (curation_matches_log and pub_cnt >= candidate_cur_cnt and pub_cnt > 0):
+                    cur_cnt = max(candidate_cur_cnt, pub_cnt)
+                    curation_mismatch_cnt = 0
                     m_status = "M500"
                     st_detail = "Published Complete"
-                elif raw_stage == "M450" or pub_cnt > 0:
-                    m_status = "M450"
-                    st_detail = f"Partially Published ({pub_cnt})"
-                elif raw_stage == "M400" or fs_curated_exists:
-                    m_status = "M400"
-                    st_detail = "Curated & Exported"
-                elif cur_exists:
-                    m_status = "M300"
-                    st_detail = "Curated (Needs Export)"
-                elif tbc_exists:
-                    m_status = "M200"
-                    st_detail = f"ToBeCurated ({tbc_cnt})"
-                elif parents_sorted == ["Generic Moments"]:
-                    m_status = "Generic"
-                    st_detail = "Generic Moment"
+                elif curation_matches_log:
+                    cur_cnt = candidate_cur_cnt
+                    curation_mismatch_cnt = 0
+                    if raw_stage == "M450" or pub_cnt > 0:
+                        m_status = "M450"
+                        st_detail = f"Partially Published ({pub_cnt})"
+                    elif raw_stage == "M400" or fs_curated_exists:
+                        m_status = "M400"
+                        st_detail = "Curated & Exported"
+                    else:
+                        m_status = "M300"
+                        st_detail = "Curated (Needs Export)"
                 else:
-                    m_status = "M100"
-                    st_detail = "In Moments"
+                    # Curated items do NOT match ln(N) expectation -> treat Moment as UNCURATED and disallow Publish!
+                    cur_cnt = 0
+                    curation_mismatch_cnt = prior_cur_cnt if (prior_cur_cnt > 0 and prior_cur_cnt != exp_cur_cnt) else 0
+                    if tbc_exists:
+                        m_status = "M200"
+                        st_detail = f"ToBeCurated ({tbc_cnt})"
+                    elif parents_sorted == ["Generic Moments"]:
+                        m_status = "Generic"
+                        st_detail = "Generic Moment"
+                    else:
+                        m_status = "M100"
+                        st_detail = (
+                            f"Uncurated ({curation_mismatch_cnt} prior cur ≠ ln target {exp_cur_cnt})"
+                            if curation_mismatch_cnt > 0
+                            else "In Moments"
+                        )
 
                 too_recent = False
                 days_rem = 0
@@ -11906,21 +12086,22 @@ def get_all_unified_groupings():
                         too_recent = True
                         days_rem = max(1, 30 - (now_local - p_dt).days)
 
-                has_unpub_cur = cur_cnt > pub_cnt and cur_cnt > 0
+                has_unpub_cur = curation_matches_log and cur_cnt > pub_cnt and cur_cnt > 0
                 if not has_unpub_cur:
-                    can_pub_str, can_pub_ok = ("✅ Complete" if (pub_cnt > 0 and cur_cnt > 0) else "—"), False
+                    can_pub_str, can_pub_ok = ("✅ Complete" if m_status == "M500" else "—"), False
                 elif too_recent:
                     can_pub_str, can_pub_ok = f"⏳ {days_rem}d", False
                 else:
                     can_pub_str, can_pub_ok = "✅ Yes", True
 
-                # Step 2B pending publishing breakdown (curated unpublished queue + proposed next batch)
-                cur_candidate_aids = [
-                    aid for aid in valid_members
-                    if (aid in cur_set or (in_org_lib and m_status in ("M300", "M400", "M450"))) and aid not in pub_set
-                ]
-                pending_pub_cnt = len(cur_candidate_aids) if cur_candidate_aids else max(0, cur_cnt - pub_cnt)
-                if pending_pub_cnt > 0 and m_status in ("M300", "M400", "M450"):
+                # Step 2B pending publishing breakdown (ONLY allowed when curation_matches_log is True!)
+                cur_candidate_aids = (
+                    [aid for aid in valid_members if aid in candidate_cur_set and aid not in pub_set]
+                    if curation_matches_log
+                    else []
+                )
+                pending_pub_cnt = len(cur_candidate_aids) if curation_matches_log else 0
+                if curation_matches_log and pending_pub_cnt > 0 and m_status in ("M300", "M400", "M450"):
                     propose_next_cnt = pending_pub_cnt if pending_pub_cnt < 9 else min(9, math.ceil(pending_pub_cnt / 4))
                     propose_next_str = (
                         f"All ({pending_pub_cnt})"
@@ -11937,10 +12118,7 @@ def get_all_unified_groupings():
                     propose_next_str = "—"
                     proposed_pub_preview = []
 
-                inferred_src_tot = sum(x["source_total_count"] for x in source_all_media_list if x.get("all_migrated"))
-                event_total_cnt = max(total_cnt, int(cm.get("event_total_assets") or 0), inferred_src_tot)
-                exp_cur_cnt, exp_cur_ln = _compute_expected_curated_stats(event_total_cnt)
-                man_cur_flag = bool(cm.get("manually_curated")) or (in_org_lib and m_status in ("M300", "M400", "M450", "M500") and cur_cnt > 0)
+                man_cur_flag = bool(curation_matches_log and (cm.get("manually_curated") or (in_org_lib and cur_cnt > 0)))
 
                 dates_clean = sorted(
                     asset_info_map[aid][2][:10]
@@ -11995,6 +12173,8 @@ def get_all_unified_groupings():
                         "status_detail": st_detail,
                         "is_disjoint": is_disj,
                         "manually_curated": man_cur_flag,
+                        "curation_matches_log": curation_matches_log,
+                        "curation_mismatch_count": curation_mismatch_cnt,
                         "can_publish_str": can_pub_str,
                         "can_publish_ok": can_pub_ok,
                         "pending_publish_count": pending_pub_cnt,
@@ -12156,6 +12336,8 @@ def get_all_unified_groupings():
                         "rule_reason": grp.get("rule_reason") or "",
                         "is_disjoint": uniq_c < 2,
                         "manually_curated": False,
+                        "curation_matches_log": False,
+                        "curation_mismatch_count": 0,
                         "can_publish_str": "—",
                         "can_publish_ok": False,
                         "pending_publish_count": 0,
@@ -12402,10 +12584,15 @@ def get_unified_grouping_assets(moment_name: str):
 
             mapped_src_aids, org_folders_by_src_aid = _reconcile_organizer_albums_from_photos_db(cur)
             migrated_aids: set[str] = set(mapped_src_aids) | set(org_folders_by_src_aid.keys())
+            migrated_moment_lcs_by_aid: dict[str, set[str]] = {
+                aid_k: {x["album_name"].lower() for x in refs if x.get("album_name")}
+                for aid_k, refs in org_folders_by_src_aid.items()
+            }
+            m_name_lc = m_name.lower()
             in_moments_set: set[str] = set()
             in_tbc_set: set[str] = set()
             in_cur_set: set[str] = set()
-            org_moment_aids: set[str] = set()
+            org_cur_aids: set[str] = set()
             is_org_moment = False
             try:
                 for par_nm, lib_scope, aid in cur.execute(
@@ -12421,8 +12608,8 @@ def get_unified_grouping_assets(moment_name: str):
                 ).fetchall():
                     if lib_scope == "organizer":
                         is_org_moment = True
-                        if aid:
-                            org_moment_aids.add(aid)
+                        if aid and par_nm == "curated":
+                            org_cur_aids.add(aid)
                     if not aid:
                         continue
                     if par_nm == "tobecurated":
@@ -12504,13 +12691,22 @@ def get_unified_grouping_assets(moment_name: str):
                     query_params,
                 ).fetchall()
 
-            if is_org_moment and org_moment_aids:
-                allowed_org = org_moment_aids | pub_set
-                kept_rows = [r for r in raw_rows if r[0] and r[0] not in excluded_aids and r[0] in allowed_org]
-            elif not is_org_moment:
-                kept_rows = [r for r in raw_rows if r[0] and r[0] not in excluded_aids and r[0] not in migrated_aids]
+            own_rows = [
+                r
+                for r in raw_rows
+                if r[0]
+                and r[0] not in excluded_aids
+                and (r[0] not in migrated_aids or m_name_lc in migrated_moment_lcs_by_aid.get(r[0], set()))
+            ]
+            ev_pool_g = _compute_moment_event_pool_count(cur, m_name, fallback_min=len(own_rows))
+            exp_g_cnt, _ = _compute_expected_curated_stats(ev_pool_g)
+            org_cur_valid = {r[0] for r in own_rows if r[0] in org_cur_aids}
+            has_uncur_extra = any(r[0] not in org_cur_valid and r[0] not in pub_set for r in own_rows)
+            if is_org_moment and org_cur_valid and len(org_cur_valid) == exp_g_cnt and not has_uncur_extra:
+                allowed_org = org_cur_valid | pub_set
+                kept_rows = [r for r in own_rows if r[0] in allowed_org]
             else:
-                kept_rows = [r for r in raw_rows if r[0] and r[0] not in excluded_aids]
+                kept_rows = own_rows
             aid_list = [r[0] for r in kept_rows]
             try:
                 per_asset_tags = _load_per_asset_tags_map(cur, aid_list)

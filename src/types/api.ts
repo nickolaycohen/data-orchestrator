@@ -899,6 +899,8 @@ export interface UnifiedGroupingItem {
   rule_reason?: string;
   is_disjoint: boolean;
   manually_curated?: boolean;
+  curation_matches_log?: boolean;
+  curation_mismatch_count?: number;
   can_publish_str: string;
   can_publish_ok: boolean;
   pending_publish_count?: number;

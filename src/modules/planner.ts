@@ -5508,12 +5508,24 @@ function refreshExpectedCuratedUI(): void {
   const expTextEl = document.getElementById('resolve-disjoint-expected-curated-text');
   if (expTextEl) {
     const diff = totalSel - expected;
-    const matchCls = totalSel === 0 ? 'badge-red' : Math.abs(diff) <= 2 ? 'badge-green' : 'badge-amber';
+    const matchCls =
+      totalSel === 0
+        ? 'badge-red'
+        : diff === 0
+          ? 'badge-green'
+          : resolveDisjointIsCurateM200
+            ? 'badge-red'
+            : 'badge-amber';
+    const mismatchNote =
+      resolveDisjointIsCurateM200 && diff !== 0 && poolTotal > 0
+        ? `<span class="text-amber">⚠️ Must match ${expected} keeper${expected === 1 ? '' : 's'} to mark Curated &amp; unlock Publish</span>`
+        : '';
     expTextEl.innerHTML =
       poolTotal > 0
         ? `<span>🎯 <strong>Expected Curated: ${expected}</strong> <span class="text-muted">(ln(${poolTotal}) = ${lnRaw.toFixed(2)})</span></span>
-           <span class="badge badge-xs ${matchCls} font-mono">✓ ${totalSel} keeper${totalSel === 1 ? '' : 's'} selected${diff === 0 ? ' (matches target ✓)' : diff > 0 ? ` (+${diff} vs exp)` : ` (${diff} vs exp)`}</span>
-           <span class="text-muted">· Total Event Pool: <strong>${poolTotal}</strong></span>`
+           <span class="badge badge-xs ${matchCls} font-mono">${diff === 0 ? '✓' : '⚠️'} ${totalSel} keeper${totalSel === 1 ? '' : 's'} selected${diff === 0 ? ' (matches ln target ✓)' : diff > 0 ? ` (+${diff} vs exp)` : ` (${diff} vs exp)`}</span>
+           <span class="text-muted">· Total Event Pool: <strong>${poolTotal}</strong></span>
+           ${mismatchNote}`
         : '<span>🎯 <strong>Expected Curated Target (ln N):</strong> —</span>';
   }
 
@@ -6793,20 +6805,31 @@ function updateResolveDisjointTargetPreview(): void {
 
   if (btnSubmit && !resolveDisjointCompleted) {
     const totalSelCount = getCombinedSelectedAssetCount();
-    const { expected } = computeExpectedCuratedStats(getCombinedPoolTotalCount());
+    const poolTotalVal = getCombinedPoolTotalCount();
+    const { expected } = computeExpectedCuratedStats(poolTotalVal);
     if (manualCurateActive) {
+      const matchesLogTarget = poolTotalVal > 0 && totalSelCount === expected;
+      btnSubmit.disabled = !matchesLogTarget && !isSubmittingResolveDisjoint;
       const exportChecked = (document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null)?.checked ?? true;
-      btnSubmit.textContent = exportChecked
-        ? `🎨 Curate & Export ➜ Ready to Publish (${totalSelCount} / exp ${expected})`
-        : `🎨 Approve Keepers into Curated (${totalSelCount} / exp ${expected})`;
-      btnSubmit.title =
-        'Import/place selected keepers into Media Organizer.photoslibrary / Curated / [Target], save DB tags, handle unselected items, and export to LaCie so the Moment is ready to Publish';
-    } else if (existingInfo.exists) {
-      btnSubmit.textContent = `➕ Add Missing Assets & Tag Existing (${totalSelCount})`;
-      btnSubmit.title = 'Destination folder already exists — copy only missing assets into Media Organizer and update DB tags';
+      if (!matchesLogTarget && poolTotalVal > 0) {
+        btnSubmit.textContent = `⚠️ Select ${expected} Keeper${expected === 1 ? '' : 's'} (ln ${poolTotalVal}) to Curate — Currently ${totalSelCount}`;
+        btnSubmit.title = `Curated count must match logarithmic target round(ln(${poolTotalVal})) = ${expected} to mark Moment as Curated & unlock Publish (click "🎯 Select Top ${expected}" above or uncheck Manual Curation to save uncurated into Moments)`;
+      } else {
+        btnSubmit.textContent = exportChecked
+          ? `🎨 Curate & Export ➜ Ready to Publish (${totalSelCount} / exp ${expected} ✓)`
+          : `🎨 Approve Keepers into Curated (${totalSelCount} / exp ${expected} ✓)`;
+        btnSubmit.title =
+          'Import/place selected keepers into Media Organizer.photoslibrary / Curated / [Target], save DB tags, handle unselected items, and export to LaCie so the Moment is ready to Publish';
+      }
     } else {
-      btnSubmit.textContent = `✨ Merge & Tag into Moments (${totalSelCount})`;
-      btnSubmit.title = 'Consolidate source(s) + apply DB tags into Media Organizer.photoslibrary / Moments / [Target]';
+      btnSubmit.disabled = isSubmittingResolveDisjoint;
+      if (existingInfo.exists) {
+        btnSubmit.textContent = `➕ Add Missing Assets & Tag Existing (${totalSelCount})`;
+        btnSubmit.title = 'Destination folder already exists — copy only missing assets into Media Organizer and update DB tags';
+      } else {
+        btnSubmit.textContent = `✨ Merge & Tag into Moments (${totalSelCount})`;
+        btnSubmit.title = 'Consolidate source(s) + apply DB tags into Media Organizer.photoslibrary / Moments / [Target]';
+      }
     }
   }
 }
@@ -7917,26 +7940,27 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
   const effectiveExpExp = g.expected_curated_count ?? expCurExp;
   const effectiveLnExp = g.expected_curated_ln ?? expLnExp;
   const isCuratedExp =
-    g.moment_status === 'M300' ||
-    g.moment_status === 'M400' ||
-    g.moment_status === 'M450' ||
-    g.moment_status === 'M500' ||
-    g.curated_count > 0 ||
-    Boolean(g.manually_curated);
-  const pendingPubExp = g.pending_publish_count ?? Math.max(0, g.curated_count - g.published_count);
+    Boolean(g.curation_matches_log) &&
+    (g.moment_status === 'M300' ||
+      g.moment_status === 'M400' ||
+      g.moment_status === 'M450' ||
+      g.moment_status === 'M500' ||
+      g.curated_count > 0);
+  const isCompletedM500Exp = g.moment_status === 'M500' && g.published_count > 0;
+  const pendingPubExp = isCuratedExp ? (g.pending_publish_count ?? Math.max(0, g.curated_count - g.published_count)) : 0;
 
   const primaryActionBtn =
     isCuratedExp && pendingPubExp > 0
       ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Review & publish curated batch (Step 2B)">🚀 Publish (${g.propose_next_str || pendingPubExp})</button>
          <button type="button" class="btn btn-xs btn-outline btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Re-Curate / Tag</button>`
-      : isCuratedExp && g.published_count > 0
+      : isCompletedM500Exp
         ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🔄 Republish</button>
            <button type="button" class="btn btn-xs btn-outline btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Re-Curate / Tag</button>`
         : g.kind === 'unassigned'
           ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-assign-selected" data-grouping-id="${escapeHtml(g.grouping_id)}">✨ Tag &amp; Assign (${selCount})</button>
-             <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate-selected" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ~${effectiveExpExp} keepers)">🎨 Manual Curate (~${effectiveExpExp})</button>`
+             <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate-selected" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ${effectiveExpExp} keepers)">🎨 Manual Curate (${effectiveExpExp})</button>`
           : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Consolidate</button>
-             <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ~${effectiveExpExp} keepers)">🎨 Manual Curate (~${effectiveExpExp})</button>`;
+             <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ${effectiveExpExp} keepers)">🎨 Manual Curate (${effectiveExpExp})</button>`;
 
   const rowsHtml = assets
     .map((a, idx) => {
@@ -8264,8 +8288,8 @@ function renderAllUnifiedGroupings(): void {
       if (allGroupingsStatusFilter === 'Disjoint') {
         if (!g.is_disjoint) return false;
       } else if (allGroupingsStatusFilter === 'ReadyToPublish') {
-        const pend = g.pending_publish_count ?? Math.max(0, g.curated_count - g.published_count);
-        if (!['M300', 'M400', 'M450'].includes(g.moment_status) || pend <= 0) return false;
+        const pend = g.pending_publish_count ?? 0;
+        if (!g.curation_matches_log || !['M300', 'M400', 'M450'].includes(g.moment_status) || pend <= 0) return false;
       } else if (g.moment_status !== allGroupingsStatusFilter) {
         return false;
       }
@@ -8462,13 +8486,21 @@ function renderAllUnifiedGroupings(): void {
       )}">🎯 Exp Cur: ${expCurCnt} (ln ${evTot})</span>`;
 
       const isCuratedRow =
-        g.moment_status === 'M300' ||
-        g.moment_status === 'M400' ||
-        g.moment_status === 'M450' ||
-        g.moment_status === 'M500' ||
-        g.curated_count > 0 ||
-        Boolean(g.manually_curated);
-      const pendingPubCnt = g.pending_publish_count ?? Math.max(0, g.curated_count - g.published_count);
+        Boolean(g.curation_matches_log) &&
+        (g.moment_status === 'M300' ||
+          g.moment_status === 'M400' ||
+          g.moment_status === 'M450' ||
+          g.moment_status === 'M500' ||
+          g.curated_count > 0);
+      const isCompletedM500Row = g.moment_status === 'M500' && g.published_count > 0;
+      const mismatchCurCnt = g.curation_mismatch_count || 0;
+      const mismatchPillHtml =
+        !isCuratedRow && !isCompletedM500Row && mismatchCurCnt > 0
+          ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(
+              `Prior curation has ${mismatchCurCnt} item(s), which does not match logarithmic expectation ln(${evTot}) = ${expCurCnt}. Treated as uncurated — Publish is locked until curated to ${expCurCnt} keeper(s).`
+            )}">⚠️ Uncurated (${mismatchCurCnt} cur ≠ 🎯 ${expCurCnt})</span>`
+          : '';
+      const pendingPubCnt = isCuratedRow ? (g.pending_publish_count ?? Math.max(0, g.curated_count - g.published_count)) : 0;
       const propPreview = g.proposed_publish_preview || [];
       const propTooltip = propPreview.length
         ? `Step 2B Pending Publishing:\n• Curated: ${g.curated_count} · Published: ${g.published_count} · Pending: ${pendingPubCnt}\n• Can Publish: ${g.can_publish_str}\n• Proposed Next (${g.propose_next_str || '—'}): ${propPreview
@@ -8488,7 +8520,11 @@ function renderAllUnifiedGroupings(): void {
         `<span class="text-green">★ ${g.qualified_assets} qual</span>`,
         `<span style="color:#c4b5fd;" title="ln(${evTot}) = ${expCurLn.toFixed(2)}">🎯 ${expCurCnt} exp cur</span>`
       ];
-      if (g.curated_count > 0) countsParts.push(`<span style="color:#93c5fd;">✅ ${g.curated_count} cur</span>`);
+      if (isCuratedRow && g.curated_count > 0) {
+        countsParts.push(`<span style="color:#93c5fd;">✅ ${g.curated_count}/${expCurCnt} cur ✓</span>`);
+      } else if (mismatchCurCnt > 0) {
+        countsParts.push(`<span class="text-amber" title="Legacy/prior curated count (${mismatchCurCnt}) does not match expected ln(${evTot}) = ${expCurCnt}">⚠️ ${mismatchCurCnt} prior cur ≠ ${expCurCnt}</span>`);
+      }
       if (g.to_be_curated_count > 0) countsParts.push(`<span class="text-amber">🟡 ${g.to_be_curated_count} TBC</span>`);
       if (g.published_count > 0) countsParts.push(`<span class="text-green">📢 ${g.published_count} pub</span>`);
       if (pendingPubCnt > 0 && isCuratedRow) countsParts.push(`<span class="text-green">📤 ${pendingPubCnt} pending</span>`);
@@ -8504,21 +8540,21 @@ function renderAllUnifiedGroupings(): void {
       const extraThumbCnt = Math.max(0, g.total_assets - 5);
 
       const allCopiedToOrganizer =
-        Boolean(g.in_organizer_library) ||
+        Boolean(g.in_organizer_library) &&
         ((g.organizer_mapped_count || 0) >= g.total_assets && g.total_assets > 0);
       const tagBtnLabel = allCopiedToOrganizer ? '🏷️ Tag / Merge' : '🏷️ Tag &amp; Copy';
       const quickActionHtml =
         isCuratedRow && pendingPubCnt > 0
           ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(propTooltip || `Review & publish batch for '${g.name}'`)}">🚀 Publish</button>
              <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation or tags">🎨 Curate</button>`
-          : isCuratedRow && g.published_count > 0
+          : isCompletedM500Row
             ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Publish / Republish dialog">🔄 Republish</button>
                <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation or tags">🎨 Curate</button>`
             : g.kind === 'unassigned'
               ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & assign selected assets into Moments">✨ Tag &amp; Assign</button>
-                 <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & manually curate ~${expCurCnt} keepers (ln ${evTot}) directly into Curated & Ready to Publish">🎨 Curate (~${expCurCnt})</button>`
+                 <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & manually curate ${expCurCnt} keepers (ln ${evTot}) directly into Curated & Ready to Publish">🎨 Curate (${expCurCnt})</button>`
               : `<button type="button" class="btn btn-xs ${allCopiedToOrganizer ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & copy/consolidate into Moments">${tagBtnLabel}</button>
-                 <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & manually curate ~${expCurCnt} keepers (ln ${evTot}) directly into Curated & Ready to Publish">🎨 Curate (~${expCurCnt})</button>`;
+                 <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & manually curate ${expCurCnt} keepers (ln ${evTot}) directly into Curated & Ready to Publish">🎨 Curate (${expCurCnt})</button>`;
 
       const cachedAssets = unifiedGroupingAssetsCache.get(g.grouping_id);
       const bodyInnerHtml = isExpanded
@@ -8537,6 +8573,7 @@ function renderAllUnifiedGroupings(): void {
                   <strong style="font-size: 0.85rem; color: var(--text-primary);">${escapeHtml(g.name)}</strong>
                   <span class="badge badge-xs ${stCls} font-mono">${escapeHtml(g.moment_status)}</span>
                   ${expCurPillHtml}
+                  ${mismatchPillHtml}
                   ${disjHtml}
                   ${batchesHtml}
                   ${taggedHtml}
