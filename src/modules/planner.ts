@@ -5575,6 +5575,11 @@ function refreshExpectedCuratedUI(): void {
   const totalSel = selectedCount + extraSel;
   const poolTotal = getCombinedPoolTotalCount();
   const { expected, lnRaw } = computeExpectedCuratedStats(poolTotal);
+  const targetNamePreview =
+    ((document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null)?.value || '').trim() ||
+    resolveDisjointMomentName ||
+    'Moment';
+  const hrTargetLabel = `Highrated assets/${targetNamePreview}`;
   const hrPreview = computeHighratedUnselectedPreview();
 
   if (pill) {
@@ -5598,7 +5603,7 @@ function refreshExpectedCuratedUI(): void {
         : '';
     const hrNote =
       resolveDisjointIsCurateM200 && hrPreview.highratedAssets.length > 0
-        ? `<span class="badge badge-xs badge-purple font-mono" title="Unselected event assets scoring higher than highest curated keeper (${hrPreview.maxKeeperScore.toFixed(4)}) will be copied to Moments / Highrated assets in Media Organizer">⚡ ${hrPreview.highratedAssets.length} (&gt; ${hrPreview.maxKeeperScore.toFixed(3)}) ➜ Moments/Highrated assets</span>`
+        ? `<span class="badge badge-xs badge-purple font-mono" title="Unselected event assets scoring higher than highest curated keeper (${hrPreview.maxKeeperScore.toFixed(4)}) will be copied to ${escapeHtml(hrTargetLabel)} in Media Organizer">⚡ ${hrPreview.highratedAssets.length} (&gt; ${hrPreview.maxKeeperScore.toFixed(3)}) ➜ ${escapeHtml(hrTargetLabel)}</span>`
         : '';
     expTextEl.innerHTML =
       poolTotal > 0
@@ -5627,7 +5632,7 @@ function refreshExpectedCuratedUI(): void {
   if (curateCountsEl) {
     const destLabel = resolveDisjointIsCurateM200 ? 'Curated' : 'Moments (M100)';
     if (resolveDisjointIsCurateM200 && hrPreview.highratedAssets.length > 0) {
-      curateCountsEl.textContent = `${totalSel} keeper(s) (🎯 exp ${expected}) ➜ ${destLabel} · ⚡ ${hrPreview.highratedAssets.length} (> ${hrPreview.maxKeeperScore.toFixed(3)}) ➜ Moments/Highrated assets · ${hrPreview.otherUnselectedCount} other unselected`;
+      curateCountsEl.textContent = `${totalSel} keeper(s) (🎯 exp ${expected}) ➜ ${destLabel} · ⚡ ${hrPreview.highratedAssets.length} (> ${hrPreview.maxKeeperScore.toFixed(3)}) ➜ ${hrTargetLabel} · ${hrPreview.otherUnselectedCount} other unselected`;
     } else {
       curateCountsEl.textContent = `${totalSel} keeper(s) (🎯 exp ${expected}) ➜ ${destLabel} · ${unselectedCount} unselected`;
     }
@@ -5672,6 +5677,10 @@ function renderResolveDisjointAssets(): void {
       : '👁️ Curated Only';
   }
 
+  const hrCardTargetName =
+    ((document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null)?.value || '').trim() ||
+    resolveDisjointMomentName ||
+    'Moment';
   const hrPreviewForCards = resolveDisjointIsCurateM200 ? computeHighratedUnselectedPreview() : null;
 
   listEl.innerHTML = resolveDisjointAssets
@@ -5685,7 +5694,7 @@ function renderResolveDisjointAssets(): void {
       const keeperBadge = checked
         ? `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Keeper ${kRank}/${totalSelected}</span>`
         : isHighratedUnselected
-          ? `<span class="badge badge-xs badge-purple font-mono" title="Score ${a.score_normalized.toFixed(4)} &gt; highest curated keeper (${(hrPreviewForCards?.maxKeeperScore ?? 0).toFixed(4)}) — will be copied to Moments / Highrated assets in Media Organizer">⚡ ➜ Moments/Highrated assets</span>`
+          ? `<span class="badge badge-xs badge-purple font-mono" title="Score ${a.score_normalized.toFixed(4)} &gt; highest curated keeper (${(hrPreviewForCards?.maxKeeperScore ?? 0).toFixed(4)}) — will be copied to Highrated assets / ${escapeHtml(hrCardTargetName)} in Media Organizer">⚡ ➜ Highrated assets/${escapeHtml(hrCardTargetName)}</span>`
           : '<span class="badge badge-xs badge-amber font-mono">⏭️ Unselected</span>';
       const qualBadge = a.qualified
         ? '<span class="badge badge-xs badge-green font-mono">★ QUALIFIED</span>'
@@ -7352,7 +7361,9 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     );
     if (hrConf.highratedAssets.length > 0) {
       stepsHtml.push(
-        `<strong>Copy ${hrConf.highratedAssets.length} higher-scored unselected asset(s) to Highrated assets:</strong> Copy unselected event asset(s) scoring above highest curated keeper (<code>${hrConf.maxKeeperScore.toFixed(4)}</code>) into <code>Media Organizer.photoslibrary / Moments / Highrated assets</code>.`
+        `<strong>Copy ${hrConf.highratedAssets.length} higher-scored unselected asset(s) to Highrated assets:</strong> Copy unselected event asset(s) scoring above highest curated keeper (<code>${hrConf.maxKeeperScore.toFixed(4)}</code>) into <code>Media Organizer.photoslibrary / Highrated assets / ${escapeHtml(
+          targetMoment
+        )}</code>.`
       );
     }
     if (hrConf.otherUnselectedCount > 0) {
@@ -7748,7 +7759,7 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
       ((data as any).export_error || (data as any).unselected_error || (data as any).highrated_error)
     ) {
       const warnParts: string[] = [];
-      if ((data as any).highrated_error) warnParts.push(`Moments/Highrated assets step: ${(data as any).highrated_error}`);
+      if ((data as any).highrated_error) warnParts.push(`Highrated assets step: ${(data as any).highrated_error}`);
       if ((data as any).unselected_error) warnParts.push(`Unselected step: ${(data as any).unselected_error}`);
       if ((data as any).export_error) warnParts.push(`LaCie export step: ${(data as any).export_error}`);
       alert(`Apple Photos action saved, with warning:\n${warnParts.join('\n')}`);

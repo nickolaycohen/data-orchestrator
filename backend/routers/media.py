@@ -6356,7 +6356,7 @@ on run argv
             repeat with delName in deleteAlbumNames
                 set dStr to delName as string
                 if dStr is not "" then
-                    repeat with fCheck in {"Moments", "ToBeCurated", "Curated", "Memories", "Generic Moments"}
+                    repeat with fCheck in {"Moments", "ToBeCurated", "Curated", "Highrated assets", "Memories", "Generic Moments"}
                         if exists folder (fCheck as string) then
                             set subF to folder (fCheck as string)
                             if exists album dStr of subF then
@@ -11090,6 +11090,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     cur,
                     combined_asset_ids,
                     pre_merge_unselected_ids,
+                    target_moment=target_moment,
                 )
                 highrated_ids_m = hr_m["highrated_ids"]
                 highrated_error_m = hr_m["error"]
@@ -11334,8 +11335,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
     }
 
 
-HIGHRATED_ORGANIZER_PARENT = "Moments"
-HIGHRATED_ORGANIZER_ALBUM = "Highrated assets"
+HIGHRATED_ORGANIZER_PARENT = "Highrated assets"
 
 
 def _collect_unselected_event_asset_ids(
@@ -11413,15 +11413,17 @@ def _sync_highrated_unselected_event_assets(
     target_moment: Optional[str] = None,
 ) -> dict:
     """Copy unselected assets of a multi-asset event whose score > max(selected keeper scores)
-    into Media Organizer.photoslibrary / Moments / Highrated assets (keeping All-Media read-only).
+    into Media Organizer.photoslibrary / Highrated assets / <target_moment> (keeping All-Media read-only).
     """
     sel_clean = [s.strip() for s in (selected_ids or []) if s and s.strip()]
     sel_set = set(sel_clean)
     unsel_clean = [u.strip() for u in (candidate_unselected_ids or []) if u and u.strip() and u.strip() not in sel_set]
+    hr_album_name = (target_moment or "").strip() or "Highrated assets"
 
     if not sel_clean or not unsel_clean or (len(sel_clean) + len(unsel_clean)) < 2:
         return {
             "highrated_ids": [],
+            "album_path": f"{HIGHRATED_ORGANIZER_PARENT}/{hr_album_name}",
             "max_keeper_score": 0.0,
             "photos_added": 0,
             "newly_imported": 0,
@@ -11451,6 +11453,7 @@ def _sync_highrated_unselected_event_assets(
     if not highrated_ids:
         return {
             "highrated_ids": [],
+            "album_path": f"{HIGHRATED_ORGANIZER_PARENT}/{hr_album_name}",
             "max_keeper_score": max_keeper_score,
             "photos_added": 0,
             "newly_imported": 0,
@@ -11460,17 +11463,18 @@ def _sync_highrated_unselected_event_assets(
     sync_hr = _sync_assets_to_organizer_library(
         cur,
         HIGHRATED_ORGANIZER_PARENT,
-        HIGHRATED_ORGANIZER_ALBUM,
+        hr_album_name,
         highrated_ids,
         allow_existing=True,
     )
     if not sync_hr.get("ok"):
         return {
             "highrated_ids": [],
+            "album_path": f"{HIGHRATED_ORGANIZER_PARENT}/{hr_album_name}",
             "max_keeper_score": max_keeper_score,
             "photos_added": 0,
             "newly_imported": 0,
-            "error": sync_hr.get("error") or "Failed copying assets to Moments / Highrated assets",
+            "error": sync_hr.get("error") or f"Failed copying assets to {HIGHRATED_ORGANIZER_PARENT}/{hr_album_name}",
         }
 
     ph_hr = ",".join("?" for _ in highrated_ids)
@@ -11480,6 +11484,7 @@ def _sync_highrated_unselected_event_assets(
     )
     return {
         "highrated_ids": highrated_ids,
+        "album_path": f"{HIGHRATED_ORGANIZER_PARENT}/{hr_album_name}",
         "max_keeper_score": max_keeper_score,
         "photos_added": int(sync_hr.get("photos_added", 0)),
         "newly_imported": int(sync_hr.get("newly_imported", 0)),
@@ -11698,7 +11703,7 @@ def curate_moment_action(req: CurateMomentRequest):
                         [target_moment, *all_remaining_unselected],
                     )
 
-            # Remove superseded Moments/ToBeCurated organizer album entries inside Media Organizer library only (never All-Media)
+            # Remove superseded Moments/ToBeCurated/stale Highrated organizer album entries inside Media Organizer library only (never All-Media)
             superseded_pks = [
                 int(r[0])
                 for r in cur.execute(
@@ -11709,10 +11714,18 @@ def curate_moment_action(req: CurateMomentRequest):
                       AND album_pk != ?
                       AND (
                         (TRIM(LOWER(album_name)) = TRIM(LOWER(?)) AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'tobecurated'))
+                        OR (TRIM(LOWER(album_name)) = TRIM(LOWER(?)) AND LOWER(COALESCE(parent_folder_name, '')) = 'highrated assets' AND ? = 0)
                         OR (TRIM(LOWER(album_name)) = TRIM(LOWER(?)) AND ? = 1)
                       )
                     """,
-                    (cur_alb_pk, target_moment, src_moment, 1 if (is_renamed and not req.is_unassigned_cluster) else 0),
+                    (
+                        cur_alb_pk,
+                        target_moment,
+                        target_moment,
+                        1 if highrated_copied_ids else 0,
+                        src_moment,
+                        1 if (is_renamed and not req.is_unassigned_cluster) else 0,
+                    ),
                 ).fetchall()
             ]
             if superseded_pks:
@@ -11925,7 +11938,7 @@ def curate_moment_action(req: CurateMomentRequest):
         "highrated_copied_count": len(highrated_copied_ids),
         "highrated_asset_ids": highrated_copied_ids,
         "highrated_max_keeper_score": round(highrated_max_keeper_score, 4),
-        "highrated_album_path": f"{HIGHRATED_ORGANIZER_PARENT}/{HIGHRATED_ORGANIZER_ALBUM}",
+        "highrated_album_path": f"{HIGHRATED_ORGANIZER_PARENT}/{target_moment}",
         "highrated_error": highrated_error,
         "exported_to_lacie": exported_to_lacie,
         "export_error": export_error,
@@ -12174,6 +12187,7 @@ def get_all_unified_groupings():
             cur_aids_by_lc: dict[str, set[str]] = {}
             org_cur_aids_by_lc: dict[str, set[str]] = {}
             org_tbc_aids_by_lc: dict[str, set[str]] = {}
+            org_hr_aids_by_lc: dict[str, set[str]] = {}
             all_media_cur_aids_by_lc: dict[str, set[str]] = {}
             raw_all_media_moment_aids_by_lc: dict[str, set[str]] = {}
             album_aids_by_lc: dict[str, set[str]] = {}
@@ -12237,6 +12251,8 @@ def get_all_unified_groupings():
                                 org_cur_aids_by_lc.setdefault(lc, set()).add(aid)
                             elif par_lc == "tobecurated":
                                 org_tbc_aids_by_lc.setdefault(lc, set()).add(aid)
+                            elif par_lc == "highrated assets":
+                                org_hr_aids_by_lc.setdefault(lc, set()).add(aid)
                         else:
                             fp_lc = fp_clean.lower()
                             all_media_album_aids_by_fp.setdefault(fp_lc, set()).add(aid)
@@ -12541,7 +12557,13 @@ def get_all_unified_groupings():
                 if in_org_lib:
                     candidate_cur_set = org_cur_set
                     org_non_cur_set = {
-                        aid for aid in (org_album_aids_by_lc.get(lc, set()) - org_cur_set) if aid in asset_info_map
+                        aid
+                        for aid in (
+                            org_album_aids_by_lc.get(lc, set())
+                            - org_cur_set
+                            - org_hr_aids_by_lc.get(lc, set())
+                        )
+                        if aid in asset_info_map
                     }
                     has_uncurated_active = bool(org_non_cur_set)
                 else:
@@ -12588,7 +12610,11 @@ def get_all_unified_groupings():
                     }
                     for fv in sorted(
                         raw_f_bucket.values(),
-                        key=lambda x: (0 if x.get("library_scope") == "organizer" else 1, x["full_path"].lower()),
+                        key=lambda x: (
+                            0 if x.get("library_scope") == "organizer" else 1,
+                            0 if str(x.get("parent_folder") or "").lower() == "curated" else (2 if str(x.get("parent_folder") or "").lower() == "highrated assets" else 1),
+                            x["full_path"].lower(),
+                        ),
                     )
                 ]
                 org_mapped_cnt = sum(1 for aid in valid_members if aid in mapped_src_aids)
@@ -13265,6 +13291,8 @@ def get_unified_grouping_assets(moment_name: str):
                         in_tbc_set.add(aid)
                     elif par_nm == "curated":
                         in_cur_set.add(aid)
+                    elif par_nm == "highrated assets":
+                        pass
                     else:
                         in_moments_set.add(aid)
             except sqlite3.OperationalError:
