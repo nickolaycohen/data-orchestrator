@@ -11875,16 +11875,38 @@ def curate_moment_action(req: CurateMomentRequest):
     }
 
 
+def _moment_name_format_tier(name: str) -> int:
+    """Rank Moment naming format: 0 = new canonical format (non-digit prefix), 1 = date + title, 2 = bare date."""
+    s = (name or "").strip()
+    if not s:
+        return 2
+    if not re.match(r"^\d", s):
+        return 0
+    if re.match(r"^\d{4}(?:[-/\s]+(?:[A-Za-z]+|\d{1,2})(?:[-/\s]+\d{1,2})?)?$", s):
+        return 2
+    return 1
+
+
 def _ensure_deduped_moment_groups_table(cur: sqlite3.Cursor) -> None:
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS deduped_moment_groups (
             moment_name TEXT PRIMARY KEY COLLATE NOCASE,
             canonical_moment_name TEXT NOT NULL,
-            deduped_at_utc TEXT NOT NULL DEFAULT (datetime('now'))
+            deduped_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+            asset_ids_json TEXT DEFAULT '[]',
+            had_all_media_album INTEGER DEFAULT 1,
+            dismissed INTEGER DEFAULT 0
         )
         """
     )
+    existing_cols = {r[1] for r in cur.execute("PRAGMA table_info(deduped_moment_groups)").fetchall()}
+    if "asset_ids_json" not in existing_cols:
+        cur.execute("ALTER TABLE deduped_moment_groups ADD COLUMN asset_ids_json TEXT DEFAULT '[]'")
+    if "had_all_media_album" not in existing_cols:
+        cur.execute("ALTER TABLE deduped_moment_groups ADD COLUMN had_all_media_album INTEGER DEFAULT 1")
+    if "dismissed" not in existing_cols:
+        cur.execute("ALTER TABLE deduped_moment_groups ADD COLUMN dismissed INTEGER DEFAULT 0")
 
 
 class DedupMomentGroupingRequest(BaseModel):
@@ -11892,10 +11914,39 @@ class DedupMomentGroupingRequest(BaseModel):
     canonical_moment: str
 
 
+class DismissDedupedGroupingRequest(BaseModel):
+    duplicate_moment: str
+
+
+@router.post("/memories/dismiss-deduped-grouping")
+def dismiss_deduped_moment_grouping(req: DismissDedupedGroupingRequest):
+    """Hide an already-deduplicated legacy Moment row once the user confirms it was deleted from All-Media."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    dup_moment = (req.duplicate_moment or "").strip()
+    if not dup_moment:
+        return {"ok": False, "error": "duplicate_moment is required"}
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=20)
+        try:
+            cur = conn.cursor()
+            _ensure_deduped_moment_groups_table(cur)
+            cur.execute(
+                "UPDATE deduped_moment_groups SET dismissed = 1 WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+                (dup_moment,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "duplicate_moment": dup_moment}
+
+
 @router.post("/memories/dedup-grouping")
 def dedup_moment_grouping(req: DedupMomentGroupingRequest):
     """Mark a duplicate All-Media Moment group as deduplicated into its canonical Moment in SQLite,
-    merging its DB tags onto the canonical Moment while leaving All-Media.photoslibrary 100% read-only
+    merging its DB tags and publications onto the canonical Moment while leaving All-Media.photoslibrary 100% read-only
     so the UI switches the duplicate row's button to 'Remove' (linking to All-Media in Photos).
     """
     if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
@@ -11916,15 +11967,45 @@ def dedup_moment_grouping(req: DedupMomentGroupingRequest):
             _ensure_moment_tag_tables(cur)
             _ensure_deduped_moment_groups_table(cur)
 
+            dup_aid_set: set[str] = set()
+            for q_sql in (
+                "SELECT asset_id FROM assets WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?)) AND COALESCE(removed_from_source, 0) = 0",
+                "SELECT moaa.asset_id FROM media_organizer_album_assets moaa JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk WHERE moa.is_folder = 0 AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))",
+                "SELECT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+                "SELECT asset_id FROM moment_exports WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))",
+            ):
+                try:
+                    for (r_aid,) in cur.execute(q_sql, (dup_moment,)).fetchall():
+                        if r_aid:
+                            dup_aid_set.add(str(r_aid).strip())
+                except sqlite3.OperationalError:
+                    pass
+            dup_aids = sorted(dup_aid_set)
+            am_rows = cur.execute(
+                """
+                SELECT album_name, COALESCE(parent_folder_name, 'Moments'), COALESCE(full_path, '')
+                FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND COALESCE(library_scope, 'all_media') != 'organizer'
+                  AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                ORDER BY full_path ASC
+                """,
+                (dup_moment,),
+            ).fetchall()
+
             cur.execute(
                 """
-                INSERT INTO deduped_moment_groups (moment_name, canonical_moment_name, deduped_at_utc)
-                VALUES (?, ?, datetime('now'))
+                INSERT INTO deduped_moment_groups
+                    (moment_name, canonical_moment_name, deduped_at_utc, asset_ids_json, had_all_media_album, dismissed)
+                VALUES (?, ?, datetime('now'), ?, ?, 0)
                 ON CONFLICT(moment_name) DO UPDATE SET
                     canonical_moment_name = excluded.canonical_moment_name,
-                    deduped_at_utc = datetime('now')
+                    deduped_at_utc = datetime('now'),
+                    asset_ids_json = CASE WHEN excluded.asset_ids_json != '[]' THEN excluded.asset_ids_json ELSE deduped_moment_groups.asset_ids_json END,
+                    had_all_media_album = excluded.had_all_media_album,
+                    dismissed = 0
                 """,
-                (dup_moment, can_moment),
+                (dup_moment, can_moment, json.dumps(dup_aids), 1 if am_rows else 0),
             )
 
             # Copy any DB tags from duplicate_moment onto canonical_moment so nothing is lost
@@ -11939,7 +12020,7 @@ def dedup_moment_grouping(req: DedupMomentGroupingRequest):
             )
             _sync_moment_folder_metadata_json(cur, can_moment, None)
 
-            # Reassign assets.MomentsAlbumName from duplicate_moment to canonical_moment in local SQLite
+            # Reassign assets.MomentsAlbumName and publications from duplicate_moment to canonical_moment in local SQLite
             cur.execute(
                 """
                 UPDATE assets
@@ -11960,17 +12041,6 @@ def dedup_moment_grouping(req: DedupMomentGroupingRequest):
             except sqlite3.OperationalError:
                 pass
 
-            am_rows = cur.execute(
-                """
-                SELECT album_name, COALESCE(parent_folder_name, 'Moments'), COALESCE(full_path, '')
-                FROM media_organizer_albums
-                WHERE is_folder = 0
-                  AND COALESCE(library_scope, 'all_media') != 'organizer'
-                  AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-                ORDER BY full_path ASC
-                """,
-                (dup_moment,),
-            ).fetchall()
             conn.commit()
         finally:
             conn.close()
@@ -12287,13 +12357,26 @@ def get_all_unified_groupings():
             now_local = datetime.now()
 
             _ensure_deduped_moment_groups_table(cur)
-            deduped_map: dict[str, str] = {}
+            deduped_map: dict[str, dict] = {}
             try:
-                for dm_nm, can_nm in cur.execute(
-                    "SELECT moment_name, canonical_moment_name FROM deduped_moment_groups"
+                for dm_nm, can_nm, aids_js, had_am, dism in cur.execute(
+                    "SELECT moment_name, canonical_moment_name, COALESCE(asset_ids_json, '[]'), COALESCE(had_all_media_album, 1), COALESCE(dismissed, 0) FROM deduped_moment_groups"
                 ).fetchall():
                     if dm_nm and can_nm:
-                        deduped_map[str(dm_nm).strip().lower()] = str(can_nm).strip()
+                        dm_clean = str(dm_nm).strip()
+                        dm_lc = dm_clean.lower()
+                        canonical_name_by_lc.setdefault(dm_lc, dm_clean)
+                        try:
+                            parsed_aids = json.loads(aids_js or "[]")
+                            saved_aids = {str(x).strip() for x in parsed_aids if x and str(x).strip()}
+                        except Exception:
+                            saved_aids = set()
+                        deduped_map[dm_lc] = {
+                            "canonical": str(can_nm).strip(),
+                            "saved_aids": saved_aids,
+                            "had_all_media": bool(had_am),
+                            "dismissed": bool(dism),
+                        }
             except sqlite3.OperationalError:
                 pass
 
@@ -12301,6 +12384,7 @@ def get_all_unified_groupings():
                 set(moments_col_aids_by_lc.keys())
                 | set(album_aids_by_lc.keys())
                 | set(pub_aids_by_lc.keys())
+                | set(deduped_map.keys())
             ) - deleted_lc
 
             unified_groupings: list[dict] = []
@@ -12313,16 +12397,20 @@ def get_all_unified_groupings():
                 raw_f_bucket = photos_folders_by_lc.get(lc, {})
                 in_org_lib = any(fv.get("library_scope") == "organizer" for fv in raw_f_bucket.values())
                 has_all_media_folder = any(fv.get("library_scope") != "organizer" for fv in raw_f_bucket.values())
-                dedup_canonical_target = deduped_map.get(lc, "") if not in_org_lib else ""
-                is_deduped_grp = bool(dedup_canonical_target)
-                if is_deduped_grp and not has_all_media_folder:
-                    # Already deduplicated AND no legacy All-Media folder remains to delete
+                dedup_entry = deduped_map.get(lc) if not in_org_lib else None
+                if dedup_entry and dedup_entry.get("dismissed"):
                     continue
+                if dedup_entry and dedup_entry.get("had_all_media") and not has_all_media_folder:
+                    # Had an All-Media album when deduped and user has now deleted it from All-Media
+                    continue
+                dedup_canonical_target = dedup_entry["canonical"] if dedup_entry else ""
+                is_deduped_grp = bool(dedup_canonical_target)
 
                 member_aids = (
                     moments_col_aids_by_lc.get(lc, set())
                     | album_aids_by_lc.get(lc, set())
                     | pub_aids_by_lc.get(lc, set())
+                    | (dedup_entry["saved_aids"] if dedup_entry else set())
                 )
                 # Include all active assets belonging to THIS Moment (including unmigrated All-Media assets of a same-named prior Moment),
                 # while omitting assets that were migrated away into a DIFFERENT Media Organizer Moment (unless kept visible as a Deduped Remove link).
@@ -12831,17 +12919,25 @@ def get_all_unified_groupings():
                     }
                 )
 
-            # Initial canonical sort before detecting subset / duplicate All-Media Moment groups
-            unified_groupings.sort(
-                key=lambda g: (
+            # Initial canonical sort before detecting subset / duplicate All-Media Moment groups:
+            # Prefer new-format Moment names (e.g. 'Fishing at Manasquan Inlet - Summer 2024') over legacy date-prefixed names ('2024-06-21 - Manasquan')
+            def _canonical_group_sort_key(g: dict) -> tuple:
+                lc_k = g["name"].lower()
+                has_own_tags = bool(tag_status_by_lc.get(lc_k))
+                return (
                     -g["avg_score"],
                     1 if g.get("is_deduped_group") else 0,
+                    1 if g.get("is_duplicate_group") else 0,
                     0 if g.get("in_organizer_library") else 1,
                     -g["total_assets"],
-                    -(g.get("published_count") or 0),
+                    _moment_name_format_tier(g["name"]),
+                    0 if g.get("paradigm_confirmed") else 1,
+                    0 if has_own_tags else 1,
+                    0 if g.get("photos_folders") else 1,
                     g["name"].lower(),
                 )
-            )
+
+            unified_groupings.sort(key=_canonical_group_sort_key)
 
             seen_true_moments: list[tuple[str, set[str]]] = []
             for g in unified_groupings:
@@ -12869,18 +12965,8 @@ def get_all_unified_groupings():
                 else:
                     seen_true_moments.append((g["name"], s_cur))
 
-            # Final sort: keep primary Moment ahead of its duplicate / deduped counterpart on equal score & count
-            unified_groupings.sort(
-                key=lambda g: (
-                    -g["avg_score"],
-                    1 if g.get("is_deduped_group") else 0,
-                    1 if g.get("is_duplicate_group") else 0,
-                    0 if g.get("in_organizer_library") else 1,
-                    -g["total_assets"],
-                    -(g.get("published_count") or 0),
-                    g["name"].lower(),
-                )
-            )
+            # Final sort: keep primary canonical Moment ahead of its legacy duplicate / deduped counterpart
+            unified_groupings.sort(key=_canonical_group_sort_key)
 
             total_assets_sum = sum(g["total_assets"] for g in unified_groupings)
             weighted_score_sum = sum(g["avg_score"] * g["total_assets"] for g in unified_groupings)

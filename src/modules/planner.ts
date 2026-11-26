@@ -8336,6 +8336,35 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
   });
 }
 
+function momentNameFormatTier(name: string): number {
+  const s = (name || '').trim();
+  if (!s) return 2;
+  if (!/^\d/.test(s)) return 0;
+  if (/^\d{4}(?:[-/\s]+(?:[A-Za-z]+|\d{1,2})(?:[-/\s]+\d{1,2})?)?$/.test(s)) return 2;
+  return 1;
+}
+
+async function dismissDedupedMomentGrouping(g: UnifiedGroupingItem, btn?: HTMLButtonElement | null): Promise<void> {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/media/memories/dismiss-deduped-grouping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ duplicate_moment: g.name })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      alert(`Failed dismissing "${g.name}": ${data.error || `HTTP ${res.status}`}`);
+      return;
+    }
+    await fetchAllUnifiedGroupings(true);
+  } catch (err: any) {
+    alert(`Network error dismissing "${g.name}": ${err?.message || 'Unknown error'}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function triggerDedupMomentGrouping(g: UnifiedGroupingItem, btn?: HTMLButtonElement | null): Promise<void> {
   const canonical = (g.duplicate_of_moment || '').trim();
   if (!canonical) return;
@@ -8498,7 +8527,9 @@ function renderAllUnifiedGroupings(): void {
     (a.is_duplicate_group ? 1 : 0) - (b.is_duplicate_group ? 1 : 0) ||
     (a.in_organizer_library ? 0 : 1) - (b.in_organizer_library ? 0 : 1) ||
     b.total_assets - a.total_assets ||
-    (b.published_count || 0) - (a.published_count || 0) ||
+    momentNameFormatTier(a.name) - momentNameFormatTier(b.name) ||
+    (a.paradigm_confirmed ? 0 : 1) - (b.paradigm_confirmed ? 0 : 1) ||
+    ((a.photos_folders?.length ? 0 : 1) - (b.photos_folders?.length ? 0 : 1)) ||
     a.name.localeCompare(b.name);
 
   filtered.sort((a, b) => {
@@ -8732,7 +8763,8 @@ function renderAllUnifiedGroupings(): void {
       const quickActionHtml = g.is_deduped_group
         ? `<button type="button" class="btn btn-xs btn-red btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-is-remove-link="1" data-library-scope="all_media" data-album-name="${escapeHtml(removeAlbumName)}" data-full-path="${escapeHtml(removeFullPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
             `Deduped into '${g.duplicate_of_moment || ''}' — click to open '${removeAlbumName}' in All-Media.photoslibrary (Read-Only) so you can manually delete the Moment from Apple Photos`
-          )}">🗑️ Remove</button>`
+          )}">🗑️ Remove</button>
+           <button type="button" class="btn btn-xs btn-icon btn-ugrp-row-action" data-action="dismiss_dedup" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Already deleted from All-Media in Photos? Click to dismiss this row">✕</button>`
         : isCuratedRow && pendingPubCnt > 0
           ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(propTooltip || `Review & publish batch for '${g.name}'`)}">🚀 Publish</button>
              <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation or tags">🎨 Curate</button>`
@@ -8900,6 +8932,8 @@ function renderAllUnifiedGroupings(): void {
       if (!g) return;
       if (act === 'dedup') {
         void triggerDedupMomentGrouping(g, btn);
+      } else if (act === 'dismiss_dedup') {
+        void dismissDedupedMomentGrouping(g, btn);
       } else if (act === 'assign') {
         const assets = g.inline_assets || unifiedGroupingAssetsCache.get(gid) || [];
         const selSet = getOrInitGroupingSelectedSet(gid, assets);
