@@ -7031,8 +7031,8 @@ export async function openResolveDisjointModal(
   if (curateBoxEl) curateBoxEl.style.display = isCurateM200 ? 'flex' : 'none';
   if (delSrcRowEl) delSrcRowEl.style.display = !isCurateM200 && srcIsOrganizerAlbum ? 'flex' : 'none';
   if (roSrcNoteEl) roSrcNoteEl.style.display = !isCurateM200 && !srcIsOrganizerAlbum ? 'flex' : 'none';
-  if (handleUnselCb) handleUnselCb.checked = true;
-  if (unselActionSel) unselActionSel.value = 'ignore';
+  if (handleUnselCb) handleUnselCb.checked = false;
+  if (unselActionSel) unselActionSel.value = 'none';
   if (delTbcCb) delTbcCb.checked = srcIsOrganizerAlbum;
   if (exportLacieCb) exportLacieCb.checked = true;
 
@@ -7355,11 +7355,11 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
         `<strong>Copy ${hrConf.highratedAssets.length} higher-scored unselected asset(s) to Highrated assets:</strong> Copy unselected event asset(s) scoring above highest curated keeper (<code>${hrConf.maxKeeperScore.toFixed(4)}</code>) into <code>Media Organizer.photoslibrary / Moments / Highrated assets</code>.`
       );
     }
-    if (hrConf.otherUnselectedCount > 0 && handleUnsel) {
+    if (hrConf.otherUnselectedCount > 0) {
       stepsHtml.push(
-        unselMode === 'skip_publishing'
-          ? `<strong>Mark ${hrConf.otherUnselectedCount} remaining unselected asset(s) as SkipPublishing in DB:</strong> Record unselected items under <code>Moments / SkipPublishing</code> (excluded from queues) without modifying <code>All-Media</code>.`
-          : `<strong>Mark ${hrConf.otherUnselectedCount} remaining unselected asset(s) as Ignore in DB:</strong> Exclude unselected items from future queues without modifying <code>All-Media</code>.`
+        handleUnsel && unselMode === 'skip_publishing'
+          ? `<strong>Mark ${hrConf.otherUnselectedCount} remaining unselected asset(s) as SkipPublishing in DB:</strong> Record unselected items under <code>Moments / SkipPublishing</code> without modifying <code>All-Media</code>.`
+          : `<strong>Keep ${hrConf.otherUnselectedCount} remaining unselected asset(s) tagged in Event:</strong> Unselected items stay in <code>All-Media</code> archive under <code>${escapeHtml(targetMoment)}</code> (never moved to <code>Ignore</code>).`
       );
     }
     if (delTbc) {
@@ -7624,18 +7624,23 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
 
   const momentTagGroups: Array<{ moment_name: string; asset_ids: string[]; tags: Array<{ category: string; tag_value: string; include_in_name: boolean }> }> = [];
   if ((action === 'merge_new' || isCurate) && savePerSource) {
-    if (sourceTagState.tags.length && assetIds.length) {
+    const primaryTagTargetIds = isCurate ? resolveDisjointAssets.map(a => a.asset_id) : assetIds;
+    if (sourceTagState.tags.length && primaryTagTargetIds.length) {
       momentTagGroups.push({
         moment_name: resolveDisjointMomentName,
-        asset_ids: assetIds,
+        asset_ids: primaryTagTargetIds,
         tags: toCleanTags(sourceTagState.tags)
       });
     }
     combinedExtraMoments.forEach(entry => {
-      if (entry.tags.length && entry.assetIds.size > 0) {
+      const extraTargetIds =
+        isCurate && entry.allAssets?.length
+          ? entry.allAssets.map(a => a.asset_id)
+          : Array.from(entry.assetIds);
+      if (entry.tags.length && extraTargetIds.length > 0) {
         momentTagGroups.push({
           moment_name: entry.momentName,
-          asset_ids: Array.from(entry.assetIds),
+          asset_ids: extraTargetIds,
           tags: toCleanTags(entry.tags)
         });
       }
@@ -7670,9 +7675,9 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
   let succeeded = false;
   try {
     let res: Response;
-    const handleUnsel = (document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null)?.checked ?? true;
+    const handleUnsel = (document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null)?.checked ?? false;
     const unselAction = handleUnsel
-      ? ((document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null)?.value || 'ignore')
+      ? ((document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null)?.value || 'none')
       : 'none';
     if (isCurate) {
       const delTbc = (document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null)?.checked ?? true;

@@ -2891,17 +2891,15 @@
                   unselected</span>
               </div>
               <div
-                style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; font-size: 0.74rem; color: var(--text-secondary);">
-                <label style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
-                  <input type="checkbox" id="curate-m200-handle-unselected" checked />
-                  <span>For unselected items:</span>
+                style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; font-size: 0.73rem; color: var(--text-secondary);">
+                <span>📌 <strong>Unselected event items:</strong> Stay tagged in this Event inside <code>All-Media</code> (never moved to <code>Ignore</code>); items scoring above your highest keeper copy to <code>Moments / Highrated assets</code>.</span>
+                <label style="display: none;">
+                  <input type="checkbox" id="curate-m200-handle-unselected" />
+                  <select id="curate-m200-unselected-action" class="form-control">
+                    <option value="none" selected>Keep tagged in Event</option>
+                    <option value="skip_publishing">SkipPublishing</option>
+                  </select>
                 </label>
-                <select id="curate-m200-unselected-action" class="form-control"
-                  style="width: auto; min-width: 240px; font-size: 0.72rem; padding: 0.2rem 0.45rem;">
-                  <option value="ignore" selected>🗑️ Add to Ignore folder (not needed / exclude)</option>
-                  <option value="skip_publishing">⏭️ Move to SkipPublishing (similar exists / personal judgment)
-                  </option>
-                </select>
               </div>
               <label id="curate-m200-delete-tbc-row"
                 style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.74rem; cursor: pointer; color: var(--text-secondary);">

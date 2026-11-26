@@ -8157,7 +8157,7 @@ class CurateMomentRequest(BaseModel):
     additional_moments: list[str] = []
     additional_asset_ids: list[str] = []
     unselected_asset_ids: list[str] = []
-    unselected_action: str = "ignore"  # "ignore" | "skip_publishing" | "none"
+    unselected_action: str = "none"  # "none" | "skip_publishing" | "ignore"
     delete_tbc_album: bool = True
     export_to_lacie: bool = True
     is_unassigned_cluster: bool = False
@@ -9544,7 +9544,7 @@ def _load_moment_detail_core(
         SELECT DISTINCT moaa.asset_id
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
+        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
         """
     )
     excluded_aids = {r[0] for r in cur.fetchall()}
@@ -10555,7 +10555,7 @@ def get_timeframe_devices_context(
                     SELECT DISTINCT moaa.asset_id
                     FROM media_organizer_album_assets moaa
                     JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
                     """
                 ).fetchall():
                     if aid_ex:
@@ -11410,6 +11410,7 @@ def _sync_highrated_unselected_event_assets(
     cur: sqlite3.Cursor,
     selected_ids: list[str],
     candidate_unselected_ids: list[str],
+    target_moment: Optional[str] = None,
 ) -> dict:
     """Copy unselected assets of a multi-asset event whose score > max(selected keeper scores)
     into Media Organizer.photoslibrary / Moments / Highrated assets (keeping All-Media read-only).
@@ -11474,8 +11475,8 @@ def _sync_highrated_unselected_event_assets(
 
     ph_hr = ",".join("?" for _ in highrated_ids)
     cur.execute(
-        f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_hr})",
-        highrated_ids,
+        f"UPDATE assets SET MomentsAlbumName = ?, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_hr})",
+        [(target_moment or "").strip() or None, *highrated_ids],
     )
     return {
         "highrated_ids": highrated_ids,
@@ -11543,7 +11544,7 @@ def curate_moment_action(req: CurateMomentRequest):
 
     src_moment = (req.source_moment or "").strip()
     target_moment = (req.target_moment or "").strip()
-    unselected_action = (req.unselected_action or "ignore").strip().lower()
+    unselected_action = (req.unselected_action or "none").strip().lower()
     if not src_moment or not target_moment:
         return {"ok": False, "error": "Both source_moment and target_moment are required"}
     if "/" in target_moment:
@@ -11661,24 +11662,41 @@ def curate_moment_action(req: CurateMomentRequest):
                     cur,
                     selected_ids,
                     all_event_unselected_ids,
+                    target_moment=target_moment,
                 )
                 highrated_copied_ids = hr_res["highrated_ids"]
                 highrated_max_keeper_score = float(hr_res["max_keeper_score"] or 0.0)
                 highrated_error = hr_res["error"]
 
             highrated_set = set(highrated_copied_ids)
-            remaining_unselected_ids = [u for u in unselected_ids if u not in highrated_set]
-            if remaining_unselected_ids:
-                ph_unsel = ",".join("?" for _ in remaining_unselected_ids)
-                cur.execute(
-                    f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_unsel})",
-                    remaining_unselected_ids,
-                )
+            all_remaining_unselected = [
+                u for u in all_event_unselected_ids if u not in highrated_set
+            ]
+            for extra_u in unselected_ids:
+                if extra_u not in highrated_set and extra_u not in all_remaining_unselected:
+                    all_remaining_unselected.append(extra_u)
+
+            if all_remaining_unselected:
+                ph_unsel = ",".join("?" for _ in all_remaining_unselected)
                 if unselected_action == "ignore":
-                    unselected_count_done = _mark_assets_ignored_in_db(cur, remaining_unselected_ids)
+                    cur.execute(
+                        f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_unsel})",
+                        all_remaining_unselected,
+                    )
+                    unselected_count_done = _mark_assets_ignored_in_db(cur, all_remaining_unselected)
                 elif unselected_action == "skip_publishing":
-                    _upsert_organizer_album_in_db(cur, "Moments", "SkipPublishing", remaining_unselected_ids)
-                    unselected_count_done = len(remaining_unselected_ids)
+                    cur.execute(
+                        f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_unsel})",
+                        all_remaining_unselected,
+                    )
+                    _upsert_organizer_album_in_db(cur, "Moments", "SkipPublishing", all_remaining_unselected)
+                    unselected_count_done = len(all_remaining_unselected)
+                else:
+                    # Default ('none'): keep unselected event items tagged & associated with target_moment in All-Media archive (never moved to Ignore)
+                    cur.execute(
+                        f"UPDATE assets SET MomentsAlbumName = ?, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_unsel})",
+                        [target_moment, *all_remaining_unselected],
+                    )
 
             # Remove superseded Moments/ToBeCurated organizer album entries inside Media Organizer library only (never All-Media)
             superseded_pks = [
@@ -11795,14 +11813,27 @@ def curate_moment_action(req: CurateMomentRequest):
                 ),
             )
 
-            # Save DB tags if present
+            # Save DB tags across ALL event assets (keepers + unselected event assets when kept in Event)
+            all_taggable_event_ids = list(selected_ids)
+            seen_taggable = set(seen_sel)
+            if unselected_action == "none":
+                for u_aid in [*highrated_copied_ids, *all_remaining_unselected]:
+                    if u_aid and u_aid not in seen_taggable:
+                        seen_taggable.add(u_aid)
+                        all_taggable_event_ids.append(u_aid)
+            else:
+                for hr_aid in highrated_copied_ids:
+                    if hr_aid and hr_aid not in seen_taggable:
+                        seen_taggable.add(hr_aid)
+                        all_taggable_event_ids.append(hr_aid)
+
             clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
             clean_groups: list[tuple[list[str], list[dict]]] = []
             union_tags = list(clean_apply_tags)
             seen_u = {t["tag_value"].lower() for t in union_tags}
             for grp in req.moment_tag_groups or []:
                 g_tags = _normalize_unique_moment_tags(grp.tags)
-                g_aids = [s.strip() for s in (grp.asset_ids or []) if s and s.strip() and s.strip() in seen_sel]
+                g_aids = [s.strip() for s in (grp.asset_ids or []) if s and s.strip() and s.strip() in seen_taggable]
                 if g_tags and g_aids:
                     clean_groups.append((g_aids, g_tags))
                     for t in g_tags:
@@ -11822,7 +11853,7 @@ def curate_moment_action(req: CurateMomentRequest):
                         target_moment,
                         target_moment,
                         json.dumps(union_tags),
-                        len(selected_ids),
+                        len(all_taggable_event_ids),
                         f"Curated from M200: {src_moment}",
                     ),
                 )
@@ -11846,8 +11877,8 @@ def curate_moment_action(req: CurateMomentRequest):
                 for g_aids, g_tags in clean_groups:
                     _upsert_cur_tags(g_aids, g_tags)
                 if clean_apply_tags:
-                    _upsert_cur_tags(selected_ids, clean_apply_tags)
-                for aid in selected_ids:
+                    _upsert_cur_tags(all_taggable_event_ids, clean_apply_tags)
+                for aid in all_taggable_event_ids:
                     aid_rows = cur.execute(
                         """
                         SELECT category, tag_value, include_in_name FROM moment_tags
@@ -11858,16 +11889,13 @@ def curate_moment_action(req: CurateMomentRequest):
                     aid_tags = [{"category": r[0], "tag_value": r[1], "include_in_name": bool(r[2])} for r in aid_rows]
                     if aid_tags:
                         _sync_asset_metadata_json(cur, aid, target_moment, aid_tags, tag_session_id)
-                if union_tags and highrated_copied_ids:
-                    for hr_aid in highrated_copied_ids:
-                        _sync_asset_metadata_json(cur, hr_aid, HIGHRATED_ORGANIZER_ALBUM, union_tags, tag_session_id)
                 tags_applied_count = len(union_tags)
 
             moment_union_tags = _sync_moment_folder_metadata_json(
                 cur,
                 target_moment,
                 tag_session_id,
-                asset_ids_hint=selected_ids,
+                asset_ids_hint=all_taggable_event_ids,
                 extra_union_tags=union_tags,
             )
             if req.export_to_lacie:
@@ -12124,7 +12152,7 @@ def get_all_unified_groupings():
                     SELECT DISTINCT moaa.asset_id
                     FROM media_organizer_album_assets moaa
                     JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
                     """
                 ).fetchall():
                     if aid_ex:
@@ -12454,7 +12482,11 @@ def get_all_unified_groupings():
                         aid
                         for aid in member_aids
                         if aid in asset_info_map
-                        and (aid not in migrated_aids or lc in migrated_moment_lcs_by_aid.get(aid, set()))
+                        and (
+                            aid not in migrated_aids
+                            or not migrated_moment_lcs_by_aid.get(aid)
+                            or lc in migrated_moment_lcs_by_aid.get(aid, set())
+                        )
                     ]
                 if not own_active_aids:
                     continue
@@ -12508,9 +12540,10 @@ def get_all_unified_groupings():
                 # Evaluate whether curated items strictly match logarithmic expectation ln(N)
                 if in_org_lib:
                     candidate_cur_set = org_cur_set
-                    has_uncurated_active = any(
-                        aid not in org_cur_set and aid not in pub_set for aid in own_active_aids
-                    )
+                    org_non_cur_set = {
+                        aid for aid in (org_album_aids_by_lc.get(lc, set()) - org_cur_set) if aid in asset_info_map
+                    }
+                    has_uncurated_active = bool(org_non_cur_set)
                 else:
                     candidate_cur_set = legacy_cur_set if raw_stage not in ("M100", "M200") else set()
                     has_uncurated_active = False
@@ -12528,7 +12561,7 @@ def get_all_unified_groupings():
                 )
 
                 if curation_matches_log and in_org_lib and org_cur_set:
-                    valid_members = [aid for aid in (org_cur_set | pub_set) if aid in asset_info_map]
+                    valid_members = [aid for aid in org_cur_set if aid in asset_info_map]
                 else:
                     valid_members = list(own_active_aids)
                 if not valid_members:
@@ -12792,6 +12825,8 @@ def get_all_unified_groupings():
             for lc_m, s_m in valid_members_by_lc.items():
                 if is_true_moment_by_lc.get(lc_m):
                     moment_grouped_aids.update(s_m)
+                    moment_grouped_aids.update(moments_col_aids_by_lc.get(lc_m, set()))
+                    moment_grouped_aids.update(pub_aids_by_lc.get(lc_m, set()))
 
             try:
                 mode_m_data = _compute_mode_m_from_db(cur, hist_min, None)
@@ -13180,7 +13215,7 @@ def get_unified_grouping_assets(moment_name: str):
                     SELECT DISTINCT moaa.asset_id
                     FROM media_organizer_album_assets moaa
                     JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
                     """
                 ).fetchall():
                     if aid_ex:
@@ -13310,15 +13345,18 @@ def get_unified_grouping_assets(moment_name: str):
                 for r in raw_rows
                 if r[0]
                 and r[0] not in excluded_aids
-                and (r[0] not in migrated_aids or m_name_lc in migrated_moment_lcs_by_aid.get(r[0], set()))
+                and (
+                    r[0] not in migrated_aids
+                    or not migrated_moment_lcs_by_aid.get(r[0])
+                    or m_name_lc in migrated_moment_lcs_by_aid.get(r[0], set())
+                )
             ]
             ev_pool_g = _compute_moment_event_pool_count(cur, m_name, fallback_min=len(own_rows))
             exp_g_cnt, _ = _compute_expected_curated_stats(ev_pool_g)
             org_cur_valid = {r[0] for r in own_rows if r[0] in org_cur_aids}
-            has_uncur_extra = any(r[0] not in org_cur_valid and r[0] not in pub_set for r in own_rows)
+            has_uncur_extra = bool(in_moments_set or in_tbc_set) and not org_cur_valid
             if is_org_moment and org_cur_valid and len(org_cur_valid) == exp_g_cnt and not has_uncur_extra:
-                allowed_org = org_cur_valid | pub_set
-                kept_rows = [r for r in own_rows if r[0] in allowed_org]
+                kept_rows = [r for r in own_rows if r[0] in org_cur_valid]
             else:
                 kept_rows = own_rows
             aid_list = [r[0] for r in kept_rows]
