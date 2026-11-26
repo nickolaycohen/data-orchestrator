@@ -2882,7 +2882,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         SELECT DISTINCT moaa.asset_id
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
         """
     )
     excluded_aids = {r[0] for r in cur.fetchall()}
@@ -2973,7 +2973,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             FROM assets a
             LEFT JOIN ZASSET za ON a.asset_id = za.ZUUID
             WHERE a.MomentsAlbumName IS NOT NULL AND a.MomentsAlbumName != ''
-              AND LOWER(a.MomentsAlbumName) NOT IN ('ignore', 'skippublishing', 'topscore excluded')
+              AND LOWER(a.MomentsAlbumName) NOT IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
               AND COALESCE(a.removed_from_source, 0) = 0
             """
         )
@@ -3536,7 +3536,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             moa.full_path LIKE 'Media Organizer on LaCie/ToBeCurated/%'
             OR LOWER(COALESCE(moa.parent_folder_name, '')) = 'tobecurated'
         )
-          AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore')
+          AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore', 'topscore excluded', 'highrated assets')
         """
     )
     tbc_aids_by_album: dict[str, set[str]] = {}
@@ -3555,7 +3555,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
             moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
             OR LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
         )
-          AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore')
+          AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore', 'topscore excluded', 'highrated assets')
         """
     )
     curated_aids_by_album = {}
@@ -3638,7 +3638,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         JOIN month_batches mb ON v.month = mb.month
         WHERE mb.status_code >= '600'
           AND v.MomentsAlbumName IS NOT NULL AND v.MomentsAlbumName != ''
-          AND LOWER(v.MomentsAlbumName) NOT IN ('skippublishing', 'ignore')
+          AND LOWER(v.MomentsAlbumName) NOT IN ('skippublishing', 'ignore', 'topscore excluded', 'highrated assets')
           AND v.score_normalized > ?
         ORDER BY v.score_normalized DESC
         """,
@@ -5512,7 +5512,7 @@ def _detect_duplicates_for_asset_list(
 
         dup_map: dict[str, dict] = {}
         ext_prio_map = getattr(mod, "EXTENSION_PRIORITY", {"heic": 0, "heif": 0, "dng": 1, "raw": 1, "png": 2, "jpg": 3, "jpeg": 3, "mp4": 4, "mov": 5})
-        excluded_names = getattr(mod, "EXCLUDED_ALBUM_NAMES", ("ignore", "skippublishing", "topscore excluded"))
+        excluded_names = getattr(mod, "EXCLUDED_ALBUM_NAMES", ("ignore", "skippublishing", "topscore excluded", "highrated assets"))
 
         def _keeper_rank(m: dict) -> tuple:
             mom = (m.get("moment") or "").strip()
@@ -6548,7 +6548,7 @@ def _reconcile_organizer_albums_from_photos_db(
                     if ex_info is None or ex_info[1] < len(member_src_ids):
                         alb_pk, _ = _upsert_organizer_album_in_db(cur, par_nm, alb_nm, member_src_ids)
                         dirty_db = True
-                        if par_nm.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments") and alb_nm.lower() not in ("ignore", "skippublishing"):
+                        if par_nm.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments") and alb_nm.lower() not in ("ignore", "skippublishing", "topscore excluded", "highrated assets"):
                             try:
                                 m_ex = cur.execute(
                                     "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
@@ -6587,7 +6587,7 @@ def _reconcile_organizer_albums_from_photos_db(
             JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
             WHERE moa.is_folder = 0
               AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
-              AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded')
+              AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
             ORDER BY moa.full_path ASC
             """
         ).fetchall():
@@ -6959,7 +6959,7 @@ def _compute_moment_event_pool_count(cur: sqlite3.Cursor, moment_name: str, fall
             JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
             WHERE moa.is_folder = 0
               AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
-              AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded')
+              AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
               AND LOWER(TRIM(moa.album_name)) != ?
             """,
             (m_lc,),
@@ -7282,7 +7282,7 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
         SELECT DISTINCT moaa.asset_id
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
         """
     )
     excluded_aids = {r[0] for r in cur.fetchall()}
@@ -9511,7 +9511,7 @@ def _load_moment_detail_core(
         SELECT DISTINCT moaa.asset_id
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+        WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
         """
     )
     excluded_aids = {r[0] for r in cur.fetchall()}
@@ -9760,7 +9760,7 @@ def _get_disjoint_moment_detail_impl(
                 WHERE mb.status_code >= '600'
                   AND v.MomentsAlbumName IS NOT NULL AND TRIM(v.MomentsAlbumName) != ''
                   AND TRIM(v.MomentsAlbumName) != TRIM(?)
-                  AND LOWER(v.MomentsAlbumName) NOT IN ('ignore', 'skippublishing', 'topscore excluded')
+                  AND LOWER(v.MomentsAlbumName) NOT IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
                   AND v.score_normalized > ?
                 GROUP BY TRIM(v.MomentsAlbumName)
                 HAVING COUNT(*) >= 2
@@ -10376,7 +10376,7 @@ def search_moments_for_consolidation(q: str = "", exclude_moment: str = "", anch
                 LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
                 WHERE a.MomentsAlbumName IS NOT NULL
                   AND TRIM(a.MomentsAlbumName) != ''
-                  AND LOWER(TRIM(a.MomentsAlbumName)) NOT IN ('ignore', 'skippublishing', 'topscore excluded')
+                  AND LOWER(TRIM(a.MomentsAlbumName)) NOT IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
                   AND COALESCE(a.removed_from_source, 0) = 0
                   AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
                 GROUP BY TRIM(a.MomentsAlbumName)
@@ -10513,7 +10513,7 @@ def get_timeframe_devices_context(
                     SELECT DISTINCT moaa.asset_id
                     FROM media_organizer_album_assets moaa
                     JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
                     """
                 ).fetchall():
                     if aid_ex:
@@ -10638,7 +10638,7 @@ def get_timeframe_devices_context(
                 sc_f = float(sc or 0.0)
                 is_qual = sc_f > hist_min
                 ass_clean = (ass_m or "").strip()
-                is_excl = aid in excluded_aids or ass_clean.lower() in ("ignore", "skippublishing", "topscore excluded")
+                is_excl = aid in excluded_aids or ass_clean.lower() in ("ignore", "skippublishing", "topscore excluded", "highrated assets")
                 in_src = (aid in src_id_set) or (bool(m_clean_lc) and ass_clean.lower() == m_clean_lc)
 
                 if owner and owner not in ("Shared/Other", "Unknown") and owner.lower() not in seen_fam_lc:
@@ -11013,6 +11013,16 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 ]
 
             del_org_albums = [sm for sm in combined_src_moments if req.delete_source_albums and sm.lower() != target_moment.lower()]
+            pre_merge_unselected_ids = (
+                _collect_unselected_event_asset_ids(
+                    cur,
+                    combined_asset_ids,
+                    unselected_ids_m,
+                    combined_src_moments,
+                )
+                if target_parent.lower() == "curated"
+                else list(unselected_ids_m)
+            )
             sync_res = _sync_assets_to_organizer_library(
                 cur,
                 target_parent,
@@ -11030,6 +11040,20 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
             photos_added = int(sync_res.get("photos_added", 0))
             albums_deleted = int(sync_res.get("albums_deleted", 0))
             newly_imported = int(sync_res.get("newly_imported", 0))
+
+            highrated_ids_m: list[str] = []
+            highrated_error_m = None
+            if target_parent.lower() == "curated" and combined_asset_ids and pre_merge_unselected_ids:
+                hr_m = _sync_highrated_unselected_event_assets(
+                    cur,
+                    combined_asset_ids,
+                    pre_merge_unselected_ids,
+                )
+                highrated_ids_m = hr_m["highrated_ids"]
+                highrated_error_m = hr_m["error"]
+                if highrated_ids_m:
+                    hr_set_m = set(highrated_ids_m)
+                    unselected_ids_m = [u for u in unselected_ids_m if u not in hr_set_m]
 
             if unselected_ids_m and unselected_action_m == "ignore":
                 unselected_count_done = _mark_assets_ignored_in_db(cur, unselected_ids_m)
@@ -11250,6 +11274,160 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
         "moment_paradigm_confirmed": bool(moment_union_tags),
         "unselected_count": unselected_count_done,
         "unselected_error": unselected_error,
+        "highrated_copied_count": len(highrated_ids_m),
+        "highrated_error": highrated_error_m,
+    }
+
+
+HIGHRATED_ORGANIZER_PARENT = "Moments"
+HIGHRATED_ORGANIZER_ALBUM = "Highrated assets"
+
+
+def _collect_unselected_event_asset_ids(
+    cur: sqlite3.Cursor,
+    selected_ids: list[str],
+    explicit_unselected_ids: list[str],
+    moment_names: Optional[list[str]] = None,
+) -> list[str]:
+    """Gather all non-trashed, non-excluded unselected asset IDs belonging to the event pool."""
+    sel_set = {s.strip() for s in (selected_ids or []) if s and s.strip()}
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw_u in explicit_unselected_ids or []:
+        u = (raw_u or "").strip()
+        if u and u not in sel_set and u not in seen:
+            seen.add(u)
+            out.append(u)
+
+    excluded_aids: set[str] = set()
+    try:
+        for (aid_ex,) in cur.execute(
+            """
+            SELECT DISTINCT moaa.asset_id
+            FROM media_organizer_album_assets moaa
+            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+            WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
+            """
+        ).fetchall():
+            if aid_ex:
+                excluded_aids.add(aid_ex)
+    except sqlite3.OperationalError:
+        pass
+
+    for m_nm in moment_names or []:
+        mc = (m_nm or "").strip()
+        if not mc:
+            continue
+        try:
+            where_m, params_m = _moment_membership_where_sql(mc)
+            try:
+                rows_m = cur.execute(
+                    f"""
+                    SELECT DISTINCT a.asset_id
+                    FROM assets a
+                    LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                    WHERE {where_m}
+                      AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                    """,
+                    params_m,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows_m = cur.execute(
+                    f"""
+                    SELECT DISTINCT a.asset_id
+                    FROM assets a
+                    WHERE {where_m}
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                    """,
+                    params_m,
+                ).fetchall()
+            for (aid_m,) in rows_m:
+                if aid_m and aid_m not in sel_set and aid_m not in seen and aid_m not in excluded_aids:
+                    seen.add(aid_m)
+                    out.append(aid_m)
+        except sqlite3.OperationalError:
+            pass
+    return out
+
+
+def _sync_highrated_unselected_event_assets(
+    cur: sqlite3.Cursor,
+    selected_ids: list[str],
+    candidate_unselected_ids: list[str],
+) -> dict:
+    """Copy unselected assets of a multi-asset event whose score > max(selected keeper scores)
+    into Media Organizer.photoslibrary / Moments / Highrated assets (keeping All-Media read-only).
+    """
+    sel_clean = [s.strip() for s in (selected_ids or []) if s and s.strip()]
+    sel_set = set(sel_clean)
+    unsel_clean = [u.strip() for u in (candidate_unselected_ids or []) if u and u.strip() and u.strip() not in sel_set]
+
+    if not sel_clean or not unsel_clean or (len(sel_clean) + len(unsel_clean)) < 2:
+        return {
+            "highrated_ids": [],
+            "max_keeper_score": 0.0,
+            "photos_added": 0,
+            "newly_imported": 0,
+            "error": None,
+        }
+
+    lookup_ids = [*sel_clean, *unsel_clean]
+    scores_by_aid: dict[str, float] = {}
+    try:
+        for idx in range(0, len(lookup_ids), 400):
+            chunk = lookup_ids[idx : idx + 400]
+            ph = ",".join("?" for _ in chunk)
+            for aid_s, sc_val in cur.execute(
+                f"SELECT asset_id, COALESCE(score_normalized, 0.0) FROM ranked_assets_view WHERE asset_id IN ({ph})",
+                chunk,
+            ).fetchall():
+                if aid_s:
+                    scores_by_aid[aid_s] = float(sc_val or 0.0)
+    except sqlite3.OperationalError:
+        pass
+
+    max_keeper_score = max((scores_by_aid.get(aid, 0.0) for aid in sel_clean), default=0.0)
+    highrated_ids = sorted(
+        [aid for aid in unsel_clean if scores_by_aid.get(aid, 0.0) > max_keeper_score],
+        key=lambda a: -scores_by_aid.get(a, 0.0),
+    )
+    if not highrated_ids:
+        return {
+            "highrated_ids": [],
+            "max_keeper_score": max_keeper_score,
+            "photos_added": 0,
+            "newly_imported": 0,
+            "error": None,
+        }
+
+    sync_hr = _sync_assets_to_organizer_library(
+        cur,
+        HIGHRATED_ORGANIZER_PARENT,
+        HIGHRATED_ORGANIZER_ALBUM,
+        highrated_ids,
+        allow_existing=True,
+    )
+    if not sync_hr.get("ok"):
+        return {
+            "highrated_ids": [],
+            "max_keeper_score": max_keeper_score,
+            "photos_added": 0,
+            "newly_imported": 0,
+            "error": sync_hr.get("error") or "Failed copying assets to Moments / Highrated assets",
+        }
+
+    ph_hr = ",".join("?" for _ in highrated_ids)
+    cur.execute(
+        f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_hr})",
+        highrated_ids,
+    )
+    return {
+        "highrated_ids": highrated_ids,
+        "max_keeper_score": max_keeper_score,
+        "photos_added": int(sync_hr.get("photos_added", 0)),
+        "newly_imported": int(sync_hr.get("newly_imported", 0)),
+        "error": None,
     }
 
 
@@ -11367,6 +11545,9 @@ def curate_moment_action(req: CurateMomentRequest):
     tag_session_id = None
     tags_applied_count = 0
     moment_union_tags: list[dict] = []
+    highrated_copied_ids: list[str] = []
+    highrated_max_keeper_score = 0.0
+    highrated_error = None
     try:
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
@@ -11374,6 +11555,14 @@ def curate_moment_action(req: CurateMomentRequest):
             cur = conn.cursor()
             _ensure_moment_tag_tables(cur)
             _ensure_organizer_library_tables(cur)
+
+            scan_moment_names = list(extra_moments) if req.is_unassigned_cluster else [src_moment, *extra_moments]
+            all_event_unselected_ids = _collect_unselected_event_asset_ids(
+                cur,
+                selected_ids,
+                unselected_ids,
+                scan_moment_names,
+            )
 
             del_org_names = list(extra_moments)
             if (req.delete_tbc_album or is_renamed) and not req.is_unassigned_cluster:
@@ -11411,17 +11600,30 @@ def curate_moment_action(req: CurateMomentRequest):
                     (cur_alb_pk, target_moment),
                 )
 
-            if unselected_ids:
-                ph_unsel = ",".join("?" for _ in unselected_ids)
+            # Copy any unselected event assets scoring higher than the highest curated keeper into Moments / Highrated assets
+            if all_event_unselected_ids:
+                hr_res = _sync_highrated_unselected_event_assets(
+                    cur,
+                    selected_ids,
+                    all_event_unselected_ids,
+                )
+                highrated_copied_ids = hr_res["highrated_ids"]
+                highrated_max_keeper_score = float(hr_res["max_keeper_score"] or 0.0)
+                highrated_error = hr_res["error"]
+
+            highrated_set = set(highrated_copied_ids)
+            remaining_unselected_ids = [u for u in unselected_ids if u not in highrated_set]
+            if remaining_unselected_ids:
+                ph_unsel = ",".join("?" for _ in remaining_unselected_ids)
                 cur.execute(
                     f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_unsel})",
-                    unselected_ids,
+                    remaining_unselected_ids,
                 )
                 if unselected_action == "ignore":
-                    unselected_count_done = _mark_assets_ignored_in_db(cur, unselected_ids)
+                    unselected_count_done = _mark_assets_ignored_in_db(cur, remaining_unselected_ids)
                 elif unselected_action == "skip_publishing":
-                    _upsert_organizer_album_in_db(cur, "Moments", "SkipPublishing", unselected_ids)
-                    unselected_count_done = len(unselected_ids)
+                    _upsert_organizer_album_in_db(cur, "Moments", "SkipPublishing", remaining_unselected_ids)
+                    unselected_count_done = len(remaining_unselected_ids)
 
             # Remove superseded Moments/ToBeCurated organizer album entries inside Media Organizer library only (never All-Media)
             superseded_pks = [
@@ -11581,6 +11783,9 @@ def curate_moment_action(req: CurateMomentRequest):
                     aid_tags = [{"category": r[0], "tag_value": r[1], "include_in_name": bool(r[2])} for r in aid_rows]
                     if aid_tags:
                         _sync_asset_metadata_json(cur, aid, target_moment, aid_tags, tag_session_id)
+                if union_tags and highrated_copied_ids:
+                    for hr_aid in highrated_copied_ids:
+                        _sync_asset_metadata_json(cur, hr_aid, HIGHRATED_ORGANIZER_ALBUM, union_tags, tag_session_id)
                 tags_applied_count = len(union_tags)
 
             moment_union_tags = _sync_moment_folder_metadata_json(
@@ -11614,6 +11819,11 @@ def curate_moment_action(req: CurateMomentRequest):
         "unselected_action": unselected_action,
         "unselected_count": unselected_count_done,
         "unselected_error": unselected_error,
+        "highrated_copied_count": len(highrated_copied_ids),
+        "highrated_asset_ids": highrated_copied_ids,
+        "highrated_max_keeper_score": round(highrated_max_keeper_score, 4),
+        "highrated_album_path": f"{HIGHRATED_ORGANIZER_PARENT}/{HIGHRATED_ORGANIZER_ALBUM}",
+        "highrated_error": highrated_error,
         "exported_to_lacie": exported_to_lacie,
         "export_error": export_error,
         "tag_session_id": tag_session_id,
@@ -11655,7 +11865,7 @@ def get_all_unified_groupings():
                     SELECT DISTINCT moaa.asset_id
                     FROM media_organizer_album_assets moaa
                     JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
                     """
                 ).fetchall():
                     if aid_ex:
@@ -11695,7 +11905,7 @@ def get_all_unified_groupings():
                     FROM media_organizer_albums moa
                     LEFT JOIN media_organizer_album_assets moaa ON moaa.album_pk = moa.album_pk
                     WHERE moa.is_folder = 0
-                      AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded')
+                      AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
                     """
                 ).fetchall():
                     nm = (alb_name or "").strip()
@@ -11772,7 +11982,7 @@ def get_all_unified_groupings():
                         ).fetchall():
                             nm = (alb_nm or "").strip()
                             par_clean = (par_nm or "").strip()
-                            if not nm or not par_clean or nm.lower() in ("ignore", "skippublishing", "topscore excluded"):
+                            if not nm or not par_clean or nm.lower() in ("ignore", "skippublishing", "topscore excluded", "highrated assets"):
                                 continue
                             lc = nm.lower()
                             if lc not in photos_folders_by_lc:
@@ -11911,7 +12121,7 @@ def get_all_unified_groupings():
                 m_type = "video" if (zkind == 1 or ext in VIDEO_EXTENSIONS) else "photo"
                 asset_info_map[aid] = (fn or "", float(sc or 0.0), dt_utc or "", mo or "", mom_col or "", m_type)
                 mc = (mom_col or "").strip()
-                if mc and mc.lower() not in ("ignore", "skippublishing", "topscore excluded") and mc.lower() not in deleted_lc:
+                if mc and mc.lower() not in ("ignore", "skippublishing", "topscore excluded", "highrated assets") and mc.lower() not in deleted_lc:
                     lc = mc.lower()
                     canonical_name_by_lc.setdefault(lc, mc)
                     moments_col_aids_by_lc.setdefault(lc, set()).add(aid)
@@ -12606,7 +12816,7 @@ def get_unified_grouping_assets(moment_name: str):
                     SELECT DISTINCT moaa.asset_id
                     FROM media_organizer_album_assets moaa
                     JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
                     """
                 ).fetchall():
                     if aid_ex:

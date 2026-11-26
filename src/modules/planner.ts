@@ -147,7 +147,14 @@ let isSubmittingResolveDisjoint = false;
 let resolveDisjointCompleted = false;
 let combinedExtraMoments = new Map<
   string,
-  { momentName: string; assetIds: Set<string>; totalAssets: number; tags: MomentTagItem[]; isTimeframeDeviceSelection?: boolean }
+  {
+    momentName: string;
+    assetIds: Set<string>;
+    totalAssets: number;
+    tags: MomentTagItem[];
+    isTimeframeDeviceSelection?: boolean;
+    allAssets?: Array<{ asset_id: string; score_normalized: number; original_filename?: string; is_duplicate_copy?: boolean }>;
+  }
 >();
 const candidateTagsCache = new Map<string, { tags: MomentTagItem[]; lastSession: MomentTagSessionSummary | null }>();
 let previewedCandidateMomentName = '';
@@ -5489,6 +5496,70 @@ function selectAllQualifiedKeepersInDialog(): void {
   updateResolveDisjointSelectionSummary();
 }
 
+function computeHighratedUnselectedPreview(): {
+  maxKeeperScore: number;
+  highratedIds: Set<string>;
+  highratedAssets: Array<{ asset_id: string; score_normalized: number; original_filename?: string }>;
+  otherUnselectedCount: number;
+  allUnselectedIds: string[];
+} {
+  const selectedScores: number[] = [];
+  const unselectedItems: Array<{ asset_id: string; score_normalized: number; original_filename?: string }> = [];
+  const seenUnsel = new Set<string>();
+
+  resolveDisjointAssets.forEach(a => {
+    if (resolveDisjointSelectedIds.has(a.asset_id)) {
+      selectedScores.push(a.score_normalized ?? 0);
+    } else if (!seenUnsel.has(a.asset_id)) {
+      seenUnsel.add(a.asset_id);
+      unselectedItems.push({
+        asset_id: a.asset_id,
+        score_normalized: a.score_normalized ?? 0,
+        original_filename: a.original_filename
+      });
+    }
+  });
+
+  combinedExtraMoments.forEach(entry => {
+    (entry.allAssets || []).forEach(a => {
+      if (entry.assetIds.has(a.asset_id)) {
+        selectedScores.push(a.score_normalized ?? 0);
+      } else if (!entry.isTimeframeDeviceSelection && !seenUnsel.has(a.asset_id)) {
+        seenUnsel.add(a.asset_id);
+        unselectedItems.push({
+          asset_id: a.asset_id,
+          score_normalized: a.score_normalized ?? 0,
+          original_filename: a.original_filename
+        });
+      }
+    });
+  });
+
+  const poolTotal = getCombinedPoolTotalCount();
+  if (!selectedScores.length || !unselectedItems.length || poolTotal < 2) {
+    return {
+      maxKeeperScore: selectedScores.length ? Math.max(...selectedScores) : 0,
+      highratedIds: new Set<string>(),
+      highratedAssets: [],
+      otherUnselectedCount: unselectedItems.length,
+      allUnselectedIds: unselectedItems.map(x => x.asset_id)
+    };
+  }
+
+  const maxKeeperScore = Math.max(...selectedScores);
+  const highratedAssets = unselectedItems
+    .filter(a => a.score_normalized > maxKeeperScore)
+    .sort((a, b) => b.score_normalized - a.score_normalized);
+  const highratedIds = new Set(highratedAssets.map(a => a.asset_id));
+  return {
+    maxKeeperScore,
+    highratedIds,
+    highratedAssets,
+    otherUnselectedCount: Math.max(0, unselectedItems.length - highratedAssets.length),
+    allUnselectedIds: unselectedItems.map(x => x.asset_id)
+  };
+}
+
 function refreshExpectedCuratedUI(): void {
   const pill = document.getElementById('resolve-disjoint-selected-pill');
   const selectedCount = resolveDisjointAssets.filter(a => resolveDisjointSelectedIds.has(a.asset_id)).length;
@@ -5500,6 +5571,7 @@ function refreshExpectedCuratedUI(): void {
   const totalSel = selectedCount + extraSel;
   const poolTotal = getCombinedPoolTotalCount();
   const { expected, lnRaw } = computeExpectedCuratedStats(poolTotal);
+  const hrPreview = computeHighratedUnselectedPreview();
 
   if (pill) {
     pill.textContent = `${selectedCount} / ${resolveDisjointAssets.length} selected (🎯 exp ${expected})`;
@@ -5520,11 +5592,16 @@ function refreshExpectedCuratedUI(): void {
       resolveDisjointIsCurateM200 && diff !== 0 && poolTotal > 0
         ? `<span class="text-amber">⚠️ Must match ${expected} keeper${expected === 1 ? '' : 's'} to mark Curated &amp; unlock Publish</span>`
         : '';
+    const hrNote =
+      resolveDisjointIsCurateM200 && hrPreview.highratedAssets.length > 0
+        ? `<span class="badge badge-xs badge-purple font-mono" title="Unselected event assets scoring higher than highest curated keeper (${hrPreview.maxKeeperScore.toFixed(4)}) will be copied to Moments / Highrated assets in Media Organizer">⚡ ${hrPreview.highratedAssets.length} (&gt; ${hrPreview.maxKeeperScore.toFixed(3)}) ➜ Moments/Highrated assets</span>`
+        : '';
     expTextEl.innerHTML =
       poolTotal > 0
         ? `<span>🎯 <strong>Expected Curated: ${expected}</strong> <span class="text-muted">(ln(${poolTotal}) = ${lnRaw.toFixed(2)})</span></span>
            <span class="badge badge-xs ${matchCls} font-mono">${diff === 0 ? '✓' : '⚠️'} ${totalSel} keeper${totalSel === 1 ? '' : 's'} selected${diff === 0 ? ' (matches ln target ✓)' : diff > 0 ? ` (+${diff} vs exp)` : ` (${diff} vs exp)`}</span>
            <span class="text-muted">· Total Event Pool: <strong>${poolTotal}</strong></span>
+           ${hrNote}
            ${mismatchNote}`
         : '<span>🎯 <strong>Expected Curated Target (ln N):</strong> —</span>';
   }
@@ -5545,7 +5622,11 @@ function refreshExpectedCuratedUI(): void {
   const curateCountsEl = document.getElementById('curate-m200-counts-summary');
   if (curateCountsEl) {
     const destLabel = resolveDisjointIsCurateM200 ? 'Curated' : 'Moments (M100)';
-    curateCountsEl.textContent = `${totalSel} keeper(s) (🎯 exp ${expected}) ➜ ${destLabel} · ${unselectedCount} unselected`;
+    if (resolveDisjointIsCurateM200 && hrPreview.highratedAssets.length > 0) {
+      curateCountsEl.textContent = `${totalSel} keeper(s) (🎯 exp ${expected}) ➜ ${destLabel} · ⚡ ${hrPreview.highratedAssets.length} (> ${hrPreview.maxKeeperScore.toFixed(3)}) ➜ Moments/Highrated assets · ${hrPreview.otherUnselectedCount} other unselected`;
+    } else {
+      curateCountsEl.textContent = `${totalSel} keeper(s) (🎯 exp ${expected}) ➜ ${destLabel} · ${unselectedCount} unselected`;
+    }
   }
 }
 
@@ -5587,6 +5668,8 @@ function renderResolveDisjointAssets(): void {
       : '👁️ Curated Only';
   }
 
+  const hrPreviewForCards = resolveDisjointIsCurateM200 ? computeHighratedUnselectedPreview() : null;
+
   listEl.innerHTML = resolveDisjointAssets
     .map((a, idx) => {
       const checked = resolveDisjointSelectedIds.has(a.asset_id);
@@ -5594,9 +5677,12 @@ function renderResolveDisjointAssets(): void {
         return '';
       }
       const kRank = keeperRankMap.get(a.asset_id) || 0;
+      const isHighratedUnselected = !checked && Boolean(hrPreviewForCards?.highratedIds.has(a.asset_id));
       const keeperBadge = checked
         ? `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Keeper ${kRank}/${totalSelected}</span>`
-        : '<span class="badge badge-xs badge-amber font-mono">⏭️ Unselected</span>';
+        : isHighratedUnselected
+          ? `<span class="badge badge-xs badge-purple font-mono" title="Score ${a.score_normalized.toFixed(4)} &gt; highest curated keeper (${(hrPreviewForCards?.maxKeeperScore ?? 0).toFixed(4)}) — will be copied to Moments / Highrated assets in Media Organizer">⚡ ➜ Moments/Highrated assets</span>`
+          : '<span class="badge badge-xs badge-amber font-mono">⏭️ Unselected</span>';
       const qualBadge = a.qualified
         ? '<span class="badge badge-xs badge-green font-mono">★ QUALIFIED</span>'
         : '<span class="badge badge-xs badge-outline font-mono">Below Threshold</span>';
@@ -7147,8 +7233,14 @@ function addPreviewedCandidateToCombined(): boolean {
   combinedExtraMoments.set(previewedCandidateMomentName, {
     momentName: previewedCandidateMomentName,
     assetIds: chosenIds,
-    totalAssets: chosenIds.size || previewedCandidateAssets.length,
-    tags: clonedTags
+    totalAssets: previewedCandidateAssets.length || chosenIds.size,
+    tags: clonedTags,
+    allAssets: previewedCandidateAssets.map(a => ({
+      asset_id: a.asset_id,
+      score_normalized: a.score_normalized,
+      original_filename: a.original_filename,
+      is_duplicate_copy: a.is_duplicate_copy
+    }))
   });
   renderResolveDisjointCombineTray();
   renderCandidateMomentChips(displayedCandidateMomentsList);
@@ -7234,7 +7326,7 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     const extraEntries = Array.from(combinedExtraMoments.values());
     const extraAssetCount = extraEntries.reduce((acc, e) => acc + e.assetIds.size, 0);
     const totalKeeperCount = assetIds.length + extraAssetCount;
-    const unselectedAssets = resolveDisjointAssets.filter(a => !resolveDisjointSelectedIds.has(a.asset_id));
+    const hrConf = computeHighratedUnselectedPreview();
     const handleUnsel = (document.getElementById('curate-m200-handle-unselected') as HTMLInputElement | null)?.checked ?? true;
     const unselMode = (document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null)?.value || 'ignore';
     const delTbc = (document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null)?.checked ?? true;
@@ -7254,11 +7346,16 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
         targetMoment
       )}</code> (<code>All-Media</code> remains 100% read-only).`
     );
-    if (unselectedAssets.length > 0 && handleUnsel) {
+    if (hrConf.highratedAssets.length > 0) {
+      stepsHtml.push(
+        `<strong>Copy ${hrConf.highratedAssets.length} higher-scored unselected asset(s) to Highrated assets:</strong> Copy unselected event asset(s) scoring above highest curated keeper (<code>${hrConf.maxKeeperScore.toFixed(4)}</code>) into <code>Media Organizer.photoslibrary / Moments / Highrated assets</code>.`
+      );
+    }
+    if (hrConf.otherUnselectedCount > 0 && handleUnsel) {
       stepsHtml.push(
         unselMode === 'skip_publishing'
-          ? `<strong>Mark ${unselectedAssets.length} unselected asset(s) as SkipPublishing in DB:</strong> Record unselected items under <code>Moments / SkipPublishing</code> (excluded from queues) without modifying <code>All-Media</code>.`
-          : `<strong>Mark ${unselectedAssets.length} unselected asset(s) as Ignore in DB:</strong> Exclude unselected items from future queues without modifying <code>All-Media</code>.`
+          ? `<strong>Mark ${hrConf.otherUnselectedCount} remaining unselected asset(s) as SkipPublishing in DB:</strong> Record unselected items under <code>Moments / SkipPublishing</code> (excluded from queues) without modifying <code>All-Media</code>.`
+          : `<strong>Mark ${hrConf.otherUnselectedCount} remaining unselected asset(s) as Ignore in DB:</strong> Exclude unselected items from future queues without modifying <code>All-Media</code>.`
       );
     }
     if (delTbc) {
@@ -7495,9 +7592,8 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
   const assetIds = resolveDisjointAssets
     .filter(a => resolveDisjointSelectedIds.has(a.asset_id))
     .map(a => a.asset_id);
-  const unselectedIds = resolveDisjointAssets
-    .filter(a => !resolveDisjointSelectedIds.has(a.asset_id))
-    .map(a => a.asset_id);
+  const hrSubmitPreview = computeHighratedUnselectedPreview();
+  const unselectedIds = hrSubmitPreview.allUnselectedIds;
   if ((action === 'skip_publishing' || action === 'ignore' || isCurate) && !assetIds.length) {
     if (statusEl) {
       statusEl.style.display = 'flex';
@@ -7608,7 +7704,7 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
           asset_ids: assetIds,
           additional_moments: additionalMoments,
           additional_asset_ids: additionalAssetIds,
-          unselected_asset_ids: isMerge && resolveDisjointIsCurateM200 ? unselectedIds : [],
+          unselected_asset_ids: isMerge && (resolveDisjointIsCurateM200 || resolvedParent.toLowerCase() === 'curated') ? unselectedIds : [],
           unselected_action: isMerge && resolveDisjointIsCurateM200 ? unselAction : 'none',
           apply_tags: applyTags,
           moment_tag_groups: momentTagGroups,
@@ -7638,8 +7734,12 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
       return;
     }
 
-    if ((isCurate || (isMerge && resolveDisjointIsCurateM200)) && ((data as any).export_error || (data as any).unselected_error)) {
+    if (
+      (isCurate || (isMerge && (resolveDisjointIsCurateM200 || resolvedParent.toLowerCase() === 'curated'))) &&
+      ((data as any).export_error || (data as any).unselected_error || (data as any).highrated_error)
+    ) {
       const warnParts: string[] = [];
+      if ((data as any).highrated_error) warnParts.push(`Moments/Highrated assets step: ${(data as any).highrated_error}`);
       if ((data as any).unselected_error) warnParts.push(`Unselected step: ${(data as any).unselected_error}`);
       if ((data as any).export_error) warnParts.push(`LaCie export step: ${(data as any).export_error}`);
       alert(`Apple Photos action saved, with warning:\n${warnParts.join('\n')}`);
