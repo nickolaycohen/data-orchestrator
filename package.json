@@ -6,11 +6,11 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n \"API,WEB\" -c \"cyan,magenta\" \"npm run dev:api\" \"npm run dev:web\"",
-    "dev:api": ".venv/bin/python3 -m uvicorn backend.main:app --port 8008 --reload",
-    "dev:web": "vite --port 5173",
+    "dev:api": ".venv/bin/python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8008 --reload",
+    "dev:web": "vite --host 0.0.0.0 --port 5173",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview --host 0.0.0.0"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
