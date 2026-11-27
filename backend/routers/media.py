@@ -7451,15 +7451,42 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
     )
     excluded_aids = {r[0] for r in cur.fetchall()}
 
+    # Check whether this Moment has an explicit 'organizer'-scoped Curated/Published album in Media Organizer.photoslibrary
+    org_cur_aids_only: set[str] = set()
+    has_org_cur_album = False
+    try:
+        for (o_aid,) in cur.execute(
+            """
+            SELECT moaa.asset_id
+            FROM media_organizer_album_assets moaa
+            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+            WHERE moa.is_folder = 0
+              AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
+              AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
+              AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+            """,
+            (moment_name,),
+        ).fetchall():
+            has_org_cur_album = True
+            if o_aid and o_aid not in excluded_aids:
+                org_cur_aids_only.add(o_aid)
+    except sqlite3.OperationalError:
+        pass
+
     cur.execute(
         """
         SELECT DISTINCT moaa.asset_id
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-        WHERE moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
-           OR moa.full_path LIKE 'Media Organizer on LaCie/Published/%'
-           OR LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
-        """
+        WHERE moa.is_folder = 0
+          AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+          AND (
+              moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
+              OR moa.full_path LIKE 'Media Organizer on LaCie/Published/%'
+              OR LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
+          )
+        """,
+        (moment_name,),
     )
     all_curated_album_aids = {r[0] for r in cur.fetchall()}
 
@@ -7500,72 +7527,89 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
     min_row = cur.fetchone()
     hist_min_raw = float(min_row[0]) if min_row and min_row[0] else 0.5315
 
-    # Match curated assets from pipeline ranked view, Media Organizer 'Curated/<moment>' albums, assets.curated_album, and moment_exports
+    # Match curated assets: when curated in Media Organizer.photoslibrary, use strictly its organizer Curated/Published keepers
     by_aid: dict[str, tuple[str, str, float]] = {}
-    cur.execute(
-        """
-        SELECT v.asset_id, COALESCE(v.original_filename, a.original_filename, ''), v.score_normalized
-        FROM ranked_assets_view v
-        JOIN month_batches mb ON v.month = mb.month
-        LEFT JOIN assets a ON a.asset_id = v.asset_id
-        WHERE mb.status_code >= '600'
-          AND TRIM(LOWER(COALESCE(v.MomentsAlbumName, ''))) = TRIM(LOWER(?))
-          AND v.score_normalized > ?
-        """,
-        (moment_name, hist_min_raw),
-    )
-    for aid, fn, sc in cur.fetchall():
-        if aid in excluded_aids or aid not in all_curated_album_aids:
-            continue
-        by_aid[aid] = (aid, fn or "", float(sc or 0.0))
-
-    # Directly include manually curated assets placed in Curated/<moment> (Media Organizer library or assets.curated_album)
-    try:
-        for aid, fn, sc in cur.execute(
-            """
-            SELECT DISTINCT a.asset_id,
-                   COALESCE(v.original_filename, a.original_filename, ''),
-                   COALESCE(v.score_normalized, 0.0)
-            FROM assets a
-            LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
-            WHERE TRIM(LOWER(COALESCE(a.curated_album, ''))) = TRIM(LOWER(?))
-               OR a.asset_id IN (
-                   SELECT moaa.asset_id
-                   FROM media_organizer_album_assets moaa
-                   JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
-                   WHERE moa.is_folder = 0
-                     AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
-                     AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
-               )
-            """,
-            (moment_name, moment_name),
-        ).fetchall():
-            if not aid or aid in excluded_aids or aid in by_aid:
-                continue
-            by_aid[aid] = (aid, fn or "", float(sc or 0.0))
-    except sqlite3.OperationalError:
-        pass
-
-    # Also include rows recorded directly in moment_exports if missing above
-    try:
-        me_cols = {r[1] for r in cur.execute("PRAGMA table_info(moment_exports)").fetchall()}
-        stage_clause = "AND COALESCE(me.curation_stage, 'curated') IN ('curated', 'published')" if "curation_stage" in me_cols else ""
+    if has_org_cur_album:
+        if org_cur_aids_only:
+            ph_oc = ",".join("?" for _ in org_cur_aids_only)
+            for aid, fn, sc in cur.execute(
+                f"""
+                SELECT a.asset_id,
+                       COALESCE(v.original_filename, a.original_filename, ''),
+                       COALESCE(v.score_normalized, 0.0)
+                FROM assets a
+                LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                WHERE a.asset_id IN ({ph_oc})
+                """,
+                list(org_cur_aids_only),
+            ).fetchall():
+                if aid and aid not in excluded_aids:
+                    by_aid[aid] = (aid, fn or "", float(sc or 0.0))
+    else:
         cur.execute(
-            f"""
-            SELECT me.asset_id, COALESCE(v.original_filename, a.original_filename, ''), COALESCE(v.score_normalized, 0.0)
-            FROM moment_exports me
-            LEFT JOIN ranked_assets_view v ON me.asset_id = v.asset_id
-            LEFT JOIN assets a ON me.asset_id = a.asset_id
-            WHERE TRIM(LOWER(me.album_name)) = TRIM(LOWER(?)) {stage_clause}
+            """
+            SELECT v.asset_id, COALESCE(v.original_filename, a.original_filename, ''), v.score_normalized
+            FROM ranked_assets_view v
+            JOIN month_batches mb ON v.month = mb.month
+            LEFT JOIN assets a ON a.asset_id = v.asset_id
+            WHERE mb.status_code >= '600'
+              AND TRIM(LOWER(COALESCE(v.MomentsAlbumName, ''))) = TRIM(LOWER(?))
+              AND v.score_normalized > ?
             """,
-            (moment_name,),
+            (moment_name, hist_min_raw),
         )
         for aid, fn, sc in cur.fetchall():
-            if aid in excluded_aids or aid in by_aid:
+            if aid in excluded_aids or aid not in all_curated_album_aids:
                 continue
             by_aid[aid] = (aid, fn or "", float(sc or 0.0))
-    except sqlite3.OperationalError:
-        pass
+
+        # Directly include manually curated assets placed in Curated/<moment> (Media Organizer library or assets.curated_album)
+        try:
+            for aid, fn, sc in cur.execute(
+                """
+                SELECT DISTINCT a.asset_id,
+                       COALESCE(v.original_filename, a.original_filename, ''),
+                       COALESCE(v.score_normalized, 0.0)
+                FROM assets a
+                LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                WHERE TRIM(LOWER(COALESCE(a.curated_album, ''))) = TRIM(LOWER(?))
+                   OR a.asset_id IN (
+                       SELECT moaa.asset_id
+                       FROM media_organizer_album_assets moaa
+                       JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                       WHERE moa.is_folder = 0
+                         AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
+                         AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+                   )
+                """,
+                (moment_name, moment_name),
+            ).fetchall():
+                if not aid or aid in excluded_aids or aid in by_aid:
+                    continue
+                by_aid[aid] = (aid, fn or "", float(sc or 0.0))
+        except sqlite3.OperationalError:
+            pass
+
+        # Also include rows recorded directly in moment_exports if missing above
+        try:
+            me_cols = {r[1] for r in cur.execute("PRAGMA table_info(moment_exports)").fetchall()}
+            stage_clause = "AND COALESCE(me.curation_stage, 'curated') IN ('curated', 'published')" if "curation_stage" in me_cols else ""
+            cur.execute(
+                f"""
+                SELECT me.asset_id, COALESCE(v.original_filename, a.original_filename, ''), COALESCE(v.score_normalized, 0.0)
+                FROM moment_exports me
+                LEFT JOIN ranked_assets_view v ON me.asset_id = v.asset_id
+                LEFT JOIN assets a ON me.asset_id = a.asset_id
+                WHERE TRIM(LOWER(me.album_name)) = TRIM(LOWER(?)) {stage_clause}
+                """,
+                (moment_name,),
+            )
+            for aid, fn, sc in cur.fetchall():
+                if aid in excluded_aids or aid in by_aid:
+                    continue
+                by_aid[aid] = (aid, fn or "", float(sc or 0.0))
+        except sqlite3.OperationalError:
+            pass
 
     rows = []
     for aid, fn, sc in by_aid.values():
