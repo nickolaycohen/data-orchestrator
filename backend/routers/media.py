@@ -7331,18 +7331,38 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
     )
     all_curated_album_aids = {r[0] for r in cur.fetchall()}
 
-    cur.execute("SELECT DISTINCT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (moment_name,))
-    moment_pub_aids = {r[0] for r in cur.fetchall()}
-    cur.execute(
-        """
-        SELECT DISTINCT p.asset_uuid
-        FROM publications p
-        LEFT JOIN curated_moments cm
-          ON TRIM(LOWER(cm.moment_name)) = TRIM(LOWER(p.moment_name))
-        WHERE LOWER(COALESCE(cm.memory_stage, '')) != 'deleted'
-        """
-    )
-    all_pub_aids = {r[0] for r in cur.fetchall()}
+    cm_stage_chk = ""
+    cm_manual_chk = False
+    try:
+        cm_cols_chk = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+        mc_expr = "COALESCE(manually_curated, 0)" if "manually_curated" in cm_cols_chk else "0"
+        r_cm = cur.execute(
+            f"SELECT COALESCE(memory_stage, ''), {mc_expr} FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+            (moment_name,),
+        ).fetchone()
+        if r_cm:
+            cm_stage_chk = str(r_cm[0] or "").strip().upper()
+            cm_manual_chk = bool(r_cm[1])
+    except sqlite3.OperationalError:
+        pass
+
+    is_unpublished_pipeline_stage = cm_manual_chk and cm_stage_chk in ("M100", "M200", "M300", "M400")
+    if is_unpublished_pipeline_stage:
+        moment_pub_aids: set[str] = set()
+        all_pub_aids: set[str] = set()
+    else:
+        cur.execute("SELECT DISTINCT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (moment_name,))
+        moment_pub_aids = {r[0] for r in cur.fetchall()}
+        cur.execute(
+            """
+            SELECT DISTINCT p.asset_uuid
+            FROM publications p
+            LEFT JOIN curated_moments cm
+              ON TRIM(LOWER(cm.moment_name)) = TRIM(LOWER(p.moment_name))
+            WHERE LOWER(COALESCE(cm.memory_stage, '')) != 'deleted'
+            """
+        )
+        all_pub_aids = set() if cm_manual_chk else {r[0] for r in cur.fetchall()}
 
     cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
     min_row = cur.fetchone()
@@ -8625,6 +8645,13 @@ def _reset_moment_pipeline_to_m100(
                     [tgt_clean, *chunk_c],
                 )
 
+    if "publications" in existing_tables and all_names:
+        ph_n = ",".join("?" for _ in all_names)
+        cur.execute(
+            f"DELETE FROM publications WHERE TRIM(LOWER(moment_name)) IN ({ph_n})",
+            [n.lower() for n in all_names],
+        )
+
     had_prior_curation = bool(cleared_album_pks)
     if "curated_moments" in existing_tables and tgt_clean:
         cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
@@ -8664,9 +8691,11 @@ def _reset_moment_pipeline_to_m100(
                     (old_nm,),
                 )
 
+        sf_reset_clause = ", shutterfly_url = NULL" if "shutterfly_url" in cm_cols else ""
+        yt_reset_clause = ", youtube_url = NULL" if "youtube_url" in cm_cols else ""
         ev_cnt = len(clean_aids)
         cur.execute(
-            """
+            f"""
             INSERT INTO curated_moments (
                 moment_name, to_be_curated_count, curated_count, memory_stage,
                 last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists,
@@ -8678,7 +8707,7 @@ def _reset_moment_pipeline_to_m100(
                 curated_count = 0,
                 photos_to_be_curated_exists = 0,
                 photos_curated_exists = 0,
-                manually_curated = 0,
+                manually_curated = 0{sf_reset_clause}{yt_reset_clause},
                 event_total_assets = CASE WHEN excluded.event_total_assets > 0 THEN excluded.event_total_assets ELSE curated_moments.event_total_assets END,
                 last_pipeline_sync = datetime('now')
             """,
@@ -12396,15 +12425,37 @@ def dedup_moment_grouping(req: DedupMomentGroupingRequest):
                 """,
                 (can_moment, dup_moment),
             )
+            # Only merge legacy publications onto canonical_moment if canonical_moment has NOT been reset/curated in an unpublished Media Organizer stage
+            can_stage_row = None
             try:
-                cur.execute(
-                    """
-                    UPDATE publications
-                    SET moment_name = ?
-                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
-                    """,
-                    (can_moment, dup_moment),
-                )
+                cm_c_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+                mc_c_expr = "COALESCE(manually_curated, 0)" if "manually_curated" in cm_c_cols else "0"
+                can_stage_row = cur.execute(
+                    f"SELECT COALESCE(memory_stage, ''), {mc_c_expr} FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+                    (can_moment,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                pass
+            can_is_unpub_org = bool(
+                can_stage_row
+                and bool(can_stage_row[1])
+                and str(can_stage_row[0] or "").strip().upper() in ("M100", "M200", "M300", "M400")
+            )
+            try:
+                if can_is_unpub_org:
+                    cur.execute(
+                        "DELETE FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+                        (dup_moment,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE publications
+                        SET moment_name = ?
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                        """,
+                        (can_moment, dup_moment),
+                    )
             except sqlite3.OperationalError:
                 pass
 
@@ -12802,7 +12853,14 @@ def get_all_unified_groupings():
 
                 cm = cm_by_lc.get(lc, {})
                 raw_stage = cm.get("stage", "M100")
-                pub_set = pub_aids_by_lc.get(lc, set())
+                # If a Moment was manually curated / reset in Media Organizer and is at stage M100..M400 (not yet M450/M500),
+                # ignore any stale legacy All-Media publications so it accurately shows 0 published!
+                is_new_pipeline_unpub = bool(
+                    (in_org_lib or cm.get("manually_curated"))
+                    and str(raw_stage or "").upper() in ("M100", "M200", "M300", "M400")
+                    and cm.get("manually_curated")
+                )
+                pub_set = set() if is_new_pipeline_unpub else pub_aids_by_lc.get(lc, set())
                 pub_cnt = len(pub_set)
                 org_cur_set = {aid for aid in org_cur_aids_by_lc.get(lc, set()) if aid in asset_info_map}
                 legacy_cur_set = {aid for aid in all_media_cur_aids_by_lc.get(lc, set()) if aid in asset_info_map}
@@ -12875,14 +12933,21 @@ def get_all_unified_groupings():
                     and not has_uncurated_active
                 )
 
-                if curation_matches_log and in_org_lib and org_cur_set:
-                    valid_members = [aid for aid in org_cur_set if aid in asset_info_map]
-                else:
-                    valid_members = list(own_active_aids)
+                # Keep ALL active assets belonging to this Moment in valid_members so total_assets, score range,
+                # and preview thumbnails show the full Moment pool (with curated keeper(s) ordered first & flagged)!
+                valid_members = list(own_active_aids)
                 if not valid_members:
                     continue
 
-                valid_members.sort(key=lambda x: (-asset_info_map[x][1], asset_info_map[x][2], x))
+                curated_flag_set = candidate_cur_set if curation_matches_log else set()
+                valid_members.sort(
+                    key=lambda x: (
+                        0 if x in curated_flag_set else 1,
+                        -asset_info_map[x][1],
+                        asset_info_map[x][2],
+                        x,
+                    )
+                )
                 scores_all = [asset_info_map[aid][1] for aid in valid_members]
                 qual_scores = [s for s in scores_all if s > hist_min]
                 total_cnt = len(valid_members)
@@ -12892,6 +12957,8 @@ def get_all_unified_groupings():
                 min_sc = min(scores_all) if scores_all else 0.0
                 max_sc = max(scores_all) if scores_all else 0.0
                 rank_sc = qual_avg_sc * math.log(max(1, qual_cnt) + 1)
+                cur_scores = [asset_info_map[aid][1] for aid in curated_flag_set if aid in asset_info_map]
+                curated_avg_sc = sum(cur_scores) / len(cur_scores) if cur_scores else 0.0
 
                 photos_folders_list = [
                     {
@@ -12931,11 +12998,11 @@ def get_all_unified_groupings():
                 )
                 parents_sorted = sorted(album_parents_by_lc.get(lc, set()))
 
-                sf_url_final = cm.get("shutterfly_url") or pub_sf_url_by_lc.get(lc, "")
-                yt_url_final = cm.get("youtube_url") or pub_yt_url_by_lc.get(lc, "")
-                sf_cnt = len(pub_sf_aids_by_lc.get(lc, set()))
-                yt_cnt = len(pub_yt_aids_by_lc.get(lc, set()))
-                last_pub_raw = last_pub_by_lc.get(lc, "")
+                sf_url_final = "" if is_new_pipeline_unpub else (cm.get("shutterfly_url") or pub_sf_url_by_lc.get(lc, ""))
+                yt_url_final = "" if is_new_pipeline_unpub else (cm.get("youtube_url") or pub_yt_url_by_lc.get(lc, ""))
+                sf_cnt = 0 if is_new_pipeline_unpub else len(pub_sf_aids_by_lc.get(lc, set()))
+                yt_cnt = 0 if is_new_pipeline_unpub else len(pub_yt_aids_by_lc.get(lc, set()))
+                last_pub_raw = "" if is_new_pipeline_unpub else last_pub_by_lc.get(lc, "")
                 pub_local_str = last_pub_raw[:10] if last_pub_raw else ""
 
                 is_historical_m500 = (
@@ -13066,6 +13133,8 @@ def get_all_unified_groupings():
                         "filename": asset_info_map[aid][0],
                         "score": round(asset_info_map[aid][1], 4),
                         "media_type": asset_info_map[aid][5],
+                        "is_curated": bool(aid in curated_flag_set),
+                        "is_published": bool(aid in pub_set),
                     }
                     for aid in valid_members[:6]
                 ]
@@ -13131,6 +13200,7 @@ def get_all_unified_groupings():
                         "published_at_local": pub_local_str,
                         "duplicate_count": 0,
                         "avg_score": round(avg_sc, 4),
+                        "curated_avg_score": round(curated_avg_sc, 4),
                         "qualified_avg_score": round(qual_avg_sc, 4),
                         "min_score": round(min_sc, 4),
                         "max_score": round(max_sc, 4),
@@ -13602,15 +13672,28 @@ def get_unified_grouping_assets(moment_name: str):
                 pass
 
             pub_set: set[str] = set()
+            is_unpub_org_stage = False
             try:
-                for (aid_p,) in cur.execute(
-                    "SELECT DISTINCT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+                cm_g_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+                mc_g_expr = "COALESCE(manually_curated, 0)" if "manually_curated" in cm_g_cols else "0"
+                cm_g_row = cur.execute(
+                    f"SELECT COALESCE(memory_stage, ''), {mc_g_expr} FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
                     (m_name,),
-                ).fetchall():
-                    if aid_p:
-                        pub_set.add(aid_p)
+                ).fetchone()
+                if cm_g_row and bool(cm_g_row[1]) and str(cm_g_row[0] or "").strip().upper() in ("M100", "M200", "M300", "M400"):
+                    is_unpub_org_stage = True
             except sqlite3.OperationalError:
                 pass
+            if not is_unpub_org_stage:
+                try:
+                    for (aid_p,) in cur.execute(
+                        "SELECT DISTINCT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+                        (m_name,),
+                    ).fetchall():
+                        if aid_p:
+                            pub_set.add(aid_p)
+                except sqlite3.OperationalError:
+                    pass
 
             where_clause, query_params = _moment_membership_where_sql(m_name)
             try:
@@ -13682,14 +13765,14 @@ def get_unified_grouping_assets(moment_name: str):
                     or m_name_lc in migrated_moment_lcs_by_aid.get(r[0], set())
                 )
             ]
-            ev_pool_g = _compute_moment_event_pool_count(cur, m_name, fallback_min=len(own_rows))
-            exp_g_cnt, _ = _compute_expected_curated_stats(ev_pool_g)
             org_cur_valid = {r[0] for r in own_rows if r[0] in org_cur_aids}
-            has_uncur_extra = bool(in_moments_set or in_tbc_set) and not org_cur_valid
-            if is_org_moment and org_cur_valid and len(org_cur_valid) == exp_g_cnt and not has_uncur_extra:
-                kept_rows = [r for r in own_rows if r[0] in org_cur_valid]
-            else:
-                kept_rows = own_rows
+            effective_cur_set = org_cur_valid if is_org_moment else in_cur_set
+            # Keep ALL active assets belonging to the Moment when expanded (with curated keepers ordered first),
+            # so the user always sees all Moment assets alongside which one(s) are curated vs uncurated!
+            kept_rows = sorted(
+                own_rows,
+                key=lambda r: (0 if r[0] in effective_cur_set else 1, -float(r[2] or 0.0), str(r[3] or "")),
+            )
             aid_list = [r[0] for r in kept_rows]
             try:
                 per_asset_tags = _load_per_asset_tags_map(cur, aid_list)
@@ -13722,7 +13805,7 @@ def get_unified_grouping_assets(moment_name: str):
                         "is_duplicate_copy": False,
                         "in_moments": aid in in_moments_set,
                         "in_to_be_curated": aid in in_tbc_set,
-                        "in_curated": aid in in_cur_set,
+                        "in_curated": aid in effective_cur_set,
                         "is_published": aid in pub_set,
                         "in_organizer_library": aid in mapped_src_aids or bool(org_folders_by_src_aid.get(aid)),
                         "organizer_folders": [x["full_path"] for x in org_folders_by_src_aid.get(aid, [])],

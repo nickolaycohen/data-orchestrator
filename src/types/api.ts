@@ -856,6 +856,8 @@ export interface UnifiedGroupingPreviewAsset {
   filename: string;
   score: number;
   media_type: 'photo' | 'video';
+  is_curated?: boolean;
+  is_published?: boolean;
 }
 
 export interface UnifiedGroupingAssetItem {
@@ -935,6 +937,7 @@ export interface UnifiedGroupingItem {
   published_at_local?: string;
   duplicate_count: number;
   avg_score: number;
+  curated_avg_score?: number;
   qualified_avg_score: number;
   min_score: number;
   max_score: number;

@@ -9026,12 +9026,6 @@ function renderAllUnifiedGroupings(): void {
       const fallbackExp = computeExpectedCuratedStats(evTot);
       const expCurCnt = g.expected_curated_count ?? fallbackExp.expected;
       const expCurLn = g.expected_curated_ln ?? fallbackExp.lnRaw;
-      const expCurPillHtml = `<span class="badge badge-xs badge-purple font-mono" title="${escapeHtml(
-        `Expected curated count = round(ln(${evTot})) = ${expCurCnt} (ln(${evTot}) = ${expCurLn.toFixed(2)})${
-          g.curated_count > 0 ? ` · Currently curated: ${g.curated_count}` : ''
-        }`
-      )}">🎯 Exp Cur: ${expCurCnt} (ln ${evTot})</span>`;
-
       const isCuratedRow =
         Boolean(g.curation_matches_log) &&
         (g.moment_status === 'M300' ||
@@ -9041,6 +9035,23 @@ function renderAllUnifiedGroupings(): void {
           g.curated_count > 0);
       const isCompletedM500Row = g.moment_status === 'M500' && g.published_count > 0;
       const mismatchCurCnt = g.curation_mismatch_count || 0;
+      const expCurPillHtml = isCuratedRow
+        ? `<span class="badge badge-xs badge-blue font-mono" title="${escapeHtml(
+            `${g.total_assets} total asset(s) in this Moment · ${g.curated_count} curated keeper(s) matching logarithmic target round(ln(${evTot})) = ${expCurCnt} (ln(${evTot}) = ${expCurLn.toFixed(2)})`
+          )}">✅ Curated: ${g.curated_count} / ${g.total_assets} (🎯 ln ${evTot}=${expCurCnt})</span>`
+        : `<span class="badge badge-xs badge-purple font-mono" title="${escapeHtml(
+            `Expected curated count = round(ln(${evTot})) = ${expCurCnt} (ln(${evTot}) = ${expCurLn.toFixed(2)})`
+          )}">🎯 Exp Cur: ${expCurCnt} (ln ${evTot})</span>`;
+      const pubProgressPillHtml =
+        g.kind === 'moment' && !g.is_deduped_group
+          ? g.published_count > 0
+            ? `<span class="badge badge-xs ${isCompletedM500Row ? 'badge-green' : 'badge-amber'} font-mono" title="${escapeHtml(
+                `${g.published_count} asset(s) published so far${isCuratedRow ? ` out of ${g.curated_count} curated keeper(s)` : ''}`
+              )}">📢 Published: ${g.published_count}${isCuratedRow ? ` / ${g.curated_count}` : ''}</span>`
+            : isCuratedRow
+              ? `<span class="badge badge-xs badge-outline font-mono" style="border-color: rgba(148, 163, 184, 0.45); color: #cbd5e1;" title="0 of ${g.curated_count} curated keeper(s) published so far — ready to publish">📤 Published: 0 / ${g.curated_count}</span>`
+              : ''
+          : '';
       const mismatchPillHtml =
         !isCuratedRow && !isCompletedM500Row && mismatchCurCnt > 0
           ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(
@@ -9050,7 +9061,7 @@ function renderAllUnifiedGroupings(): void {
       const pendingPubCnt = isCuratedRow ? (g.pending_publish_count ?? Math.max(0, g.curated_count - g.published_count)) : 0;
       const propPreview = g.proposed_publish_preview || [];
       const propTooltip = propPreview.length
-        ? `Step 2B Pending Publishing:\n• Curated: ${g.curated_count} · Published: ${g.published_count} · Pending: ${pendingPubCnt}\n• Can Publish: ${g.can_publish_str}\n• Proposed Next (${g.propose_next_str || '—'}): ${propPreview
+        ? `Step 2B Pending Publishing:\n• Total in Moment: ${g.total_assets} · Curated: ${g.curated_count} · Published: ${g.published_count} · Pending: ${pendingPubCnt}\n• Can Publish: ${g.can_publish_str}\n• Proposed Next (${g.propose_next_str || '—'}): ${propPreview
             .slice(0, 5)
             .map(p => `${p.filename} [${p.score.toFixed(4)}]`)
             .join(', ')}${propPreview.length > 5 ? ` (+${propPreview.length - 5})` : ''}`
@@ -9063,26 +9074,62 @@ function renderAllUnifiedGroupings(): void {
           : '';
 
       const countsParts: string[] = [
-        `<strong>${g.total_assets}</strong> total`,
-        `<span class="text-green">★ ${g.qualified_assets} qual</span>`,
-        `<span style="color:#c4b5fd;" title="ln(${evTot}) = ${expCurLn.toFixed(2)}">🎯 ${expCurCnt} exp cur</span>`
+        `<strong>${g.total_assets}</strong> ${g.kind === 'moment' ? 'in moment' : 'total'}`,
+        `<span class="text-green">★ ${g.qualified_assets} qual</span>`
       ];
       if (isCuratedRow && g.curated_count > 0) {
-        countsParts.push(`<span style="color:#93c5fd;">✅ ${g.curated_count}/${expCurCnt} cur ✓</span>`);
+        countsParts.push(
+          `<span style="color:#93c5fd;" title="Curated ${g.curated_count} out of ${g.total_assets} Moment asset(s) (matches ln(${evTot}) = ${expCurCnt})">✅ <strong>${g.curated_count}</strong>/${g.total_assets} curated ✓</span>`
+        );
       } else if (mismatchCurCnt > 0) {
-        countsParts.push(`<span class="text-amber" title="Legacy/prior curated count (${mismatchCurCnt}) does not match expected ln(${evTot}) = ${expCurCnt}">⚠️ ${mismatchCurCnt} prior cur ≠ ${expCurCnt}</span>`);
+        countsParts.push(
+          `<span class="text-amber" title="Legacy/prior curated count (${mismatchCurCnt}) does not match expected ln(${evTot}) = ${expCurCnt}">⚠️ ${mismatchCurCnt} prior cur ≠ 🎯 ${expCurCnt} exp</span>`
+        );
+      } else {
+        countsParts.push(
+          `<span style="color:#c4b5fd;" title="0 curated so far · expected round(ln(${evTot})) = ${expCurCnt} (ln=${expCurLn.toFixed(2)})">🎯 <strong>0</strong>/${expCurCnt} curated</span>`
+        );
       }
       if (g.to_be_curated_count > 0) countsParts.push(`<span class="text-amber">🟡 ${g.to_be_curated_count} TBC</span>`);
-      if (g.published_count > 0) countsParts.push(`<span class="text-green">📢 ${g.published_count} pub</span>`);
-      if (pendingPubCnt > 0 && isCuratedRow) countsParts.push(`<span class="text-green">📤 ${pendingPubCnt} pending</span>`);
+      if (g.published_count > 0) {
+        countsParts.push(
+          `<span class="text-green">📢 <strong>${g.published_count}</strong>${isCuratedRow ? `/${g.curated_count}` : ''} published</span>`
+        );
+      } else if (g.kind === 'moment' && !g.is_deduped_group) {
+        countsParts.push(
+          `<span class="text-muted">📤 <strong>0</strong> published${pendingPubCnt > 0 && isCuratedRow ? ` (${pendingPubCnt} pending)` : ''}</span>`
+        );
+      }
+      if (g.published_count > 0 && pendingPubCnt > 0 && isCuratedRow) {
+        countsParts.push(`<span class="text-green">📤 ${pendingPubCnt} pending</span>`);
+      }
       if (g.duplicate_count > 0) countsParts.push(`<span class="text-amber">♻️ ${g.duplicate_count} dup</span>`);
 
       const thumbsHtml = (g.preview_assets || [])
         .slice(0, 5)
-        .map(
-          pa =>
-            `<img class="ugrp-inline-thumb" data-grouping-id="${escapeHtml(g.grouping_id)}" data-asset-id="${escapeHtml(pa.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(pa.asset_id)}" alt="${escapeHtml(pa.filename)}" title="${escapeHtml(pa.filename)} · Score ${pa.score.toFixed(4)}" loading="lazy" />`
-        )
+        .map(pa => {
+          const isCurThumb = Boolean(isCuratedRow && pa.is_curated);
+          const isUncurInCuratedRow = Boolean(isCuratedRow && !pa.is_curated);
+          const thumbStyle = isCurThumb
+            ? 'border: 2px solid #10b981; box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.35);'
+            : isUncurInCuratedRow
+              ? 'opacity: 0.48; filter: saturate(0.75); border: 1px dashed rgba(148, 163, 184, 0.5);'
+              : '';
+          const statePrefix = isCurThumb
+            ? pa.is_published
+              ? '✅ Curated & Published · '
+              : '✅ Curated Keeper (Unpublished) · '
+            : isUncurInCuratedRow
+              ? '📁 In Moment (Not Curated) · '
+              : '';
+          const cornerBadge = isCurThumb
+            ? `<span style="position:absolute; right:-3px; bottom:-3px; background:${pa.is_published ? '#059669' : '#2563eb'}; color:#fff; font-size:0.52rem; line-height:1; padding:1px 3px; border-radius:4px; pointer-events:none; font-weight:700;">${pa.is_published ? '📢' : '✓'}</span>`
+            : '';
+          return `<span style="position:relative; display:inline-flex;">
+            <img class="ugrp-inline-thumb" style="${thumbStyle}" data-grouping-id="${escapeHtml(g.grouping_id)}" data-asset-id="${escapeHtml(pa.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(pa.asset_id)}" alt="${escapeHtml(pa.filename)}" title="${escapeHtml(`${statePrefix}${pa.filename} · Score ${pa.score.toFixed(4)}`)}" loading="lazy" />
+            ${cornerBadge}
+          </span>`;
+        })
         .join('');
       const extraThumbCnt = Math.max(0, g.total_assets - 5);
 
@@ -9123,7 +9170,7 @@ function renderAllUnifiedGroupings(): void {
                <button type="button" class="btn btn-xs ${allCopiedToOrganizer ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Step 1: Tagging &amp; Moment Creation · Step 2: Merge Same-Event Assets">${tagBtnLabel}</button>
                ${lockedCurateRowBtn}`
           : isCuratedRow && pendingPubCnt > 0
-            ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(propTooltip || `Review & publish batch for '${g.name}'`)}">🚀 Publish</button>
+            ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(propTooltip || `Review & publish ${pendingPubCnt} curated asset(s) for '${g.name}'`)}">🚀 Publish (${pendingPubCnt})</button>
                <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation (or expand Retag to reset pipeline)">🎨 Curate</button>`
             : isCompletedM500Row
               ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Publish / Republish dialog">🔄 Republish</button>
@@ -9188,6 +9235,7 @@ function renderAllUnifiedGroupings(): void {
                   <span class="badge badge-xs ${stCls} font-mono">${escapeHtml(g.moment_status)}</span>
                   ${matchedAssetPillHtml}
                   ${expCurPillHtml}
+                  ${pubProgressPillHtml}
                   ${dupGroupPillHtml}
                   ${mismatchPillHtml}
                   ${disjHtml}
@@ -9213,7 +9261,7 @@ function renderAllUnifiedGroupings(): void {
               <div style="text-align: right;" class="font-mono">
                 <div style="font-size: 0.82rem; font-weight: 700; color: #fbbf24;">Avg ${g.avg_score.toFixed(4)}</div>
                 <div class="text-muted" style="font-size: 0.65rem;">
-                  ${g.min_score.toFixed(3)}..${g.max_score.toFixed(3)} · Rank ${g.rank_score.toFixed(2)}
+                  ${isCuratedRow && g.curated_avg_score && g.curated_count < g.total_assets ? `<span style="color:#6ee7b7;" title="Average score of curated keeper(s)">Cur ${g.curated_avg_score.toFixed(4)}</span> · ` : ''}${g.min_score.toFixed(3)}..${g.max_score.toFixed(3)} · Rank ${g.rank_score.toFixed(2)}
                 </div>
               </div>
               <div class="unified-grouping-thumbs">
