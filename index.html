@@ -2895,6 +2895,27 @@
             </div>
           </div>
 
+          <div id="resolve-disjoint-step3-subevents-section"
+            style="padding: 0.72rem 0.78rem; border-radius: var(--radius-sm); background: rgba(6, 182, 212, 0.07); border: 1px solid rgba(6, 182, 212, 0.34); display: flex; flex-direction: column; gap: 0.45rem;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <span class="badge badge-xs badge-cyan font-mono">STEP 3</span>
+                <strong style="font-size: 0.83rem; color: #cffafe;">Subevents Designation (Multi-Day / Composite Event)</strong>
+              </div>
+              <span class="badge badge-xs badge-outline font-mono" id="resolve-disjoint-step3-lock-badge">🔒 Add Assets in Step 2 to Unlock</span>
+            </div>
+            <label id="resolve-disjoint-step3-label"
+              style="display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.75rem; color: #e0f2fe; cursor: not-allowed; opacity: 0.55;">
+              <input type="checkbox" id="resolve-disjoint-step3-has-subevents" disabled style="margin-top: 0.16rem;" />
+              <span>
+                <strong>🌿 Mark Event as Containing Subevents:</strong> Keep this Major Event as an Umbrella Event in <code>Moments</code> (it will <strong>not</strong> advance to Curation or Publishing directly) and unlock the <strong>🌿 Split Subevents</strong> button so Subevents can be identified &amp; curated with better context.
+              </span>
+            </label>
+            <div id="resolve-disjoint-step3-hint" class="font-mono text-muted" style="font-size: 0.68rem;">
+              🔒 Step 3 unlocks automatically when Step 2 is used to add same-event assets.
+            </div>
+          </div>
+
           <div id="resolve-disjoint-destination-section"
             style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 0.55rem;">
             <div class="disjoint-target-path-box">
@@ -3071,6 +3092,85 @@
             ⚠️ Override &amp; Queue Anyway
           </button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-split-subevents" style="z-index: 338;">
+    <div class="modal-dialog"
+      style="max-width: 960px; width: 96vw; max-height: 92vh; display: flex; flex-direction: column; border-color: rgba(6, 182, 212, 0.48);">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+          <h3 style="margin: 0; font-size: 1.05rem;" id="split-subevents-modal-title">🌿 Split Subevents</h3>
+          <span class="badge badge-xs badge-cyan font-mono" id="split-subevents-badge">0 assets</span>
+        </div>
+        <button type="button" class="btn btn-xs btn-icon btn-close-split-subevents-modal" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body"
+        style="padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem; overflow-y: auto; flex: 1;">
+        <div id="split-subevents-summary-banner" class="dedup-status-banner"
+          style="padding: 0.55rem 0.75rem; font-size: 0.76rem; border-color: rgba(6, 182, 212, 0.38); background: rgba(6, 182, 212, 0.09);">
+          <div class="spinner-sm"></div>
+          <span>Analyzing location &amp; creation-timestamp subgroupings...</span>
+        </div>
+
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+            <strong style="font-size: 0.8rem; color: #cffafe;">Suggested Subgroupings (Location &amp; Timestamp)</strong>
+            <span class="badge badge-xs badge-outline font-mono" id="split-subevents-sections-pill">0 sections</span>
+          </div>
+          <div class="cleanup-filter-group" style="padding: 0.12rem 0.25rem;">
+            <button type="button" class="cleanup-preview-sort-btn subevent-granularity-btn active" data-sub-gran="auto"
+              title="Split when Apple Photos Moment/GPS location changes or creation timestamp gap >= 2 hours">⚡ Auto (Location + 2h)</button>
+            <button type="button" class="cleanup-preview-sort-btn subevent-granularity-btn" data-sub-gran="1h"
+              title="Finer 1-hour gap + location boundaries">🕐 1h Gap</button>
+            <button type="button" class="cleanup-preview-sort-btn subevent-granularity-btn" data-sub-gran="4h"
+              title="Half-day (4-hour) timestamp windows">🕓 4h Window</button>
+            <button type="button" class="cleanup-preview-sort-btn subevent-granularity-btn" data-sub-gran="day"
+              title="Group strictly by calendar date (YYYY-MM-DD)">📅 By Day</button>
+          </div>
+        </div>
+
+        <div id="split-subevents-existing-bar"
+          style="display: none; align-items: center; gap: 0.4rem; flex-wrap: wrap; padding: 0.45rem 0.65rem; border-radius: 6px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.3); font-size: 0.73rem;">
+        </div>
+
+        <div id="split-subevents-sections-list"
+          style="display: flex; flex-direction: column; gap: 0.65rem;">
+        </div>
+
+        <div id="split-subevents-builder-panel"
+          style="display: none; flex-direction: column; gap: 0.6rem; padding: 0.8rem; border-radius: 8px; background: rgba(15, 23, 42, 0.82); border: 1px solid rgba(6, 182, 212, 0.45);">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+              <span class="badge badge-xs badge-cyan font-mono">IDENTIFY SUBEVENT</span>
+              <strong style="font-size: 0.84rem; color: #e0f2fe;" id="split-subevents-builder-heading">Name &amp; Tag Selected Subevent</strong>
+            </div>
+            <span class="badge badge-xs badge-purple font-mono" id="split-subevents-builder-count-pill">0 selected · 🎯 exp 0</span>
+          </div>
+          <div id="split-subevents-parent-loc-hints" style="display: none; align-items: center; gap: 0.35rem; flex-wrap: wrap; font-size: 0.71rem;"></div>
+          <div id="split-subevents-tagging-mount"></div>
+          <div class="disjoint-target-path-box">
+            <span class="font-mono text-muted"
+              style="font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.25rem;">Subevent Destination · Sibling Moment in Media Organizer</span>
+            <div class="disjoint-target-path-inline">
+              <span class="disjoint-target-prefix font-mono">Media Organizer / Moments /</span>
+              <input type="text" id="split-subevents-name-input" class="form-control disjoint-target-leaf-input"
+                placeholder="e.g. Conservatory Visit in Chicago - Summer 2004" aria-label="Subevent Moment Name" />
+            </div>
+          </div>
+          <div id="split-subevents-status" class="dedup-status-banner" style="display: none; font-size: 0.75rem;"></div>
+          <div style="display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap;">
+            <button type="button" class="btn btn-xs btn-outline" id="btn-cancel-subevent-builder">Clear Selection</button>
+            <button type="button" class="btn btn-sm btn-cyan" id="btn-submit-create-subevent">🌿 Create Subevent in Moments</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+        <span class="font-mono text-muted" style="font-size: 0.7rem;" id="split-subevents-footer-note">
+          🔒 Major Umbrella Event will not advance to Publishing; curate &amp; publish each identified Subevent individually.
+        </span>
+        <button type="button" class="btn btn-outline btn-close-split-subevents-modal" id="btn-close-split-subevents">Done</button>
       </div>
     </div>
   </div>

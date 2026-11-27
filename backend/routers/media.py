@@ -37,6 +37,20 @@ def _get_published_lacie_dir() -> Path:
         return PUBLISHED_LACIE_DIR
     return CURATED_LACIE_DIR.parent / "Published"
 
+
+def _safe_path_exists(p: Path) -> bool:
+    try:
+        return p.exists()
+    except OSError:
+        return False
+
+
+def _safe_is_dir(p: Path) -> bool:
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
 router = APIRouter(prefix="/api/media", tags=["media"])
 
 class BgServiceControlRequest(BaseModel):
@@ -3726,7 +3740,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
     ranked_moments_sim = []
     pending_publishing_entries = []
     moment_midpoints = {}
-    lacie_mounted = CURATED_LACIE_DIR.exists()
+    lacie_mounted = _safe_is_dir(CURATED_LACIE_DIR)
+    pub_lacie_mounted_m = _safe_is_dir(_get_published_lacie_dir())
     now_local = datetime.now()
     for name, md in moments_data.items():
         if md["all_dates"]:
@@ -3760,14 +3775,14 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         fs_bases: set[str] = set()
         fs_curated_exists = False
         pub_lacie_dir = _get_published_lacie_dir()
-        if lacie_mounted or pub_lacie_dir.exists():
+        if lacie_mounted or pub_lacie_mounted_m:
             for cand_dir in (
                 CURATED_LACIE_DIR / name,
                 CURATED_LACIE_DIR / name_stripped,
                 pub_lacie_dir / name,
                 pub_lacie_dir / name_stripped,
             ):
-                if cand_dir.is_dir():
+                if _safe_is_dir(cand_dir):
                     fs_curated_exists = True
                     try:
                         with os.scandir(cand_dir) as it_dir:
@@ -6644,8 +6659,8 @@ def _reconcile_organizer_albums_from_photos_db(
                                 if member_src_ids:
                                     ph_m = ",".join("?" for _ in member_src_ids)
                                     cur.execute(
-                                        f"UPDATE assets SET MomentsAlbumName = ? WHERE asset_id IN ({ph_m}) AND COALESCE(MomentsAlbumName, '') != ?",
-                                        [alb_nm, *member_src_ids, alb_nm],
+                                        f"UPDATE assets SET MomentsAlbumName = ? WHERE asset_id IN ({ph_m}) AND COALESCE(TRIM(MomentsAlbumName), '') = ''",
+                                        [alb_nm, *member_src_ids],
                                     )
                             except sqlite3.OperationalError:
                                 pass
@@ -6653,6 +6668,40 @@ def _reconcile_organizer_albums_from_photos_db(
                 c_org.close()
         except Exception:
             pass
+
+    # Self-heal Subevent asset MomentsAlbumName if Background DB Sync refreshed MomentsAlbumName from read-only All-Media Parent album
+    try:
+        cm_cols_rec = _ensure_subevent_schema(cur)
+        if "parent_moment_name" in cm_cols_rec:
+            sub_rows_rec = cur.execute(
+                """
+                SELECT moment_name, parent_moment_name
+                FROM curated_moments
+                WHERE TRIM(COALESCE(parent_moment_name, '')) != ''
+                  AND LOWER(COALESCE(memory_stage, '')) != 'deleted'
+                """
+            ).fetchall()
+            for sub_nm_r, par_nm_r in sub_rows_rec:
+                s_clean = (sub_nm_r or "").strip()
+                p_clean = (par_nm_r or "").strip()
+                if not s_clean:
+                    continue
+                cur.execute(
+                    """
+                    UPDATE assets
+                    SET MomentsAlbumName = ?
+                    WHERE asset_id IN (
+                        SELECT mt.asset_id FROM moment_tags mt
+                        WHERE mt.asset_id != '' AND TRIM(LOWER(mt.moment_name)) = TRIM(LOWER(?))
+                    )
+                      AND TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) IN ('', TRIM(LOWER(?)))
+                    """,
+                    (s_clean, s_clean, p_clean),
+                )
+                if cur.rowcount and cur.rowcount > 0:
+                    dirty_db = True
+    except sqlite3.OperationalError:
+        pass
 
     if dirty_db:
         try:
@@ -7020,23 +7069,36 @@ def _compute_moment_event_pool_count(cur: sqlite3.Cursor, moment_name: str, fall
         return max(0, fallback_min)
     m_lc = m_clean.lower()
     ev_db = 0
+    parent_lc = ""
+    umbrella_lcs: set[str] = set()
     try:
-        cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
-        if "event_total_assets" in cm_cols:
-            row_ev = cur.execute(
-                "SELECT COALESCE(event_total_assets, 0) FROM curated_moments WHERE TRIM(LOWER(moment_name)) = ? LIMIT 1",
-                (m_lc,),
-            ).fetchone()
-            if row_ev and row_ev[0]:
+        cm_cols = _ensure_subevent_schema(cur)
+        if not cm_cols:
+            cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+        ev_expr = "COALESCE(event_total_assets, 0)" if "event_total_assets" in cm_cols else "0"
+        pm_expr = "COALESCE(parent_moment_name, '')" if "parent_moment_name" in cm_cols else "''"
+        row_ev = cur.execute(
+            f"SELECT {ev_expr}, {pm_expr} FROM curated_moments WHERE TRIM(LOWER(moment_name)) = ? LIMIT 1",
+            (m_lc,),
+        ).fetchone()
+        if row_ev:
+            if row_ev[0]:
                 ev_db = int(row_ev[0])
+            parent_lc = str(row_ev[1] or "").strip().lower()
+        if "has_subevents" in cm_cols:
+            for (u_nm,) in cur.execute(
+                "SELECT TRIM(LOWER(moment_name)) FROM curated_moments WHERE COALESCE(has_subevents, 0) = 1"
+            ).fetchall():
+                if u_nm:
+                    umbrella_lcs.add(u_nm)
     except sqlite3.OperationalError:
         pass
 
     other_org_aids: set[str] = set()
     try:
-        for (o_aid,) in cur.execute(
+        for o_aid, o_alb_lc in cur.execute(
             """
-            SELECT DISTINCT moaa.asset_id
+            SELECT DISTINCT moaa.asset_id, LOWER(TRIM(moa.album_name))
             FROM media_organizer_album_assets moaa
             JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
             WHERE moa.is_folder = 0
@@ -7046,8 +7108,11 @@ def _compute_moment_event_pool_count(cur: sqlite3.Cursor, moment_name: str, fall
             """,
             (m_lc,),
         ).fetchall():
-            if o_aid:
-                other_org_aids.add(o_aid)
+            if not o_aid or not o_alb_lc:
+                continue
+            if o_alb_lc == parent_lc or o_alb_lc in umbrella_lcs:
+                continue
+            other_org_aids.add(o_aid)
     except sqlite3.OperationalError:
         pass
 
@@ -7075,6 +7140,23 @@ def _compute_moment_event_pool_count(cur: sqlite3.Cursor, moment_name: str, fall
             SELECT asset_id FROM assets
             WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = ?
               AND COALESCE(removed_from_source, 0) = 0
+            """,
+            (m_lc,),
+        ).fetchall():
+            if aid and aid not in other_org_aids:
+                pool_aids.add(aid)
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        for (aid,) in cur.execute(
+            """
+            SELECT DISTINCT mt.asset_id
+            FROM moment_tags mt
+            JOIN assets a ON a.asset_id = mt.asset_id
+            WHERE mt.asset_id != ''
+              AND TRIM(LOWER(mt.moment_name)) = ?
+              AND COALESCE(a.removed_from_source, 0) = 0
             """,
             (m_lc,),
         ).fetchall():
@@ -7504,12 +7586,12 @@ def _sync_publishing_recommendation_for_moment(
     pub_src_dir = _get_published_lacie_dir() / moment_name
     dest_dir = PUBLISHING_RECOMMENDATION_DIR / moment_name
 
-    if not PUBLISHING_RECOMMENDATION_DIR.parent.exists():
+    if not _safe_path_exists(PUBLISHING_RECOMMENDATION_DIR.parent):
         return {
             "synced": False,
             "reason": "LaCie volume unavailable",
             "pub_rec_dir": str(dest_dir),
-            "pub_rec_dir_exists": dest_dir.exists(),
+            "pub_rec_dir_exists": _safe_is_dir(dest_dir),
             "copied": 0,
             "removed": 0,
             "expected_files": [],
@@ -7777,6 +7859,14 @@ def get_moment_publish_info(moment_name: str):
         conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
         try:
             cur = conn.cursor()
+            if _moment_is_umbrella_with_subevents(cur, m_name):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"'{m_name}' is marked as an Umbrella Event containing Subevents and does not advance to Publishing directly. "
+                        "Use '🌿 Split Subevents' to identify Subevents and curate/publish those instead."
+                    ),
+                }
             cur.execute(
                 "SELECT memory_stage, shutterfly_url, youtube_url FROM curated_moments WHERE moment_name = ?",
                 (m_name,),
@@ -7805,11 +7895,11 @@ def get_moment_publish_info(moment_name: str):
 
             moment_dir = CURATED_LACIE_DIR / m_name
             pub_moment_dir = _get_published_lacie_dir() / m_name
-            dir_exists = moment_dir.exists() and moment_dir.is_dir()
-            pub_dir_exists = pub_moment_dir.exists() and pub_moment_dir.is_dir()
+            dir_exists = _safe_is_dir(moment_dir)
+            pub_dir_exists = _safe_is_dir(pub_moment_dir)
             local_by_base: dict[str, list[str]] = {}
             for scan_d in (moment_dir, pub_moment_dir):
-                if scan_d.exists() and scan_d.is_dir():
+                if _safe_is_dir(scan_d):
                     try:
                         for entry in os.listdir(scan_d):
                             if not entry.startswith(".") and (scan_d / entry).is_file():
@@ -7838,7 +7928,7 @@ def get_moment_publish_info(moment_name: str):
                 "published_dir": str(pub_moment_dir),
                 "published_dir_exists": pub_dir_exists,
                 "pub_rec_dir": str(pub_rec_dir),
-                "pub_rec_dir_exists": pub_rec_dir.exists() and pub_rec_dir.is_dir(),
+                "pub_rec_dir_exists": _safe_is_dir(pub_rec_dir),
                 "pub_rec_sync": sync_res,
                 "assets": assets_out,
             }
@@ -8239,6 +8329,14 @@ def publish_moment_assets(req: PublishMomentRequest):
         conn.execute("PRAGMA busy_timeout = 30000")
         try:
             cur = conn.cursor()
+            if _moment_is_umbrella_with_subevents(cur, m_name):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Cannot publish '{m_name}': it is an Umbrella Event containing Subevents. "
+                        "Split and curate its Subevents to publish."
+                    ),
+                }
             cur_rows_chk, pub_aids_chk = _get_curated_asset_rows_for_moment(cur, m_name)
             cur_tot_chk = len(cur_rows_chk)
             ev_pool_chk = _compute_moment_event_pool_count(cur, m_name, fallback_min=cur_tot_chk)
@@ -8446,6 +8544,19 @@ class ResolveDisjointRequest(BaseModel):
     moment_tag_groups: list[MomentAssetTagGroup] = []
     delete_source_albums: bool = True
     is_unassigned_cluster: bool = False
+    has_subevents: Optional[bool] = None
+
+
+class MarkMomentSubeventsRequest(BaseModel):
+    moment_name: str
+    has_subevents: bool = True
+
+
+class CreateSubeventRequest(BaseModel):
+    parent_moment: str
+    subevent_name: str
+    asset_ids: list[str] = []
+    tags: list[SaveMomentTagItem] = []
 
 
 class CurateMomentRequest(BaseModel):
@@ -9900,6 +10011,78 @@ def _backfill_assets_tags_metadata(cur: sqlite3.Cursor) -> int:
     return updated
 
 
+def _ensure_subevent_schema(cur: sqlite3.Cursor) -> set[str]:
+    """Ensure curated_moments has has_subevents and parent_moment_name columns."""
+    existing_tables = {
+        r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "curated_moments" not in existing_tables:
+        return set()
+    cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+    for col_nm, col_def in (
+        ("manually_curated", "INTEGER DEFAULT 0"),
+        ("event_total_assets", "INTEGER DEFAULT 0"),
+        ("has_subevents", "INTEGER DEFAULT 0"),
+        ("parent_moment_name", "TEXT DEFAULT NULL"),
+    ):
+        if col_nm not in cm_cols:
+            try:
+                cur.execute(f"ALTER TABLE curated_moments ADD COLUMN {col_nm} {col_def}")
+                cm_cols.add(col_nm)
+            except sqlite3.OperationalError:
+                pass
+    return cm_cols
+
+
+def _moment_is_umbrella_with_subevents(cur: sqlite3.Cursor, moment_name: str) -> bool:
+    """Return True if moment_name is marked as an Umbrella Major Event containing Subevents."""
+    m_clean = (moment_name or "").strip()
+    if not m_clean:
+        return False
+    try:
+        cm_cols = _ensure_subevent_schema(cur)
+        if "has_subevents" not in cm_cols:
+            return False
+        row = cur.execute(
+            "SELECT COALESCE(has_subevents, 0) FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+            (m_clean,),
+        ).fetchone()
+        return bool(row and int(row[0] or 0) > 0)
+    except sqlite3.OperationalError:
+        return False
+
+
+def _set_moment_has_subevents(
+    cur: sqlite3.Cursor,
+    moment_name: str,
+    has_subevents: bool,
+    event_total_assets: int = 0,
+) -> None:
+    """Persist has_subevents flag on curated_moments (ensuring row exists at M100)."""
+    m_clean = (moment_name or "").strip()
+    if not m_clean:
+        return
+    cm_cols = _ensure_subevent_schema(cur)
+    if "has_subevents" not in cm_cols:
+        return
+    flag_val = 1 if has_subevents else 0
+    cur.execute(
+        """
+        INSERT INTO curated_moments (
+            moment_name, to_be_curated_count, curated_count, memory_stage,
+            last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists,
+            manually_curated, event_total_assets, has_subevents
+        ) VALUES (?, 0, 0, 'M100', datetime('now'), 0, 0, 0, ?, ?)
+        ON CONFLICT(moment_name) DO UPDATE SET
+            has_subevents = excluded.has_subevents,
+            memory_stage = CASE WHEN excluded.has_subevents = 1 THEN 'M100' ELSE curated_moments.memory_stage END,
+            event_total_assets = CASE WHEN excluded.event_total_assets > 0 THEN excluded.event_total_assets ELSE curated_moments.event_total_assets END,
+            last_pipeline_sync = datetime('now')
+        """,
+        (m_clean, max(0, int(event_total_assets or 0)), flag_val),
+    )
+
+
 def _ensure_moment_tag_tables(cur: sqlite3.Cursor) -> int:
     """Create Moment/Asset tagging and session history tables if not yet present; return duplicates removed if upgraded."""
     cur.execute(
@@ -9960,6 +10143,19 @@ def _ensure_moment_tag_tables(cur: sqlite3.Cursor) -> int:
             cur.execute(f"ALTER TABLE {tbl} ADD COLUMN tagging_paradigm TEXT")
         if "tagged_at_utc" not in tbl_cols:
             cur.execute(f"ALTER TABLE {tbl} ADD COLUMN tagged_at_utc TEXT")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS moment_exports (
+            asset_id TEXT,
+            album_name TEXT,
+            exported_filename TEXT,
+            exported_at_utc TEXT,
+            curation_stage TEXT DEFAULT 'curated',
+            PRIMARY KEY (asset_id, album_name)
+        )
+        """
+    )
+    _ensure_subevent_schema(cur)
     _backfill_assets_tags_metadata(cur)
     return removed_on_upgrade
 
@@ -9975,10 +10171,11 @@ class SaveMomentTagsRequest(BaseModel):
     removed_tags: list[str] = []
     include_all_moment_assets: bool = False
     reset_pipeline: bool = False
+    has_subevents: Optional[bool] = None
 
 
-def _moment_membership_where_sql(m_name: str) -> tuple[str, tuple[str, str, str, str]]:
-    """Return shared SQL predicate and params matching active assets of a Moment across assets, albums, publications, and exports."""
+def _moment_membership_where_sql(m_name: str) -> tuple[str, tuple[str, str, str, str, str]]:
+    """Return shared SQL predicate and params matching active assets of a Moment across assets, albums, tags, publications, and exports."""
     predicate = """(
         TRIM(LOWER(COALESCE(a.MomentsAlbumName, ''))) = TRIM(LOWER(?))
         OR a.asset_id IN (
@@ -9989,13 +10186,17 @@ def _moment_membership_where_sql(m_name: str) -> tuple[str, tuple[str, str, str,
               AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
         )
         OR a.asset_id IN (
+            SELECT mt.asset_id FROM moment_tags mt
+            WHERE mt.asset_id != '' AND TRIM(LOWER(mt.moment_name)) = TRIM(LOWER(?))
+        )
+        OR a.asset_id IN (
             SELECT asset_uuid FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
         )
         OR a.asset_id IN (
             SELECT asset_id FROM moment_exports WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))
         )
     )"""
-    return predicate, (m_name, m_name, m_name, m_name)
+    return predicate, (m_name, m_name, m_name, m_name, m_name)
 
 
 def _collect_moment_asset_ids(cur: sqlite3.Cursor, m_name: str) -> list[str]:
@@ -10420,11 +10621,28 @@ def _get_disjoint_moment_detail_impl(
                 for r in existing_album_rows
             ]
 
+            has_subevents_flag = False
+            parent_moment_val = ""
+            try:
+                cm_cols_d = _ensure_subevent_schema(cur)
+                if cm_cols_d:
+                    r_sub = cur.execute(
+                        "SELECT COALESCE(has_subevents, 0), COALESCE(parent_moment_name, '') FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+                        (m_name,),
+                    ).fetchone()
+                    if r_sub:
+                        has_subevents_flag = bool(r_sub[0])
+                        parent_moment_val = (r_sub[1] or "").strip()
+            except sqlite3.OperationalError:
+                pass
+
             return {
                 "ok": True,
                 "moment_name": m_name,
                 "historical_min": round(hist_min_raw, 4),
                 "suggested_target": suggested_target,
+                "has_subevents": has_subevents_flag,
+                "parent_moment_name": parent_moment_val,
                 "assets": assets_out,
                 "albums_present": albums_present,
                 "name_suggestion": name_suggestion,
@@ -10824,6 +11042,9 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                     m_name,
                     event_asset_ids=clean_aids,
                 )
+            if req.has_subevents is not None:
+                eff_nm = composed or m_name if req.apply_to_folder_name else m_name
+                _set_moment_has_subevents(cur, eff_nm, bool(req.has_subevents), event_total_assets=len(clean_aids))
             conn.commit()
             return {
                 "ok": True,
@@ -11807,6 +12028,13 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 event_asset_ids=combined_asset_ids,
                 keep_album_pk=tgt_pk,
             )
+            if req.has_subevents is not None:
+                _set_moment_has_subevents(
+                    cur,
+                    target_moment,
+                    bool(req.has_subevents),
+                    event_total_assets=len(combined_asset_ids),
+                )
 
             # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
             clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
@@ -11921,7 +12149,653 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
         "unselected_error": unselected_error,
         "highrated_copied_count": len(highrated_ids_m),
         "highrated_error": highrated_error_m,
+        "has_subevents": bool(req.has_subevents) if req.has_subevents is not None else False,
     }
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Compute approximate distance in kilometers between two GPS coordinates."""
+    r_earth = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2.0) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2.0) ** 2
+    return 2.0 * r_earth * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _load_zmoment_titles_map(zmoment_pks: set[int]) -> dict[int, str]:
+    """Load ZMOMENT Z_PK -> 'Title - Subtitle' location labels from the unlocked Photos.sqlite replica."""
+    clean_pks = sorted({int(pk) for pk in zmoment_pks if pk is not None})
+    if not clean_pks:
+        return {}
+    replica_candidates = [
+        Path("/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite"),
+        Path("/Volumes/Macintosh HD/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite"),
+    ]
+    replica_path = next((p for p in replica_candidates if p.exists()), None)
+    if not replica_path:
+        return {}
+    out: dict[int, str] = {}
+    try:
+        rconn = sqlite3.connect(f"file:{replica_path}?mode=ro&immutable=1", uri=True, timeout=3)
+        try:
+            rcur = rconn.cursor()
+            for idx in range(0, len(clean_pks), 400):
+                chunk = clean_pks[idx : idx + 400]
+                ph = ",".join("?" for _ in chunk)
+                for zpk, ztitle, zsub in rcur.execute(
+                    f"SELECT Z_PK, ZTITLE, ZSUBTITLE FROM ZMOMENT WHERE Z_PK IN ({ph})",
+                    chunk,
+                ).fetchall():
+                    parts = [
+                        p.replace("\xa0", " ").strip()
+                        for p in (ztitle, zsub)
+                        if p and p.replace("\xa0", " ").strip()
+                    ]
+                    if zpk is not None and parts:
+                        out[int(zpk)] = " - ".join(parts)
+        finally:
+            rconn.close()
+    except Exception:
+        pass
+    return out
+
+
+def _valid_gps_coord(lat_val: Optional[float], lon_val: Optional[float]) -> Optional[tuple[float, float]]:
+    if lat_val is None or lon_val is None:
+        return None
+    try:
+        la = float(lat_val)
+        lo = float(lon_val)
+    except (TypeError, ValueError):
+        return None
+    if abs(la) > 90.0 or abs(lo) > 180.0 or (la == -180.0 and lo == -180.0) or (la == 0.0 and lo == 0.0):
+        return None
+    return (la, lo)
+
+
+@router.post("/memories/mark-subevents")
+def mark_moment_subevents(req: MarkMomentSubeventsRequest):
+    """Mark or unmark an existing Moment as containing Subevents (Umbrella Event)."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    m_name = (req.moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            _ensure_subevent_schema(cur)
+            aids = _collect_moment_asset_ids(cur, m_name)
+            if req.has_subevents:
+                _reset_moment_pipeline_to_m100(cur, [m_name], m_name, event_asset_ids=aids)
+            _set_moment_has_subevents(cur, m_name, bool(req.has_subevents), event_total_assets=len(aids))
+            conn.commit()
+            return {
+                "ok": True,
+                "moment_name": m_name,
+                "has_subevents": bool(req.has_subevents),
+                "total_assets": len(aids),
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.get("/memories/subevent-suggestions")
+def get_subevent_suggestions(moment_name: str, granularity: str = "auto"):
+    """Suggest location/timestamp Subevent subgroupings with per-section scoring for a multi-day / composite Umbrella Event."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    m_name = (moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+    gran = (granularity or "auto").strip().lower()
+    if gran not in ("auto", "1h", "4h", "day"):
+        gran = "auto"
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=25)
+        try:
+            cur = conn.cursor()
+            _ensure_moment_tag_tables(cur)
+            _ensure_subevent_schema(cur)
+
+            cur.execute("SELECT MIN(threshold_score) FROM threshold_history WHERE threshold_score > 0.0")
+            min_row = cur.fetchone()
+            hist_min = float(min_row[0]) if min_row and min_row[0] else 0.5315
+
+            excluded_aids: set[str] = set()
+            try:
+                for (aid_ex,) in cur.execute(
+                    """
+                    SELECT DISTINCT moaa.asset_id
+                    FROM media_organizer_album_assets moaa
+                    JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                    WHERE LOWER(moa.album_name) IN ('ignore', 'skippublishing', 'topscore excluded')
+                    """
+                ).fetchall():
+                    if aid_ex:
+                        excluded_aids.add(aid_ex)
+            except sqlite3.OperationalError:
+                pass
+
+            # Discover existing child Subevents linked to this Parent Moment
+            child_subevents: list[dict] = []
+            aid_to_subevent: dict[str, str] = {}
+            child_names: list[str] = []
+            for ch_nm, ch_stg, ch_cur in cur.execute(
+                """
+                SELECT moment_name, COALESCE(memory_stage, 'M100'), COALESCE(curated_count, 0)
+                FROM curated_moments
+                WHERE TRIM(LOWER(COALESCE(parent_moment_name, ''))) = TRIM(LOWER(?))
+                  AND LOWER(COALESCE(memory_stage, '')) != 'deleted'
+                ORDER BY moment_name ASC
+                """,
+                (m_name,),
+            ).fetchall():
+                c_clean = (ch_nm or "").strip()
+                if not c_clean:
+                    continue
+                child_names.append(c_clean)
+                ch_aids = [a for a in _collect_moment_asset_ids(cur, c_clean) if a not in excluded_aids]
+                for ca in ch_aids:
+                    aid_to_subevent[ca] = c_clean
+                child_subevents.append(
+                    {
+                        "subevent_name": c_clean,
+                        "moment_status": ch_stg or "M100",
+                        "curated_count": int(ch_cur or 0),
+                        "total_assets": len(ch_aids),
+                    }
+                )
+
+            # Collect full Umbrella Event asset pool (parent Moment + any child Subevent assets)
+            pool_ids_set = set(_collect_moment_asset_ids(cur, m_name)) | set(aid_to_subevent.keys())
+            pool_ids = sorted(aid for aid in pool_ids_set if aid and aid not in excluded_aids)
+            if not pool_ids:
+                return {"ok": False, "error": f"No active assets found for '{m_name}'"}
+
+            raw_rows: list[tuple] = []
+            for idx in range(0, len(pool_ids), 400):
+                chunk = pool_ids[idx : idx + 400]
+                ph = ",".join("?" for _ in chunk)
+                try:
+                    raw_rows.extend(
+                        cur.execute(
+                            f"""
+                            SELECT
+                                a.asset_id,
+                                COALESCE(v.original_filename, a.original_filename, ''),
+                                COALESCE(v.score_normalized, 0.0),
+                                COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                                COALESCE(a.month, substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 7), ''),
+                                COALESCE(za.ZKIND, 0),
+                                ROUND(COALESCE(za.ZDURATION, 0.0), 2),
+                                COALESCE(aaa.ZORIGINALFILESIZE, 0),
+                                COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device, 'Library'),
+                                COALESCE(do.owner_name, ''),
+                                za.ZMOMENT,
+                                za.ZLATITUDE,
+                                za.ZLONGITUDE
+                            FROM assets a
+                            LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                            LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                            LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.Z_PK = za.ZADDITIONALATTRIBUTES
+                            LEFT JOIN ZEXTENDEDATTRIBUTES ze ON ze.Z_PK = za.ZEXTENDEDATTRIBUTES
+                            LEFT JOIN device_owners do ON do.camera_model = COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), ze.ZCAMERAMODEL, a.carrier_device)
+                            WHERE a.asset_id IN ({ph})
+                              AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+                              AND COALESCE(a.removed_from_source, 0) = 0
+                            """,
+                            chunk,
+                        ).fetchall()
+                    )
+                except sqlite3.OperationalError:
+                    try:
+                        raw_rows.extend(
+                            cur.execute(
+                                f"""
+                                SELECT
+                                    a.asset_id,
+                                    COALESCE(v.original_filename, a.original_filename, ''),
+                                    COALESCE(v.score_normalized, 0.0),
+                                    COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                                    COALESCE(a.month, substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 7), ''),
+                                    COALESCE(za.ZKIND, 0),
+                                    ROUND(COALESCE(za.ZDURATION, 0.0), 2),
+                                    0,
+                                    COALESCE(NULLIF(TRIM(a.resolved_camera_model), ''), a.carrier_device, 'Library'),
+                                    '',
+                                    za.ZMOMENT,
+                                    za.ZLATITUDE,
+                                    za.ZLONGITUDE
+                                FROM assets a
+                                LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                                LEFT JOIN ZASSET za ON za.ZUUID = a.asset_id
+                                WHERE a.asset_id IN ({ph})
+                                  AND COALESCE(za.ZTRASHEDSTATE, 0) = 0
+                                  AND COALESCE(a.removed_from_source, 0) = 0
+                                """,
+                                chunk,
+                            ).fetchall()
+                        )
+                    except sqlite3.OperationalError:
+                        raw_rows.extend(
+                            cur.execute(
+                                f"""
+                                SELECT
+                                    a.asset_id,
+                                    COALESCE(v.original_filename, a.original_filename, ''),
+                                    COALESCE(v.score_normalized, 0.0),
+                                    COALESCE(v.date_created_utc, a.date_created_utc, ''),
+                                    COALESCE(a.month, substr(COALESCE(v.date_created_utc, a.date_created_utc, ''), 1, 7), ''),
+                                    0, 0.0, 0, 'Library', '', NULL, NULL, NULL
+                                FROM assets a
+                                LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                                WHERE a.asset_id IN ({ph})
+                                  AND COALESCE(a.removed_from_source, 0) = 0
+                                """,
+                                chunk,
+                            ).fetchall()
+                        )
+
+            zmoment_pks = {int(r[10]) for r in raw_rows if r[10] is not None}
+            zmoment_titles = _load_zmoment_titles_map(zmoment_pks)
+            dup_map = _detect_duplicates_for_asset_list(conn, cur, [r[0] for r in raw_rows], hist_min, excluded_aids)
+            per_asset_tags = _load_per_asset_tags_map(cur, [r[0] for r in raw_rows])
+
+            parsed_items: list[dict] = []
+            for r in raw_rows:
+                aid, fn, sc, dt_s, mo, zkind, dur, fbytes, cam, owner, zm_pk, zlat, zlon = r
+                ext = os.path.splitext(fn or "")[1].lower()
+                m_type = "video" if (int(zkind or 0) == 1 or ext in VIDEO_EXTENSIONS) else "photo"
+                sc_f = float(sc or 0.0)
+                dt_clean = (dt_s or "")[:19]
+                dt_obj = _parse_utc_dt(dt_s)
+                zm_int = int(zm_pk) if zm_pk is not None else None
+                zm_label = zmoment_titles.get(zm_int, "") if zm_int is not None else ""
+                gps = _valid_gps_coord(zlat, zlon)
+                d_info = dup_map.get(aid)
+                parsed_items.append(
+                    {
+                        "asset_id": aid,
+                        "original_filename": fn or "",
+                        "score_normalized": round(sc_f, 4),
+                        "qualified": sc_f > hist_min,
+                        "date_created_utc": dt_clean,
+                        "_dt": dt_obj,
+                        "month": mo or "",
+                        "media_type": m_type,
+                        "duration": float(dur or 0.0),
+                        "file_size_bytes": int(fbytes or 0),
+                        "camera_model": cam or "Library",
+                        "primary_owner": owner or "",
+                        "zmoment_pk": zm_int,
+                        "zmoment_label": zm_label,
+                        "gps": gps,
+                        "is_duplicate_copy": bool(d_info),
+                        "duplicate_keeper_filename": d_info["duplicate_keeper_filename"] if d_info else "",
+                        "already_in_subevent": aid_to_subevent.get(aid, ""),
+                        "asset_tags": per_asset_tags.get(aid, []),
+                    }
+                )
+
+            parsed_items.sort(key=lambda x: (x["date_created_utc"] or "9999", -x["score_normalized"], x["asset_id"]))
+            if not parsed_items:
+                return {"ok": False, "error": f"No active assets found for '{m_name}'"}
+
+            peak_item = max(parsed_items, key=lambda x: x["score_normalized"])
+            peak_aid = peak_item["asset_id"]
+
+            # Partition into proposed Subevent subgroupings using location (ZMOMENT / GPS) & creation timestamp
+            raw_clusters: list[list[dict]] = []
+            for item in parsed_items:
+                if not raw_clusters:
+                    raw_clusters.append([item])
+                    continue
+                prev = raw_clusters[-1][-1]
+                should_split = False
+                if gran == "day":
+                    d_cur = (item["date_created_utc"] or "")[:10]
+                    d_prev = (prev["date_created_utc"] or "")[:10]
+                    should_split = bool(d_cur and d_prev and d_cur != d_prev)
+                else:
+                    gap_thresh_sec = 3600.0 if gran == "1h" else (14400.0 if gran == "4h" else 7200.0)
+                    if item["_dt"] and prev["_dt"]:
+                        gap_sec = (item["_dt"] - prev["_dt"]).total_seconds()
+                        if gap_sec >= gap_thresh_sec:
+                            should_split = True
+                    if not should_split and gran in ("auto", "1h"):
+                        # Location-based boundary: distinct Apple Photos ZMOMENT or GPS jump > 1.5 km
+                        if (
+                            item["zmoment_pk"] is not None
+                            and prev["zmoment_pk"] is not None
+                            and item["zmoment_pk"] != prev["zmoment_pk"]
+                        ):
+                            should_split = True
+                        elif item["gps"] and prev["gps"]:
+                            dist_km = _haversine_km(item["gps"][0], item["gps"][1], prev["gps"][0], prev["gps"][1])
+                            if dist_km >= 1.5:
+                                should_split = True
+
+                if should_split:
+                    raw_clusters.append([item])
+                else:
+                    raw_clusters[-1].append(item)
+
+            sections_out: list[dict] = []
+            for idx_s, c_items in enumerate(raw_clusters, 1):
+                scores = [x["score_normalized"] for x in c_items]
+                qual_scores = [s for s in scores if s > hist_min]
+                tot_s = len(c_items)
+                uniq_s = sum(1 for x in c_items if not x["is_duplicate_copy"])
+                qual_s = len(qual_scores)
+                unsplit_s = sum(1 for x in c_items if not x["already_in_subevent"])
+                avg_s = sum(scores) / tot_s if tot_s else 0.0
+                qual_avg_s = sum(qual_scores) / qual_s if qual_s else avg_s
+                min_s = min(scores) if scores else 0.0
+                max_s = max(scores) if scores else 0.0
+                rank_s = qual_avg_s * math.log(max(1, qual_s) + 1)
+                exp_s, exp_ln_s = _compute_expected_curated_stats(uniq_s or tot_s)
+
+                first_dt = c_items[0]["date_created_utc"] or ""
+                last_dt = c_items[-1]["date_created_utc"] or ""
+                d_start = first_dt[:10]
+                d_end = last_dt[:10]
+                t_start = first_dt[11:16] if len(first_dt) >= 16 else ""
+                t_end = last_dt[11:16] if len(last_dt) >= 16 else ""
+                date_label = d_start if d_start == d_end else f"{d_start} .. {d_end}"
+                time_range_str = (
+                    f"{t_start} – {t_end}"
+                    if t_start and t_end and t_start != t_end
+                    else (t_start or "All day")
+                )
+
+                # Time-of-day descriptor
+                tod_label = ""
+                if t_start and t_start[:2].isdigit():
+                    hr = int(t_start[:2])
+                    tod_label = (
+                        "Early Morning"
+                        if hr < 6
+                        else ("Morning" if hr < 12 else ("Afternoon" if hr < 17 else ("Evening" if hr < 21 else "Night")))
+                    )
+
+                loc_counts: dict[str, int] = {}
+                for x in c_items:
+                    if x["zmoment_label"]:
+                        loc_counts[x["zmoment_label"]] = loc_counts.get(x["zmoment_label"], 0) + 1
+                top_loc = max(loc_counts.items(), key=lambda kv: kv[1])[0] if loc_counts else ""
+                has_gps = any(x["gps"] is not None for x in c_items)
+                basis_parts = []
+                if top_loc:
+                    basis_parts.append(f"📍 {top_loc}")
+                elif has_gps:
+                    basis_parts.append("📍 GPS Cluster")
+                basis_parts.append(f"🕐 {date_label}" + (f" · {tod_label} ({time_range_str})" if tod_label else f" ({time_range_str})"))
+
+                sec_top_item = max(c_items, key=lambda x: x["score_normalized"])
+                assigned_subs = sorted({x["already_in_subevent"] for x in c_items if x["already_in_subevent"]})
+
+                # Clean internal fields & order assets by score descending for instant visual context inspection
+                assets_section = []
+                for x in sorted(c_items, key=lambda it: (-it["score_normalized"], it["date_created_utc"], it["asset_id"])):
+                    assets_section.append(
+                        {
+                            "asset_id": x["asset_id"],
+                            "original_filename": x["original_filename"],
+                            "score_normalized": x["score_normalized"],
+                            "qualified": x["qualified"],
+                            "date_created_utc": x["date_created_utc"],
+                            "month": x["month"],
+                            "media_type": x["media_type"],
+                            "duration": x["duration"],
+                            "file_size_bytes": x["file_size_bytes"],
+                            "camera_model": x["camera_model"],
+                            "primary_owner": x["primary_owner"],
+                            "location_label": x["zmoment_label"],
+                            "is_duplicate_copy": x["is_duplicate_copy"],
+                            "duplicate_keeper_filename": x["duplicate_keeper_filename"],
+                            "already_in_subevent": x["already_in_subevent"],
+                            "asset_tags": x["asset_tags"],
+                        }
+                    )
+
+                sections_out.append(
+                    {
+                        "section_id": f"sec_{idx_s}",
+                        "index": idx_s,
+                        "title": top_loc or f"{date_label} · {tod_label or f'Session #{idx_s}'}",
+                        "basis_label": " · ".join(basis_parts),
+                        "location_hint": top_loc,
+                        "date_label": date_label,
+                        "time_of_day": tod_label,
+                        "time_range": time_range_str,
+                        "total_assets": tot_s,
+                        "unique_assets": uniq_s,
+                        "qualified_assets": qual_s,
+                        "unsplit_assets": unsplit_s,
+                        "assigned_subevents": assigned_subs,
+                        "avg_score": round(avg_s, 4),
+                        "qualified_avg_score": round(qual_avg_s, 4),
+                        "min_score": round(min_s, 4),
+                        "max_score": round(max_s, 4),
+                        "rank_score": round(rank_s, 4),
+                        "expected_curated_count": exp_s,
+                        "expected_curated_ln": exp_ln_s,
+                        "has_parent_peak_asset": any(x["asset_id"] == peak_aid for x in c_items),
+                        "peak_asset_id": sec_top_item["asset_id"],
+                        "peak_asset_filename": sec_top_item["original_filename"],
+                        "peak_asset_score": sec_top_item["score_normalized"],
+                        "assets": assets_section,
+                    }
+                )
+
+            parent_saved_tags = _fetch_moment_summary_tag_rows(cur, m_name)
+            parent_saved_tags = _reconcile_include_in_name_with_folder(parent_saved_tags, m_name)
+            fam_pool = ["Niki", "Milena", "Roberto", "Eva", "Benny"]
+            try:
+                for (own_nm,) in cur.execute("SELECT DISTINCT owner_name FROM device_owners WHERE owner_name IS NOT NULL AND TRIM(owner_name) != ''").fetchall():
+                    clean_o = str(own_nm).strip()
+                    if clean_o and clean_o not in fam_pool:
+                        fam_pool.append(clean_o)
+            except sqlite3.OperationalError:
+                pass
+            tag_db_counts = _compute_tag_db_counts(cur)
+            tag_catalog_by_category = _compute_tag_catalog_by_category(cur)
+            unsplit_total = sum(1 for x in parsed_items if not x["already_in_subevent"])
+            return {
+                "ok": True,
+                "moment_name": m_name,
+                "granularity": gran,
+                "historical_min": round(hist_min, 4),
+                "total_assets": len(parsed_items),
+                "unsplit_assets": unsplit_total,
+                "parent_peak_asset": {
+                    "asset_id": peak_item["asset_id"],
+                    "filename": peak_item["original_filename"],
+                    "score": peak_item["score_normalized"],
+                },
+                "parent_saved_tags": parent_saved_tags,
+                "family_member_pool": fam_pool,
+                "tag_db_counts": tag_db_counts,
+                "tag_catalog_by_category": tag_catalog_by_category,
+                "existing_subevents": child_subevents,
+                "sections": sections_out,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/memories/create-subevent")
+def create_subevent_from_parent(req: CreateSubeventRequest):
+    """Create a sibling Subevent Moment in Media Organizer.photoslibrary/Moments/<subevent_name> linked to parent_moment."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    parent_m = (req.parent_moment or "").strip()
+    sub_m = (req.subevent_name or "").strip()
+    if not parent_m:
+        return {"ok": False, "error": "parent_moment is required"}
+    if not sub_m:
+        return {"ok": False, "error": "Subevent Moment name is required"}
+    if "/" in sub_m:
+        return {"ok": False, "error": "Subevent Moment name cannot contain '/'"}
+    if sub_m.lower() == parent_m.lower():
+        return {"ok": False, "error": "Subevent name must be distinct from the Parent Event name"}
+
+    clean_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_aid in req.asset_ids or []:
+        s = (raw_aid or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            clean_ids.append(s)
+    if not clean_ids:
+        return {"ok": False, "error": "Select at least 1 asset for the Subevent"}
+
+    clean_tags = _normalize_unique_moment_tags(req.tags or [])
+
+    try:
+        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            cur = conn.cursor()
+            _ensure_moment_tag_tables(cur)
+            _ensure_organizer_library_tables(cur)
+            _ensure_subevent_schema(cur)
+
+            # Sync selected subgroup assets into Media Organizer.photoslibrary / Moments / <subevent_name>
+            # (leaving Moments/<parent_m> intact as the Umbrella album and All-Media 100% read-only)
+            sync_res = _sync_assets_to_organizer_library(
+                cur,
+                "Moments",
+                sub_m,
+                clean_ids,
+                allow_existing=True,
+            )
+            if not sync_res.get("ok"):
+                return sync_res
+
+            sub_alb_pk = int(sync_res["album_pk"])
+            full_path = sync_res["full_path"]
+
+            # Ensure moments row exists for Subevent
+            m_ex = cur.execute(
+                "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
+                (sub_m,),
+            ).fetchone()
+            if not m_ex:
+                cur.execute(
+                    "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, 'Moments')",
+                    (sub_alb_pk, sub_m),
+                )
+
+            # Assign MomentsAlbumName on the Subevent's assets so curation & publishing operate cleanly on the Subevent
+            ph = ",".join("?" for _ in clean_ids)
+            cur.execute(
+                f"UPDATE assets SET MomentsAlbumName = ?, curated_album = NULL, to_be_curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph})",
+                [sub_m, *clean_ids],
+            )
+
+            # Ensure Parent Event remains flagged has_subevents = 1 at M100
+            _set_moment_has_subevents(cur, parent_m, True)
+
+            # Upsert curated_moments row for the new Subevent linked to parent_moment_name at M100
+            cur.execute(
+                """
+                INSERT INTO curated_moments (
+                    moment_name, to_be_curated_count, curated_count, memory_stage,
+                    last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists,
+                    manually_curated, event_total_assets, has_subevents, parent_moment_name
+                ) VALUES (?, 0, 0, 'M100', datetime('now'), 0, 0, 0, ?, 0, ?)
+                ON CONFLICT(moment_name) DO UPDATE SET
+                    memory_stage = 'M100',
+                    to_be_curated_count = 0,
+                    curated_count = 0,
+                    photos_to_be_curated_exists = 0,
+                    photos_curated_exists = 0,
+                    manually_curated = 0,
+                    event_total_assets = excluded.event_total_assets,
+                    has_subevents = 0,
+                    parent_moment_name = excluded.parent_moment_name,
+                    last_pipeline_sync = datetime('now')
+                """,
+                (sub_m, len(clean_ids), parent_m),
+            )
+
+            # Persist Subevent tags onto moment_tags, moment_tag_sessions, assets, and folder metadata
+            tag_session_id = None
+            if clean_tags:
+                cur.execute(
+                    """
+                    INSERT INTO moment_tag_sessions
+                        (moment_name, apply_to_folder_name, composed_name, selected_tags_json, asset_count, notes)
+                    VALUES (?, 1, ?, ?, ?, ?)
+                    """,
+                    (
+                        sub_m,
+                        sub_m,
+                        json.dumps(clean_tags),
+                        len(clean_ids),
+                        f"Subevent split from Parent Event: {parent_m}",
+                    ),
+                )
+                tag_session_id = int(cur.lastrowid)
+                for aid_t in ["", *clean_ids]:
+                    for t in clean_tags:
+                        cur.execute(
+                            """
+                            INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
+                            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                            ON CONFLICT(LOWER(moment_name), asset_id, LOWER(tag_value))
+                            DO UPDATE SET category = excluded.category, include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
+                            """,
+                            (
+                                sub_m,
+                                aid_t,
+                                t["category"],
+                                t["tag_value"],
+                                1 if t["include_in_name"] else 0,
+                                tag_session_id,
+                            ),
+                        )
+                for aid_t in clean_ids:
+                    _sync_asset_metadata_json(cur, aid_t, sub_m, clean_tags, tag_session_id)
+                _sync_moment_folder_metadata_json(
+                    cur,
+                    sub_m,
+                    tag_session_id,
+                    asset_ids_hint=clean_ids,
+                    extra_union_tags=clean_tags,
+                )
+
+            exp_cur, exp_ln = _compute_expected_curated_stats(len(clean_ids))
+            conn.commit()
+            return {
+                "ok": True,
+                "library_target": "organizer",
+                "parent_moment": parent_m,
+                "subevent_name": sub_m,
+                "full_path": full_path,
+                "asset_count": len(clean_ids),
+                "photos_added": int(sync_res.get("photos_added", 0)),
+                "newly_imported": int(sync_res.get("newly_imported", 0)),
+                "expected_curated_count": exp_cur,
+                "expected_curated_ln": exp_ln,
+                "tags_saved": len(clean_tags),
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 HIGHRATED_ORGANIZER_PARENT = "Highrated assets"
@@ -12213,6 +13087,15 @@ def curate_moment_action(req: CurateMomentRequest):
             cur = conn.cursor()
             _ensure_moment_tag_tables(cur)
             _ensure_organizer_library_tables(cur)
+
+            if _moment_is_umbrella_with_subevents(cur, src_moment) or _moment_is_umbrella_with_subevents(cur, target_moment):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Manual Curation is locked on Umbrella Event '{src_moment}' because it is marked as containing Subevents. "
+                        "Use '🌿 Split Subevents' to identify Subevents and curate those instead."
+                    ),
+                }
 
             if not _moment_has_completed_tagging(cur, src_moment, [*selected_ids, *unselected_ids]):
                 return {
@@ -12519,6 +13402,16 @@ def curate_moment_action(req: CurateMomentRequest):
             )
             if req.export_to_lacie:
                 exported_to_lacie, export_error = _export_curated_originals_from_source(cur, target_moment, selected_ids)
+                if exported_to_lacie:
+                    cur.execute(
+                        """
+                        UPDATE curated_moments
+                        SET memory_stage = CASE WHEN COALESCE(memory_stage, '') IN ('M450', 'M500') THEN memory_stage ELSE 'M400' END,
+                            last_pipeline_sync = datetime('now')
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                        """,
+                        (target_moment,),
+                    )
 
             conn.commit()
         finally:
@@ -12931,20 +13824,25 @@ def get_all_unified_groupings():
                 except sqlite3.OperationalError:
                     pass
 
-            # 4. Curated moments stage, URLs & Publications
+            # 4. Curated moments stage, URLs, Subevent hierarchy & Publications
             cm_by_lc: dict[str, dict] = {}
             deleted_lc: set[str] = set()
+            child_subevent_lcs_by_parent_lc: dict[str, list[str]] = {}
             try:
-                cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+                cm_cols = _ensure_subevent_schema(cur)
+                if not cm_cols:
+                    cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
                 sf_col_expr = "COALESCE(shutterfly_url, '')" if "shutterfly_url" in cm_cols else "''"
                 yt_col_expr = "COALESCE(youtube_url, '')" if "youtube_url" in cm_cols else "''"
                 mc_col_expr = "COALESCE(manually_curated, 0)" if "manually_curated" in cm_cols else "0"
                 ev_col_expr = "COALESCE(event_total_assets, 0)" if "event_total_assets" in cm_cols else "0"
-                for m_nm, stg, cur_cnt, tbc_ex, cur_ex, sf_u, yt_u, man_cur, ev_tot in cur.execute(
+                hs_col_expr = "COALESCE(has_subevents, 0)" if "has_subevents" in cm_cols else "0"
+                pm_col_expr = "COALESCE(parent_moment_name, '')" if "parent_moment_name" in cm_cols else "''"
+                for m_nm, stg, cur_cnt, tbc_ex, cur_ex, sf_u, yt_u, man_cur, ev_tot, has_sub, par_mom in cur.execute(
                     f"""
                     SELECT moment_name, COALESCE(memory_stage, ''), COALESCE(curated_count, 0),
                            COALESCE(photos_to_be_curated_exists, 0), COALESCE(photos_curated_exists, 0),
-                           {sf_col_expr}, {yt_col_expr}, {mc_col_expr}, {ev_col_expr}
+                           {sf_col_expr}, {yt_col_expr}, {mc_col_expr}, {ev_col_expr}, {hs_col_expr}, {pm_col_expr}
                     FROM curated_moments
                     """
                 ).fetchall():
@@ -12956,6 +13854,11 @@ def get_all_unified_groupings():
                         deleted_lc.add(lc)
                         continue
                     canonical_name_by_lc.setdefault(lc, nm)
+                    par_mom_clean = (par_mom or "").strip()
+                    if par_mom_clean:
+                        par_lc_ref = par_mom_clean.lower()
+                        canonical_name_by_lc.setdefault(par_lc_ref, par_mom_clean)
+                        child_subevent_lcs_by_parent_lc.setdefault(par_lc_ref, []).append(lc)
                     cm_by_lc[lc] = {
                         "stage": stg or "M100",
                         "curated_count": int(cur_cnt or 0),
@@ -12965,9 +13868,14 @@ def get_all_unified_groupings():
                         "youtube_url": (yt_u or "").strip(),
                         "manually_curated": bool(man_cur),
                         "event_total_assets": int(ev_tot or 0),
+                        "has_subevents": bool(has_sub),
+                        "parent_moment_name": par_mom_clean,
                     }
             except sqlite3.OperationalError:
                 pass
+            for par_lc_k in list(child_subevent_lcs_by_parent_lc.keys()):
+                if par_lc_k in cm_by_lc:
+                    cm_by_lc[par_lc_k]["has_subevents"] = True
 
             pub_aids_by_lc: dict[str, set[str]] = {}
             pub_sf_aids_by_lc: dict[str, set[str]] = {}
@@ -13061,9 +13969,9 @@ def get_all_unified_groupings():
                     moments_col_aids_by_lc.setdefault(lc, set()).add(aid)
 
             tag_status_by_lc, tagged_aids = _load_moment_tagging_status_map(cur)
-            lacie_mounted = CURATED_LACIE_DIR.exists()
+            lacie_mounted = _safe_is_dir(CURATED_LACIE_DIR)
             pub_lacie_root = _get_published_lacie_dir()
-            pub_lacie_mounted = pub_lacie_root.exists()
+            pub_lacie_mounted = _safe_is_dir(pub_lacie_root)
             now_local = datetime.now()
 
             _ensure_deduped_moment_groups_table(cur)
@@ -13090,11 +13998,31 @@ def get_all_unified_groupings():
             except sqlite3.OperationalError:
                 pass
 
+            moment_tag_aids_by_lc: dict[str, set[str]] = {}
+            try:
+                for mt_nm, mt_aid in cur.execute(
+                    "SELECT TRIM(moment_name), asset_id FROM moment_tags WHERE asset_id != '' AND TRIM(COALESCE(moment_name, '')) != ''"
+                ).fetchall():
+                    if mt_nm and mt_aid and mt_aid in asset_info_map:
+                        mt_lc = mt_nm.lower()
+                        if mt_lc not in deleted_lc:
+                            canonical_name_by_lc.setdefault(mt_lc, mt_nm)
+                            moment_tag_aids_by_lc.setdefault(mt_lc, set()).add(mt_aid)
+            except sqlite3.OperationalError:
+                pass
+
+            umbrella_parent_lcs: set[str] = {
+                k_lc
+                for k_lc, v_cm in cm_by_lc.items()
+                if v_cm.get("has_subevents") or child_subevent_lcs_by_parent_lc.get(k_lc)
+            } | set(child_subevent_lcs_by_parent_lc.keys())
+
             all_moment_lcs = (
                 set(moments_col_aids_by_lc.keys())
                 | set(album_aids_by_lc.keys())
                 | set(pub_aids_by_lc.keys())
                 | set(deduped_map.keys())
+                | (set(moment_tag_aids_by_lc.keys()) & set(cm_by_lc.keys()))
             ) - deleted_lc
 
             unified_groupings: list[dict] = []
@@ -13116,32 +14044,49 @@ def get_all_unified_groupings():
                 dedup_canonical_target = dedup_entry["canonical"] if dedup_entry else ""
                 is_deduped_grp = bool(dedup_canonical_target)
 
+                cm = cm_by_lc.get(lc, {})
+                raw_stage = cm.get("stage", "M100")
+                has_subevents_grp = bool(cm.get("has_subevents") or child_subevent_lcs_by_parent_lc.get(lc))
+                parent_moment_grp = (cm.get("parent_moment_name") or "").strip()
+                parent_lc_grp = parent_moment_grp.lower()
+                child_lcs_for_grp = child_subevent_lcs_by_parent_lc.get(lc, [])
+
                 member_aids = (
                     moments_col_aids_by_lc.get(lc, set())
                     | album_aids_by_lc.get(lc, set())
                     | pub_aids_by_lc.get(lc, set())
+                    | (moment_tag_aids_by_lc.get(lc, set()) if (in_org_lib or lc in cm_by_lc) else set())
                     | (dedup_entry["saved_aids"] if dedup_entry else set())
                 )
-                # Include all active assets belonging to THIS Moment (including unmigrated All-Media assets of a same-named prior Moment),
-                # while omitting assets that were migrated away into a DIFFERENT Media Organizer Moment (unless kept visible as a Deduped Remove link).
+                # Include all active assets belonging to THIS Moment (including unmigrated All-Media assets of a same-named prior Moment
+                # and unselected Subevent assets whose Media Organizer album is the Parent Umbrella Event), while omitting assets
+                # migrated away into a DIFFERENT non-parent Media Organizer Moment.
                 if is_deduped_grp:
                     own_active_aids = [aid for aid in member_aids if aid in asset_info_map]
                 else:
-                    own_active_aids = [
-                        aid
-                        for aid in member_aids
-                        if aid in asset_info_map
-                        and (
+                    own_active_aids = []
+                    for aid in member_aids:
+                        if aid not in asset_info_map:
+                            continue
+                        aid_mig_lcs = migrated_moment_lcs_by_aid.get(aid, set())
+                        non_umbrella_mig = aid_mig_lcs - umbrella_parent_lcs if not has_subevents_grp else aid_mig_lcs
+                        if (
                             aid not in migrated_aids
-                            or not migrated_moment_lcs_by_aid.get(aid)
-                            or lc in migrated_moment_lcs_by_aid.get(aid, set())
-                        )
-                    ]
+                            or not non_umbrella_mig
+                            or lc in aid_mig_lcs
+                            or (parent_lc_grp and parent_lc_grp in aid_mig_lcs and not (non_umbrella_mig - {lc}))
+                        ):
+                            own_active_aids.append(aid)
                 if not own_active_aids:
                     continue
 
-                cm = cm_by_lc.get(lc, {})
-                raw_stage = cm.get("stage", "M100")
+                subevent_assigned_aids: set[str] = set()
+                if has_subevents_grp and child_lcs_for_grp:
+                    for ch_lc in child_lcs_for_grp:
+                        subevent_assigned_aids.update(moments_col_aids_by_lc.get(ch_lc, set()))
+                        subevent_assigned_aids.update(album_aids_by_lc.get(ch_lc, set()))
+                        subevent_assigned_aids.update(pub_aids_by_lc.get(ch_lc, set()))
+                        subevent_assigned_aids.update(moment_tag_aids_by_lc.get(ch_lc, set()))
                 # If a Moment was manually curated / reset in Media Organizer and is at stage M100..M400 (not yet M450/M500),
                 # ignore any stale legacy All-Media publications so it accurately shows 0 published!
                 is_new_pipeline_unpub = bool(
@@ -13188,11 +14133,32 @@ def get_all_unified_groupings():
                     key=lambda x: (0 if x["all_migrated"] else 1, -x["matched_count"], x["full_path"].lower()),
                 )
 
-                inferred_src_tot = sum(x["source_total_count"] for x in source_all_media_list if x.get("all_migrated"))
-                raw_am_tot = len(raw_all_media_moment_aids_by_lc.get(lc, set()))
+                # Never inflate a Child Subevent's pool (or a Moment with an explicit event_total_assets) with its Parent Event's
+                # All-Media folders (nor double-count overlapping All-Media Moments/Curated/ToBeCurated albums).
+                cm_ev_tot = int(cm.get("event_total_assets") or 0)
+                if parent_moment_grp or cm_ev_tot > 0:
+                    inferred_src_tot = 0
+                else:
+                    inferred_distinct_aids: set[str] = set()
+                    for s_ent in source_all_media_list:
+                        if not s_ent.get("all_migrated"):
+                            continue
+                        am_alb_lc = str(s_ent.get("album_name") or "").strip().lower()
+                        if am_alb_lc in umbrella_parent_lcs:
+                            continue
+                        k_am_fp = str(s_ent.get("full_path") or "").lower()
+                        am_aids_set = {x for x in all_media_album_aids_by_fp.get(k_am_fp, set()) if x in asset_info_map}
+                        # Only infer full All-Media album size when its migrated assets were not split into other non-umbrella organizer Moments
+                        if am_aids_set and all(
+                            not ((migrated_moment_lcs_by_aid.get(x, set()) - umbrella_parent_lcs) - {lc})
+                            for x in am_aids_set
+                        ):
+                            inferred_distinct_aids.update(am_aids_set)
+                    inferred_src_tot = len(inferred_distinct_aids)
+                raw_am_tot = 0 if parent_moment_grp else len(raw_all_media_moment_aids_by_lc.get(lc, set()))
                 event_total_cnt = max(
                     len(own_active_aids),
-                    int(cm.get("event_total_assets") or 0),
+                    cm_ev_tot,
                     inferred_src_tot,
                     raw_am_tot,
                 )
@@ -13222,7 +14188,8 @@ def get_all_unified_groupings():
                     int(cm.get("curated_count") or 0),
                 )
                 curation_matches_log = (
-                    candidate_cur_cnt > 0
+                    not has_subevents_grp
+                    and candidate_cur_cnt > 0
                     and candidate_cur_cnt == exp_cur_cnt
                     and not has_uncurated_active
                 )
@@ -13233,24 +14200,44 @@ def get_all_unified_groupings():
                 if not valid_members:
                     continue
 
+                unsplit_members = (
+                    [aid for aid in valid_members if aid not in subevent_assigned_aids]
+                    if has_subevents_grp
+                    else list(valid_members)
+                )
+                unsplit_cnt = len(unsplit_members)
+
                 curated_flag_set = candidate_cur_set if curation_matches_log else set()
                 valid_members.sort(
                     key=lambda x: (
-                        0 if x in curated_flag_set else 1,
+                        0 if x in curated_flag_set else (1 if x not in subevent_assigned_aids else 2),
                         -asset_info_map[x][1],
                         asset_info_map[x][2],
                         x,
                     )
                 )
-                scores_all = [asset_info_map[aid][1] for aid in valid_members]
+                # For Umbrella Events that already have split Subevents, score by remaining unsplit pool so extracted peak assets
+                # elevate their Subevent rather than keeping the Umbrella container artificially at #1!
+                score_basis_members = (
+                    unsplit_members
+                    if (has_subevents_grp and child_lcs_for_grp and unsplit_members)
+                    else valid_members
+                )
+                scores_all = [asset_info_map[aid][1] for aid in score_basis_members]
                 qual_scores = [s for s in scores_all if s > hist_min]
                 total_cnt = len(valid_members)
-                qual_cnt = len(qual_scores)
-                avg_sc = sum(scores_all) / total_cnt if total_cnt else 0.0
-                qual_avg_sc = sum(qual_scores) / qual_cnt if qual_cnt else avg_sc
+                qual_cnt = sum(1 for aid in valid_members if asset_info_map[aid][1] > hist_min)
+                basis_cnt = len(scores_all)
+                basis_qual_cnt = len(qual_scores)
+                avg_sc = sum(scores_all) / basis_cnt if basis_cnt else 0.0
+                qual_avg_sc = sum(qual_scores) / basis_qual_cnt if basis_qual_cnt else avg_sc
                 min_sc = min(scores_all) if scores_all else 0.0
                 max_sc = max(scores_all) if scores_all else 0.0
-                rank_sc = qual_avg_sc * math.log(max(1, qual_cnt) + 1)
+                rank_sc = (
+                    0.0
+                    if (has_subevents_grp and child_lcs_for_grp and not unsplit_members)
+                    else qual_avg_sc * math.log(max(1, basis_qual_cnt) + 1)
+                )
                 cur_scores = [asset_info_map[aid][1] for aid in curated_flag_set if aid in asset_info_map]
                 curated_avg_sc = sum(cur_scores) / len(cur_scores) if cur_scores else 0.0
 
@@ -13312,6 +14299,15 @@ def get_all_unified_groupings():
                     curation_mismatch_cnt = 0
                     m_status = "M100"
                     st_detail = f"Deduped → {dedup_canonical_target} (Remove in All-Media)"
+                elif has_subevents_grp:
+                    cur_cnt = 0
+                    curation_mismatch_cnt = 0
+                    m_status = "M100"
+                    st_detail = (
+                        f"Umbrella Event · {len(child_lcs_for_grp)} Subevent(s) · {unsplit_cnt}/{total_cnt} unsplit"
+                        if child_lcs_for_grp
+                        else "Contains Subevents (Split Before Curating)"
+                    )
                 elif is_historical_m500 or (curation_matches_log and pub_cnt >= candidate_cur_cnt and pub_cnt > 0):
                     cur_cnt = max(candidate_cur_cnt, pub_cnt)
                     curation_mismatch_cnt = 0
@@ -13355,8 +14351,10 @@ def get_all_unified_groupings():
                         too_recent = True
                         days_rem = max(1, 30 - (now_local - p_dt).days)
 
-                has_unpub_cur = curation_matches_log and cur_cnt > pub_cnt and cur_cnt > 0
-                if not has_unpub_cur:
+                has_unpub_cur = (not has_subevents_grp) and curation_matches_log and cur_cnt > pub_cnt and cur_cnt > 0
+                if has_subevents_grp:
+                    can_pub_str, can_pub_ok = "🔒 Subevents", False
+                elif not has_unpub_cur:
                     can_pub_str, can_pub_ok = ("✅ Complete" if m_status == "M500" else "—"), False
                 elif too_recent:
                     can_pub_str, can_pub_ok = f"⏳ {days_rem}d", False
@@ -13420,7 +14418,9 @@ def get_all_unified_groupings():
                 is_disj = qual_cnt < 2 and pub_cnt == 0
 
                 by_status_counts[m_status] = by_status_counts.get(m_status, 0) + 1
-                if is_disj:
+                if has_subevents_grp or parent_moment_grp:
+                    by_status_counts["Subevents"] = by_status_counts.get("Subevents", 0) + 1
+                if is_disj and not has_subevents_grp:
                     by_status_counts["Disjoint"] = by_status_counts.get("Disjoint", 0) + 1
 
                 preview_assets = [
@@ -13463,6 +14463,10 @@ def get_all_unified_groupings():
                         "is_duplicate_group": False,
                         "is_deduped_group": is_deduped_grp,
                         "duplicate_of_moment": dedup_canonical_target,
+                        "has_subevents": has_subevents_grp,
+                        "parent_moment_name": parent_moment_grp,
+                        "unsplit_assets_count": unsplit_cnt,
+                        "subevents": [],
                         "manually_curated": man_cur_flag,
                         "curation_matches_log": curation_matches_log,
                         "curation_mismatch_count": curation_mismatch_cnt,
@@ -13710,7 +14714,30 @@ def get_all_unified_groupings():
 
             unified_groupings.sort(key=_canonical_group_sort_key)
 
-            seen_true_moments: list[tuple[str, set[str]]] = []
+            # Attach child Subevent summaries onto each Umbrella Parent Event
+            grp_by_lc_lookup = {g["name"].lower(): g for g in unified_groupings if g.get("kind") == "moment"}
+            for par_lc_k, ch_lcs in child_subevent_lcs_by_parent_lc.items():
+                par_g = grp_by_lc_lookup.get(par_lc_k)
+                if not par_g:
+                    continue
+                subs_summary = []
+                for ch_lc in ch_lcs:
+                    ch_g = grp_by_lc_lookup.get(ch_lc)
+                    if ch_g:
+                        subs_summary.append(
+                            {
+                                "name": ch_g["name"],
+                                "moment_status": ch_g["moment_status"],
+                                "total_assets": ch_g["total_assets"],
+                                "curated_count": ch_g["curated_count"],
+                                "published_count": ch_g["published_count"],
+                                "avg_score": ch_g["avg_score"],
+                            }
+                        )
+                subs_summary.sort(key=lambda s: (-s["avg_score"], s["name"].lower()))
+                par_g["subevents"] = subs_summary
+
+            seen_true_moments: list[tuple[str, set[str], bool]] = []
             for g in unified_groupings:
                 if g.get("kind") != "moment":
                     continue
@@ -13721,11 +14748,12 @@ def get_all_unified_groupings():
                 s_cur = valid_members_by_lc.get(lc_g, set())
                 if not s_cur or not is_true_moment_by_lc.get(lc_g):
                     continue
-                if g.get("in_organizer_library"):
-                    seen_true_moments.append((g["name"], s_cur))
+                # Never flag an Umbrella Event or a linked Child Subevent as a duplicate Moment
+                if g.get("in_organizer_library") or g.get("has_subevents") or g.get("parent_moment_name"):
+                    seen_true_moments.append((g["name"], s_cur, bool(g.get("has_subevents"))))
                     continue
                 dup_parent_name = ""
-                for prev_name, s_prev in seen_true_moments:
+                for prev_name, s_prev, prev_is_umbrella in seen_true_moments:
                     if prev_name.lower() != lc_g and s_cur.issubset(s_prev):
                         dup_parent_name = prev_name
                         break
@@ -13734,7 +14762,7 @@ def get_all_unified_groupings():
                     g["duplicate_of_moment"] = dup_parent_name
                     by_status_counts["Duplicates"] = by_status_counts.get("Duplicates", 0) + 1
                 else:
-                    seen_true_moments.append((g["name"], s_cur))
+                    seen_true_moments.append((g["name"], s_cur, False))
 
             # Final sort: keep primary canonical Moment ahead of its legacy duplicate / deduped counterpart
             unified_groupings.sort(key=_canonical_group_sort_key)
@@ -14055,17 +15083,39 @@ def get_unified_grouping_assets(moment_name: str):
                     query_params,
                 ).fetchall()
 
-            own_rows = [
-                r
-                for r in raw_rows
-                if r[0]
-                and r[0] not in excluded_aids
-                and (
+            parent_lc_exp = ""
+            umbrella_lcs_exp: set[str] = set()
+            try:
+                cm_exp_cols = _ensure_subevent_schema(cur)
+                if "parent_moment_name" in cm_exp_cols:
+                    r_pm = cur.execute(
+                        "SELECT COALESCE(parent_moment_name, '') FROM curated_moments WHERE TRIM(LOWER(moment_name)) = ? LIMIT 1",
+                        (m_name_lc,),
+                    ).fetchone()
+                    if r_pm and r_pm[0]:
+                        parent_lc_exp = str(r_pm[0]).strip().lower()
+                if "has_subevents" in cm_exp_cols:
+                    for (u_nm,) in cur.execute(
+                        "SELECT TRIM(LOWER(moment_name)) FROM curated_moments WHERE COALESCE(has_subevents, 0) = 1"
+                    ).fetchall():
+                        if u_nm:
+                            umbrella_lcs_exp.add(u_nm)
+            except sqlite3.OperationalError:
+                pass
+
+            own_rows = []
+            for r in raw_rows:
+                if not r[0] or r[0] in excluded_aids:
+                    continue
+                r_mig = migrated_moment_lcs_by_aid.get(r[0], set())
+                r_non_umb = r_mig - umbrella_lcs_exp if m_name_lc not in umbrella_lcs_exp else r_mig
+                if (
                     r[0] not in migrated_aids
-                    or not migrated_moment_lcs_by_aid.get(r[0])
-                    or m_name_lc in migrated_moment_lcs_by_aid.get(r[0], set())
-                )
-            ]
+                    or not r_non_umb
+                    or m_name_lc in r_mig
+                    or (parent_lc_exp and parent_lc_exp in r_mig and not (r_non_umb - {m_name_lc}))
+                ):
+                    own_rows.append(r)
             org_cur_valid = {r[0] for r in own_rows if r[0] in org_cur_aids}
             effective_cur_set = org_cur_valid if is_org_moment else in_cur_set
             # Keep ALL active assets belonging to the Moment when expanded (with curated keepers ordered first),

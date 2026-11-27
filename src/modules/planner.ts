@@ -9,6 +9,7 @@ import type {
   CliStep2PendingPublishingRow,
   CliStep2Simulation,
   CreateMomentResponse,
+  CreateSubeventResponse,
   DisjointDetailAsset,
   DisjointDetailResponse,
   DisjointNameSuggestion,
@@ -33,6 +34,9 @@ import type {
   SaveMomentTagsResponse,
   SearchMomentItem,
   SearchMomentsResponse,
+  SubeventSectionAssetItem,
+  SubeventSuggestionSection,
+  SubeventSuggestionsResponse,
   TagCatalogItem,
   TagLookupResponse,
   TimeframeDeviceAssetItem,
@@ -195,6 +199,7 @@ function applyTargetMomentName(name: string, manualOverride: boolean): void {
   updateResolveDisjointTargetPreview();
   updateSingleAssetWarningVisibility();
   refreshExpectedCuratedUI();
+  refreshResolveDisjointStep3SubeventsUI();
 }
 
 function createEmptyTaggingState(
@@ -303,6 +308,34 @@ const publishTagState: TaggingEngineState = createEmptyTaggingState(
 publishTagState.hideSaveUseBtn = true;
 publishTagState.onTagsChanged = () => {
   publishTagsDirty = true;
+};
+
+let splitSubeventsParentMoment = '';
+let splitSubeventsGranularity: 'auto' | '1h' | '4h' | 'day' = 'auto';
+let splitSubeventsData: SubeventSuggestionsResponse | null = null;
+const splitSubeventsActiveSectionIds = new Set<string>();
+const splitSubeventsSelectedAssetIds = new Set<string>();
+let splitSubeventsNameManuallyEdited = false;
+let splitSubeventsLastAutoName = '';
+let isSubmittingCreateSubevent = false;
+
+const subeventTagState: TaggingEngineState = createEmptyTaggingState(
+  'split-subevents-tagging-mount',
+  '🏷️ Subevent Tagging & Naming Engine (Inherits When / People from Parent)',
+  false,
+  () => Array.from(splitSubeventsSelectedAssetIds)
+);
+subeventTagState.hideSaveUseBtn = true;
+subeventTagState.onTagsChanged = () => {
+  const nameInp = document.getElementById('split-subevents-name-input') as HTMLInputElement | null;
+  const curVal = (nameInp?.value || '').trim();
+  if (!splitSubeventsNameManuallyEdited || curVal === '' || curVal === splitSubeventsLastAutoName) {
+    const composed = composeMomentNameFromTags(subeventTagState.tags, '');
+    if (nameInp && composed) {
+      nameInp.value = composed;
+      splitSubeventsLastAutoName = composed;
+    }
+  }
 };
 
 type ClustersSyncLockMode = 'idle' | 'running' | 'awaiting' | 'reloading';
@@ -1008,6 +1041,44 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   });
   document.getElementById('btn-cancel-retag-reset')?.addEventListener('click', () => {
     collapseRetagResetBackToCuration();
+  });
+  document.getElementById('resolve-disjoint-step3-has-subevents')?.addEventListener('change', (e) => {
+    const chk = e.target as HTMLInputElement | null;
+    resolveDisjointStep3HasSubevents = Boolean(chk?.checked);
+    refreshResolveDisjointStep3SubeventsUI();
+    updateResolveDisjointTargetPreview();
+  });
+  document.querySelectorAll<HTMLElement>('.btn-close-split-subevents-modal').forEach(btn => {
+    btn.addEventListener('click', () => closeSplitSubeventsModal());
+  });
+  document.getElementById('modal-split-subevents')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement)?.id === 'modal-split-subevents') {
+      closeSplitSubeventsModal();
+    }
+  });
+  document.querySelectorAll<HTMLButtonElement>('.subevent-granularity-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const gVal = (btn.dataset.subGran || 'auto') as 'auto' | '1h' | '4h' | 'day';
+      splitSubeventsGranularity = gVal;
+      document.querySelectorAll<HTMLButtonElement>('.subevent-granularity-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.subGran === gVal);
+      });
+      if (splitSubeventsParentMoment) {
+        void loadSplitSubeventsSuggestions(splitSubeventsParentMoment, gVal);
+      }
+    });
+  });
+  document.getElementById('split-subevents-name-input')?.addEventListener('input', (e) => {
+    const curVal = ((e.target as HTMLInputElement)?.value || '').trim();
+    splitSubeventsNameManuallyEdited = curVal !== '' && curVal !== splitSubeventsLastAutoName;
+  });
+  document.getElementById('btn-cancel-subevent-builder')?.addEventListener('click', () => {
+    splitSubeventsActiveSectionIds.clear();
+    splitSubeventsSelectedAssetIds.clear();
+    renderSplitSubeventsModalContent();
+  });
+  document.getElementById('btn-submit-create-subevent')?.addEventListener('click', () => {
+    void submitCreateSubevent();
   });
   document.getElementById('resolve-disjoint-manual-curate-toggle')?.addEventListener('change', (e) => {
     const chk = e.target as HTMLInputElement | null;
@@ -5998,6 +6069,7 @@ function renderResolveDisjointCombineTray(): void {
   });
   updateSingleAssetWarningVisibility();
   refreshExpectedCuratedUI();
+  refreshResolveDisjointStep3SubeventsUI();
 }
 
 function renderCandidateMomentChips(
@@ -6885,6 +6957,65 @@ function getCombinedSelectedAssetCount(): number {
 
 let resolveDisjointOpenedFromCuration = false;
 let resolveDisjointRetagExpanded = false;
+let resolveDisjointStep3HasSubevents = false;
+let resolveDisjointExistingAlreadyConsolidated = false;
+
+function isStep3SubeventsUnlocked(): boolean {
+  return (
+    combinedExtraMoments.size > 0 ||
+    resolveDisjointStep3HasSubevents ||
+    resolveDisjointExistingAlreadyConsolidated
+  );
+}
+
+function refreshResolveDisjointStep3SubeventsUI(): void {
+  const step3El = document.getElementById('resolve-disjoint-step3-subevents-section');
+  const cb = document.getElementById('resolve-disjoint-step3-has-subevents') as HTMLInputElement | null;
+  const lbl = document.getElementById('resolve-disjoint-step3-label');
+  const badge = document.getElementById('resolve-disjoint-step3-lock-badge');
+  const hint = document.getElementById('resolve-disjoint-step3-hint');
+  if (!step3El) return;
+
+  const isCurationStep = resolveDisjointIsCurateM200 && !resolveDisjointRetagExpanded;
+  step3El.style.display = isCurationStep ? 'none' : 'flex';
+  if (isCurationStep) return;
+
+  const unlocked = isStep3SubeventsUnlocked();
+  if (!unlocked) {
+    resolveDisjointStep3HasSubevents = false;
+  }
+  if (cb) {
+    cb.disabled = !unlocked;
+    cb.checked = unlocked && resolveDisjointStep3HasSubevents;
+  }
+  if (lbl) {
+    lbl.style.cursor = unlocked ? 'pointer' : 'not-allowed';
+    lbl.style.opacity = unlocked ? '1' : '0.55';
+  }
+  if (badge) {
+    if (unlocked && resolveDisjointStep3HasSubevents) {
+      badge.className = 'badge badge-xs badge-cyan font-mono';
+      badge.textContent = '🌿 Marked: Contains Subevents';
+    } else if (unlocked) {
+      badge.className = 'badge badge-xs badge-green font-mono';
+      badge.textContent = '🔓 Unlocked';
+    } else {
+      badge.className = 'badge badge-xs badge-outline font-mono';
+      badge.textContent = '🔒 Add Assets in Step 2 to Unlock';
+    }
+  }
+  if (hint) {
+    if (!unlocked) {
+      hint.innerHTML = '🔒 Step 3 unlocks automatically when Step 2 is used to add same-event assets.';
+    } else if (resolveDisjointStep3HasSubevents) {
+      hint.innerHTML =
+        '✅ Major Event will stay in <code>Moments</code> as an Umbrella Event (locked from advancing to Publishing) and surface <strong>🌿 Split Subevents</strong> on the main screen.';
+    } else {
+      hint.innerHTML =
+        '💡 Optional for multi-day / composite events: check above if peak assets are not indicative of the overall event and you want to split Subevents before curating.';
+    }
+  }
+}
 
 function renderCollapsedMomentTagsSummaryHtml(): string {
   if (!sourceTagState.tags.length) {
@@ -6949,6 +7080,7 @@ function syncResolveDisjointWorkflowStepUI(): void {
   if (retagBannerEl) retagBannerEl.style.display = isRetagResetMode ? 'flex' : 'none';
   if (step1El) step1El.style.display = isCurationStep ? 'none' : 'flex';
   if (step2El) step2El.style.display = isCurationStep ? 'none' : 'flex';
+  refreshResolveDisjointStep3SubeventsUI();
   if (expBarEl) expBarEl.style.display = isCurationStep ? 'flex' : 'none';
   if (curateToggleBarEl) curateToggleBarEl.style.display = 'none';
   if (curateBoxEl) curateBoxEl.style.display = isCurationStep ? 'flex' : 'none';
@@ -7137,6 +7269,10 @@ function updateResolveDisjointTargetPreview(): void {
         btnSubmit.textContent = `🔄 Retag & Reset Pipeline to Moments (${totalSelCount})`;
         btnSubmit.title =
           'Apply updated tags/merges, clear prior Curated / Highrated organizer folders, and reset pipeline back to M100 (Moments)';
+      } else if (isStep3SubeventsUnlocked() && resolveDisjointStep3HasSubevents) {
+        btnSubmit.textContent = `🌿 Save Umbrella Event (Contains Subevents · ${totalSelCount})`;
+        btnSubmit.title =
+          'Save Moment in Moments as an Umbrella Event containing Subevents (locks Major Event from Publishing and unlocks Split Subevents)';
       } else if (combinedExtraMoments.size > 0) {
         btnSubmit.textContent = `🏷️ Save Tags & Merge Event into Moments (${totalSelCount})`;
         btnSubmit.title =
@@ -7173,6 +7309,16 @@ export async function openResolveDisjointModal(
   resolveDisjointIsCurateM200 = isCurateM200;
   resolveDisjointOpenedFromCuration = isCurateM200;
   resolveDisjointRetagExpanded = false;
+  resolveDisjointStep3HasSubevents = Boolean(srcGroupingInitial?.has_subevents);
+  const initialDatesSpanMultiDay = Boolean(
+    srcGroupingInitial?.date_range && srcGroupingInitial.date_range.includes('..')
+  );
+  const initialMultiSourceMerged =
+    Boolean(srcGroupingInitial?.in_organizer_library) &&
+    (((srcGroupingInitial?.source_all_media_folders || []).length > 1) || initialDatesSpanMultiDay);
+  resolveDisjointExistingAlreadyConsolidated = Boolean(
+    srcGroupingInitial?.has_subevents || initialMultiSourceMerged
+  );
   resolveDisjointExplicitAssetIds = explicitIds;
   resolveDisjointAssets = [];
   resolveDisjointSelectedIds.clear();
@@ -7333,6 +7479,21 @@ export async function openResolveDisjointModal(
         is_duplicate_copy: Boolean(a.is_duplicate_copy)
       });
     });
+    const distinctDaysInDetail = new Set(
+      assets.map(a => (a.date_created_utc || '').slice(0, 10)).filter(Boolean)
+    );
+    if (data.has_subevents) {
+      resolveDisjointStep3HasSubevents = true;
+      resolveDisjointExistingAlreadyConsolidated = true;
+      if (resolveDisjointIsCurateM200) {
+        resolveDisjointIsCurateM200 = false;
+        resolveDisjointOpenedFromCuration = false;
+      }
+    } else if (Boolean(srcGrouping?.in_organizer_library) && distinctDaysInDetail.size > 1) {
+      resolveDisjointExistingAlreadyConsolidated = true;
+    }
+    refreshResolveDisjointStep3SubeventsUI();
+
     const hasSavedTagsInDb = Boolean(
       (data.saved_tags && data.saved_tags.length > 0) || data.last_tag_session || srcGrouping?.is_tagged
     );
@@ -7746,6 +7907,11 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
         ? `<strong>⚠️ Pipeline Reset to <code>M100</code> (Uncurated in Moments):</strong> Clear any prior <code>Curated</code> / <code>Highrated assets</code> albums &amp; LaCie exports for <code>${escapeHtml(resolveDisjointMomentName)}</code> / <code>${escapeHtml(targetMoment)}</code> inside <code>Media Organizer</code> and reset <code>curated_moments</code> to <code>M100</code> so you can curate fresh after retagging.`
         : `<strong>Initialize Moment Stage (<code>${newFolderResetStage}</code>):</strong> Set <code>${escapeHtml(targetMoment)}</code> in <code>curated_moments</code> to <code>${newFolderResetStage}</code> (Uncurated in <code>Moments</code>), unlocking Manual Curation next.`
     );
+    if (isStep3SubeventsUnlocked() && resolveDisjointStep3HasSubevents) {
+      stepsHtml.push(
+        `<strong>🌿 Step 3 — Mark as Containing Subevents (Umbrella Event):</strong> Mark <code>${escapeHtml(targetMoment)}</code> as containing Subevents so this Major Event will <strong>not</strong> advance to Curation or Publishing directly, and unlock <strong>🌿 Split Subevents</strong> on the main screen.`
+      );
+    }
 
     if (action === 'merge_new' && (savePerSource || shareDisjoint)) {
       const tagSummary = formatUnifiedMetadataSummary(sourceTagState.tags);
@@ -7997,7 +8163,8 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
           apply_tags: applyTags,
           moment_tag_groups: momentTagGroups,
           delete_source_albums: Boolean(delSrcCb?.checked ?? true),
-          is_unassigned_cluster: resolveDisjointIsUnassignedCluster
+          is_unassigned_cluster: resolveDisjointIsUnassignedCluster,
+          has_subevents: isMerge && isStep3SubeventsUnlocked() ? resolveDisjointStep3HasSubevents : undefined
         })
       });
     }
@@ -8380,7 +8547,10 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
   const lockedCurateExpBtn = `<button type="button" class="btn btn-xs btn-outline" disabled style="opacity: 0.45; cursor: not-allowed;" title="Locked — complete Moment Tagging (Step 1: Tagging &amp; Moment Creation · Step 2: Merge Event Assets) first before Manual Curation">🔒 Curate (${effectiveExpExp})</button>`;
   const primaryActionBtn = g.is_deduped_group
     ? `<button type="button" class="btn btn-xs btn-red btn-ugrp-exp-open-photos" data-is-remove-link="1" data-library-scope="all_media" data-album-name="${escapeHtml(expRemoveAlbum)}" data-full-path="${escapeHtml(expRemovePath)}" data-sample-aid="${escapeHtml(expSampleAid)}" title="${escapeHtml(`Deduped into '${g.duplicate_of_moment || ''}' — open '${expRemoveAlbum}' in All-Media.photoslibrary to manually delete this Moment in Photos`)}">🗑️ Remove in All-Media ↗</button>`
-    : !isTaggingCompleteExp
+    : g.has_subevents
+      ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-split-subevents" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Split Subevents dialog to inspect location/timestamp subgroupings &amp; their scores">🌿 Split Subevents</button>
+         <button type="button" class="btn btn-xs btn-outline btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Edit Umbrella Event tags or Subevents designation">🏷️ Moment Tagging</button>`
+      : !isTaggingCompleteExp
       ? g.kind === 'unassigned'
         ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-assign-selected" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Moment Tagging (Step 1: Tagging &amp; Moment Creation · Step 2: Merge Event Assets)">🏷️ Moment Tagging (${selCount})</button>
            ${lockedCurateExpBtn}`
@@ -8637,6 +8807,14 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
     void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true, isCurateM200: true });
   });
 
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-split-subevents')?.addEventListener('click', () => {
+    void openSplitSubeventsModal(g.name);
+  });
+
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-tag-merge')?.addEventListener('click', () => {
+    void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true });
+  });
+
   bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-publish')?.addEventListener('click', () => {
     void openPublishMomentModal(g.name);
   });
@@ -8799,6 +8977,7 @@ function renderAllUnifiedGroupings(): void {
     { key: 'M400', label: `✅ M400 Curated (${bySt['M400'] || 0})` },
     { key: 'M450', label: `🚀 M450 Part-Pub (${bySt['M450'] || 0})` },
     { key: 'M500', label: `🏁 M500 Complete (${bySt['M500'] || 0})` },
+    { key: 'Subevents', label: `🌿 Subevents (${bySt['Subevents'] || 0})` },
     { key: 'Duplicates', label: `♻️ Duplicates (${bySt['Duplicates'] || 0})` },
     { key: 'Disjoint', label: `🔀 Disjoint <2 (${bySt['Disjoint'] || 0})` }
   ];
@@ -8822,6 +9001,8 @@ function renderAllUnifiedGroupings(): void {
     if (allGroupingsStatusFilter !== 'all') {
       if (allGroupingsStatusFilter === 'Disjoint') {
         if (!g.is_disjoint) return false;
+      } else if (allGroupingsStatusFilter === 'Subevents') {
+        if (!g.has_subevents && !g.parent_moment_name) return false;
       } else if (allGroupingsStatusFilter === 'Duplicates') {
         if (!g.is_duplicate_group && !g.is_deduped_group) return false;
       } else if (allGroupingsStatusFilter === 'ReadyToPublish') {
@@ -8859,6 +9040,8 @@ function renderAllUnifiedGroupings(): void {
         g.rule_reason || '',
         g.shutterfly_url || '',
         g.youtube_url || '',
+        g.parent_moment_name || '',
+        ...(g.subevents || []).map(sb => sb.name),
         ...(g.photos_folders || []).map(pf => `${pf.parent_folder} ${pf.full_path}`),
         ...(g.organizer_target_folders || []).map(ot => `${ot.album_name} ${ot.full_path}`),
         ...(g.source_all_media_folders || []).map(am => `${am.album_name} ${am.parent_folder} ${am.full_path}`),
@@ -9047,14 +9230,36 @@ function renderAllUnifiedGroupings(): void {
           g.moment_status === 'M500' ||
           g.curated_count > 0);
       const isCompletedM500Row = g.moment_status === 'M500' && g.published_count > 0;
+      const isUmbrellaRow = Boolean(g.has_subevents);
+      const childSubs = g.subevents || [];
+      const unsplitCntRow = g.unsplit_assets_count ?? g.total_assets;
       const mismatchCurCnt = g.curation_mismatch_count || 0;
-      const expCurPillHtml = isCuratedRow
-        ? `<span class="badge badge-xs badge-blue font-mono" title="${escapeHtml(
-            `${g.total_assets} total asset(s) in this Moment · ${g.curated_count} curated keeper(s) matching logarithmic target round(ln(${evTot})) = ${expCurCnt} (ln(${evTot}) = ${expCurLn.toFixed(2)})`
-          )}">✅ Curated: ${g.curated_count} / ${g.total_assets} (🎯 ln ${evTot}=${expCurCnt})</span>`
-        : `<span class="badge badge-xs badge-purple font-mono" title="${escapeHtml(
-            `Expected curated count = round(ln(${evTot})) = ${expCurCnt} (ln(${evTot}) = ${expCurLn.toFixed(2)})`
-          )}">🎯 Exp Cur: ${expCurCnt} (ln ${evTot})</span>`;
+      const expCurPillHtml = isUmbrellaRow
+        ? `<span class="badge badge-xs badge-cyan font-mono" title="${escapeHtml(
+            `Umbrella Multi-Day / Composite Event — locked from advancing to Curation/Publishing directly.\nClick '🌿 Split Subevents' to curate Subevents individually (${childSubs.length} Subevent(s) created · ${unsplitCntRow}/${g.total_assets} assets unsplit).`
+          )}">🗂️ Umbrella · Subevents (${childSubs.length})</span>`
+        : isCuratedRow
+          ? `<span class="badge badge-xs badge-blue font-mono" title="${escapeHtml(
+              `${g.total_assets} total asset(s) in this Moment · ${g.curated_count} curated keeper(s) matching logarithmic target round(ln(${evTot})) = ${expCurCnt} (ln(${evTot}) = ${expCurLn.toFixed(2)})`
+            )}">✅ Curated: ${g.curated_count} / ${g.total_assets} (🎯 ln ${evTot}=${expCurCnt})</span>`
+          : `<span class="badge badge-xs badge-purple font-mono" title="${escapeHtml(
+              `Expected curated count = round(ln(${evTot})) = ${expCurCnt} (ln(${evTot}) = ${expCurLn.toFixed(2)})`
+            )}">🎯 Exp Cur: ${expCurCnt} (ln ${evTot})</span>`;
+      const subeventLineagePillHtml = g.parent_moment_name
+        ? `<button type="button" class="badge badge-xs badge-cyan font-mono pub-badge-link btn-ugrp-open-parent-subevents" data-parent-moment="${escapeHtml(g.parent_moment_name)}" title="${escapeHtml(
+            `Subevent split from Umbrella Event '${g.parent_moment_name}' — click to view all sibling Subevents & remaining subgroupings`
+          )}">↳ Subevent of: ${escapeHtml(g.parent_moment_name)}</button>`
+        : isUmbrellaRow && childSubs.length > 0
+          ? childSubs
+              .slice(0, 3)
+              .map(
+                sb =>
+                  `<span class="badge badge-xs badge-outline font-mono" style="border-color: rgba(6, 182, 212, 0.45); color: #a5f3fc;" title="${escapeHtml(
+                    `Child Subevent: ${sb.name} (${sb.moment_status} · ${sb.total_assets} assets · Avg ${sb.avg_score.toFixed(4)})`
+                  )}">↳ ${escapeHtml(sb.name)} (${escapeHtml(sb.moment_status)})</span>`
+              )
+              .join(' ') + (childSubs.length > 3 ? ` <span class="badge badge-xs badge-outline font-mono">+${childSubs.length - 3} more</span>` : '')
+          : '';
       const pubProgressPillHtml =
         g.kind === 'moment' && !g.is_deduped_group
           ? g.published_count > 0
@@ -9089,7 +9294,11 @@ function renderAllUnifiedGroupings(): void {
         `<strong>${g.total_assets}</strong> ${g.kind === 'moment' ? 'in moment' : 'total'}`,
         `<span class="text-green">★ ${g.qualified_assets} qual</span>`
       ];
-      if (isCuratedRow && g.curated_count > 0) {
+      if (isUmbrellaRow) {
+        countsParts.push(
+          `<span style="color:#67e8f9;" title="Umbrella Event: ${unsplitCntRow} of ${g.total_assets} asset(s) not yet assigned to a Subevent">🌿 <strong>${unsplitCntRow}</strong>/${g.total_assets} unsplit</span>`
+        );
+      } else if (isCuratedRow && g.curated_count > 0) {
         countsParts.push(
           `<span style="color:#93c5fd;" title="Curated ${g.curated_count} out of ${g.total_assets} Moment asset(s) (matches ln(${evTot}) = ${expCurCnt})">✅ <strong>${g.curated_count}</strong>/${g.total_assets} curated ✓</span>`
         );
@@ -9107,10 +9316,12 @@ function renderAllUnifiedGroupings(): void {
         countsParts.push(
           `<span class="text-green">📢 <strong>${g.published_count}</strong>${isCuratedRow ? `/${g.curated_count}` : ''} published</span>`
         );
-      } else if (g.kind === 'moment' && !g.is_deduped_group) {
+      } else if (g.kind === 'moment' && !g.is_deduped_group && !isUmbrellaRow) {
         countsParts.push(
           `<span class="text-muted">📤 <strong>0</strong> published${pendingPubCnt > 0 && isCuratedRow ? ` (${pendingPubCnt} pending)` : ''}</span>`
         );
+      } else if (isUmbrellaRow) {
+        countsParts.push('<span class="text-muted">🔒 Subevents publish only</span>');
       }
       if (g.published_count > 0 && pendingPubCnt > 0 && isCuratedRow) {
         countsParts.push(`<span class="text-green">📤 ${pendingPubCnt} pending</span>`);
@@ -9174,7 +9385,11 @@ function renderAllUnifiedGroupings(): void {
           `Deduped into '${g.duplicate_of_moment || ''}' — click to open '${removeAlbumName}' in All-Media.photoslibrary (Read-Only) so you can manually delete the Moment from Apple Photos`
         )}">🗑️ Remove</button>
            <button type="button" class="btn btn-xs btn-icon btn-ugrp-row-action" data-action="dismiss_dedup" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Already deleted from All-Media in Photos? Click to dismiss this row">✕</button>`
-        : !isTaggingCompleteRow
+        : isUmbrellaRow
+          ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-row-action" data-action="split_subevents" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(
+              `Open Split Subevents for '${g.name}' — view suggested location/timestamp subgroupings with scores & create Subevents in Moments`
+            )}">🌿 Split Subevents${childSubs.length > 0 ? ` (${unsplitCntRow} left)` : ''}</button>`
+          : !isTaggingCompleteRow
           ? g.kind === 'unassigned'
             ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Step 1: Tagging &amp; Moment Creation · Step 2: Merge Same-Event Assets">🏷️ Moment Tagging</button>
                ${lockedCurateRowBtn}`
@@ -9247,6 +9462,7 @@ function renderAllUnifiedGroupings(): void {
                   <span class="badge badge-xs ${stCls} font-mono">${escapeHtml(g.moment_status)}</span>
                   ${matchedAssetPillHtml}
                   ${expCurPillHtml}
+                  ${subeventLineagePillHtml}
                   ${pubProgressPillHtml}
                   ${dupGroupPillHtml}
                   ${mismatchPillHtml}
@@ -9306,7 +9522,7 @@ function renderAllUnifiedGroupings(): void {
     hdrEl.addEventListener('click', async e => {
       if (
         (e.target as HTMLElement).closest(
-          '.btn-ugrp-row-action, .ugrp-inline-thumb, .pub-badge-link, .btn-ugrp-edit-pub-urls, .btn-ugrp-open-photos, .btn-ugrp-open-curated, a'
+          '.btn-ugrp-row-action, .ugrp-inline-thumb, .pub-badge-link, .btn-ugrp-edit-pub-urls, .btn-ugrp-open-photos, .btn-ugrp-open-curated, .btn-ugrp-open-parent-subevents, a'
         )
       ) {
         return;
@@ -9397,12 +9613,15 @@ function renderAllUnifiedGroupings(): void {
         const allIds = assets.map(a => a.asset_id);
         const prefill = /uncategorized/i.test(g.name) ? '' : g.name;
         void openResolveDisjointModal(g.name, prefill, { assetIds: allIds, isUnassignedCluster: true });
+      } else if (act === 'split_subevents') {
+        void openSplitSubeventsModal(g.name);
       } else if (act === 'curate') {
-        if (g.kind === 'unassigned' || !g.is_tagged) {
+        if (g.kind === 'unassigned' || !g.is_tagged || g.has_subevents) {
           return;
         }
         void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true, isCurateM200: true });
       } else if (act === 'publish') {
+        if (g.has_subevents) return;
         void openPublishMomentModal(g.name);
       } else {
         void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true });
@@ -9461,6 +9680,14 @@ function renderAllUnifiedGroupings(): void {
       } finally {
         btn.disabled = false;
       }
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-ugrp-open-parent-subevents').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const pName = btn.dataset.parentMoment || '';
+      if (pName) void openSplitSubeventsModal(pName);
     });
   });
 
@@ -9897,5 +10124,580 @@ function addCheckedTimeframeDeviceAssetsToConsolidation(): void {
   renderPropagateTagsPreview();
   updateSingleAssetWarningVisibility();
   updateResolveDisjointTargetPreview();
+}
+
+// ==========================================================================
+// Split Subevents Modal (Location / Timestamp Subgroupings + Scoring + Builder)
+// ==========================================================================
+
+function closeSplitSubeventsModal(): void {
+  document.getElementById('modal-split-subevents')?.classList.remove('open');
+}
+
+export async function openSplitSubeventsModal(momentName: string): Promise<void> {
+  const mClean = (momentName || '').trim();
+  if (!mClean) return;
+  splitSubeventsParentMoment = mClean;
+  splitSubeventsGranularity = 'auto';
+  splitSubeventsData = null;
+  splitSubeventsActiveSectionIds.clear();
+  splitSubeventsSelectedAssetIds.clear();
+  splitSubeventsNameManuallyEdited = false;
+  splitSubeventsLastAutoName = '';
+
+  const modal = document.getElementById('modal-split-subevents');
+  const titleEl = document.getElementById('split-subevents-modal-title');
+  const badgeEl = document.getElementById('split-subevents-badge');
+  const listEl = document.getElementById('split-subevents-sections-list');
+  const builderEl = document.getElementById('split-subevents-builder-panel');
+  const statusEl = document.getElementById('split-subevents-status');
+
+  if (titleEl) titleEl.textContent = `🌿 Split Subevents — ${mClean}`;
+  if (badgeEl) badgeEl.textContent = 'loading...';
+  if (listEl) listEl.innerHTML = '';
+  if (builderEl) builderEl.style.display = 'none';
+  if (statusEl) {
+    statusEl.style.display = 'none';
+    statusEl.innerHTML = '';
+  }
+  document.querySelectorAll<HTMLButtonElement>('.subevent-granularity-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.subGran === 'auto');
+  });
+
+  modal?.classList.add('open');
+  await loadSplitSubeventsSuggestions(mClean, 'auto');
+}
+
+async function loadSplitSubeventsSuggestions(
+  momentName: string,
+  granularity: 'auto' | '1h' | '4h' | 'day'
+): Promise<void> {
+  const bannerEl = document.getElementById('split-subevents-summary-banner');
+  const badgeEl = document.getElementById('split-subevents-badge');
+  const listEl = document.getElementById('split-subevents-sections-list');
+  if (bannerEl) {
+    bannerEl.innerHTML = '<div class="spinner-sm"></div><span>Analyzing location &amp; creation-timestamp subgroupings and calculating section scores...</span>';
+  }
+  if (listEl) {
+    listEl.innerHTML = '<div class="text-muted font-mono" style="padding: 0.8rem;">Loading proposed Subevent sections...</div>';
+  }
+
+  try {
+    const qs = new URLSearchParams({ moment_name: momentName, granularity });
+    const res = await fetch(`/api/media/memories/subevent-suggestions?${qs.toString()}`);
+    const data: SubeventSuggestionsResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      if (bannerEl) {
+        bannerEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      if (listEl) listEl.innerHTML = '';
+      return;
+    }
+
+    splitSubeventsData = data;
+    splitSubeventsActiveSectionIds.clear();
+    splitSubeventsSelectedAssetIds.clear();
+
+    const histMinVal = data.historical_min ?? 0.5315;
+    (data.sections || []).forEach(sec => {
+      sec.assets.forEach(a => {
+        const sz = a.file_size_bytes || 0;
+        candidateAssetMeta.set(a.asset_id, {
+          asset_id: a.asset_id,
+          filename: a.original_filename,
+          original_filename: a.original_filename,
+          camera_model: a.camera_model || 'Library',
+          primary_owner: a.primary_owner || '',
+          month: a.month || (a.date_created_utc || '').slice(0, 7),
+          date_created_utc: a.date_created_utc || '',
+          capture_timestamp: a.date_created_utc || '',
+          file_size_bytes: sz,
+          bytes: sz,
+          file_size_mb: sz / (1024 * 1024),
+          score_normalized: a.score_normalized,
+          score_quartile: a.qualified ? `Top (>${histMinVal.toFixed(4)})` : 'Below Threshold',
+          assigned_moment: a.already_in_subevent || momentName,
+          asset_tags: a.asset_tags,
+          media_type: a.media_type,
+          duration_sec: a.duration || 0,
+          width: 0,
+          height: 0,
+          fps: 0,
+          is_duplicate_copy: Boolean(a.is_duplicate_copy)
+        });
+      });
+    });
+
+    if (badgeEl) {
+      badgeEl.textContent = `${data.unsplit_assets} unsplit / ${data.total_assets} total`;
+    }
+    renderSplitSubeventsModalContent();
+  } catch (err: any) {
+    if (bannerEl) {
+      bannerEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  }
+}
+
+function initSubeventTagsFromParentAndSections(activeSections: SubeventSuggestionSection[]): void {
+  if (!splitSubeventsData) return;
+  const parentTags = splitSubeventsData.parent_saved_tags || [];
+  subeventTagState.momentName = splitSubeventsParentMoment;
+  subeventTagState.tagDbCounts = splitSubeventsData.tag_db_counts || {};
+  subeventTagState.tagCatalogByCategory = splitSubeventsData.tag_catalog_by_category || {};
+  if (splitSubeventsData.family_member_pool?.length) {
+    subeventTagState.familyPool = splitSubeventsData.family_member_pool;
+  }
+  subeventTagState.removedTagValues.clear();
+  subeventTagState.saveStatusMsg = '';
+  subeventTagState.tags = [];
+
+  // Inherit When, People, and Family Member tags directly from the Umbrella Parent Event
+  parentTags.forEach(pt => {
+    if (pt.category === 'when' || pt.category === 'people' || pt.category === 'family_member') {
+      subeventTagState.tags.push({
+        category: pt.category,
+        tag_value: pt.tag_value,
+        include_in_name: pt.include_in_name
+      });
+    }
+  });
+
+  // Pre-add detected section location hint if Apple Photos ZMOMENT provided a specific location
+  activeSections.forEach(sec => {
+    const loc = (sec.location_hint || '').split(' - ')[0].trim();
+    if (
+      loc &&
+      !subeventTagState.tags.some(t => t.tag_value.toLowerCase() === loc.toLowerCase())
+    ) {
+      subeventTagState.tags.push({
+        category: 'location',
+        tag_value: loc,
+        include_in_name: true
+      });
+    }
+  });
+
+  splitSubeventsNameManuallyEdited = false;
+  splitSubeventsLastAutoName = '';
+  const nameInp = document.getElementById('split-subevents-name-input') as HTMLInputElement | null;
+  const composed = composeMomentNameFromTags(subeventTagState.tags, '');
+  if (nameInp) {
+    nameInp.value = composed;
+    splitSubeventsLastAutoName = composed;
+  }
+}
+
+function selectSubeventSectionForBuilder(sec: SubeventSuggestionSection, toggleMode: boolean): void {
+  if (!splitSubeventsData) return;
+  if (!toggleMode) {
+    splitSubeventsActiveSectionIds.clear();
+    splitSubeventsSelectedAssetIds.clear();
+  }
+
+  if (splitSubeventsActiveSectionIds.has(sec.section_id)) {
+    splitSubeventsActiveSectionIds.delete(sec.section_id);
+    sec.assets.forEach(a => splitSubeventsSelectedAssetIds.delete(a.asset_id));
+  } else {
+    splitSubeventsActiveSectionIds.add(sec.section_id);
+    const unsplitNonDups = sec.assets.filter(a => !a.already_in_subevent && !a.is_duplicate_copy);
+    const fallbackNonDups = sec.assets.filter(a => !a.is_duplicate_copy);
+    const toPick = unsplitNonDups.length ? unsplitNonDups : (fallbackNonDups.length ? fallbackNonDups : sec.assets);
+    toPick.forEach(a => splitSubeventsSelectedAssetIds.add(a.asset_id));
+  }
+
+  const activeSecs = splitSubeventsData.sections.filter(s => splitSubeventsActiveSectionIds.has(s.section_id));
+  if (activeSecs.length > 0) {
+    initSubeventTagsFromParentAndSections(activeSecs);
+  }
+  renderSplitSubeventsModalContent();
+  if (activeSecs.length > 0) {
+    document.getElementById('split-subevents-builder-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function renderSplitSubeventsModalContent(): void {
+  const data = splitSubeventsData;
+  const bannerEl = document.getElementById('split-subevents-summary-banner');
+  const secPillEl = document.getElementById('split-subevents-sections-pill');
+  const existingBarEl = document.getElementById('split-subevents-existing-bar');
+  const listEl = document.getElementById('split-subevents-sections-list');
+  const builderEl = document.getElementById('split-subevents-builder-panel');
+  const builderHeadEl = document.getElementById('split-subevents-builder-heading');
+  const builderCntEl = document.getElementById('split-subevents-builder-count-pill');
+  const locHintsEl = document.getElementById('split-subevents-parent-loc-hints');
+  const submitBtn = document.getElementById('btn-submit-create-subevent') as HTMLButtonElement | null;
+  if (!data || !listEl) return;
+
+  if (secPillEl) {
+    secPillEl.textContent = `${data.sections.length} proposed section${data.sections.length === 1 ? '' : 's'}`;
+  }
+  if (bannerEl) {
+    const peakNote = data.parent_peak_asset
+      ? ` · 🔥 Event Peak Asset: <code>${escapeHtml(data.parent_peak_asset.filename)}</code> (<strong>${data.parent_peak_asset.score.toFixed(4)}</strong>)`
+      : '';
+    bannerEl.innerHTML = `
+      <span>
+        <strong>Umbrella Event:</strong> <code>${escapeHtml(data.moment_name)}</code> (${data.total_assets} total · <strong>${data.unsplit_assets}</strong> unsplit)${peakNote}.
+        Inspect the proposed subgroupings &amp; their scores below and click <strong>🌿 Identify Subevent</strong> (or check multiple sections to combine) to create a Subevent in <code>Moments</code>.
+      </span>
+    `;
+  }
+
+  const existingSubs = data.existing_subevents || [];
+  if (existingBarEl) {
+    if (existingSubs.length > 0) {
+      existingBarEl.style.display = 'flex';
+      existingBarEl.innerHTML = `
+        <strong class="font-mono" style="color: #6ee7b7;">✅ Created Subevents (${existingSubs.length}):</strong>
+        ${existingSubs
+          .map(es => {
+            const { expected } = computeExpectedCuratedStats(es.total_assets);
+            return `<span class="badge badge-xs badge-green font-mono" style="display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.45rem;">
+              <span> Moments/${escapeHtml(es.subevent_name)} (${es.total_assets} · ${escapeHtml(es.moment_status)})</span>
+              <button type="button" class="btn btn-xs btn-purple btn-subevent-curate-now" data-subevent-name="${escapeHtml(es.subevent_name)}" style="padding: 0.06rem 0.35rem; font-size: 0.64rem;">🎨 Curate (${expected})</button>
+            </span>`;
+          })
+          .join('')}
+      `;
+      existingBarEl.querySelectorAll<HTMLButtonElement>('.btn-subevent-curate-now').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const sName = btn.dataset.subeventName || '';
+          if (sName) {
+            closeSplitSubeventsModal();
+            void openResolveDisjointModal(sName, '', { isHistoricalMoment: true, isCurateM200: true });
+          }
+        });
+      });
+    } else {
+      existingBarEl.style.display = 'none';
+      existingBarEl.innerHTML = '';
+    }
+  }
+
+  listEl.innerHTML = data.sections
+    .map(sec => {
+      const isSecSelected = splitSubeventsActiveSectionIds.has(sec.section_id);
+      const secCheckedCount = sec.assets.filter(a => splitSubeventsSelectedAssetIds.has(a.asset_id)).length;
+      const allAssigned = sec.unsplit_assets === 0 && sec.assigned_subevents.length > 0;
+      const peakBadge = sec.has_parent_peak_asset
+        ? `<span class="badge badge-xs badge-amber font-mono" style="font-weight: 700;" title="Contains the highest-scoring asset of the entire Major Event (${escapeHtml(sec.peak_asset_filename)} · ${sec.peak_asset_score.toFixed(4)})">🔥 Event Peak: ${escapeHtml(sec.peak_asset_filename)} (${sec.peak_asset_score.toFixed(4)})</span>`
+        : '';
+      const assignedBadge =
+        sec.assigned_subevents.length > 0
+          ? `<span class="badge badge-xs badge-green font-mono">✅ Split ➜ ${escapeHtml(sec.assigned_subevents.join(', '))}${sec.unsplit_assets > 0 ? ` (${sec.unsplit_assets} unsplit)` : ''}</span>`
+          : `<span class="badge badge-xs badge-outline font-mono">${sec.unsplit_assets} unsplit</span>`;
+
+      const thumbsHtml = sec.assets
+        .slice(0, 12)
+        .map(a => {
+          const isChecked = splitSubeventsSelectedAssetIds.has(a.asset_id);
+          const alreadySub = Boolean(a.already_in_subevent);
+          return `
+            <div class="tag-db-asset-card${a.is_duplicate_copy ? ' is-dup-copy' : ''}" style="${
+              isChecked
+                ? 'border-color: rgba(6, 182, 212, 0.75); background: rgba(6, 182, 212, 0.12);'
+                : alreadySub
+                  ? 'opacity: 0.55;'
+                  : ''
+            }" title="${escapeHtml(`${a.original_filename} · Score ${a.score_normalized.toFixed(4)} · ${a.date_created_utc}${a.already_in_subevent ? ` · In Subevent: ${a.already_in_subevent}` : ''}`)}">
+              <input type="checkbox" class="subevent-sec-asset-cb" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" ${isChecked ? 'checked' : ''} style="cursor: pointer; flex-shrink: 0;" />
+              <img class="tag-db-asset-thumb btn-subevent-preview-asset" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
+              <div class="btn-subevent-preview-asset" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" style="min-width: 0; flex: 1; cursor: pointer;">
+                <div class="font-mono" style="font-size: 0.67rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  ${escapeHtml(a.original_filename)}
+                </div>
+                <div class="font-mono text-muted" style="font-size: 0.61rem; display: flex; align-items: center; gap: 0.2rem; flex-wrap: wrap;">
+                  <span style="color: #fbbf24; font-weight: 600;">${a.qualified ? '★ ' : ''}${a.score_normalized.toFixed(4)}</span>
+                  <span>· ${escapeHtml((a.date_created_utc || '').slice(11, 16) || (a.date_created_utc || '').slice(0, 10))}</span>
+                  ${a.is_duplicate_copy ? '<span class="badge badge-xs badge-amber font-mono" style="font-size:0.54rem;">♻️ Dup</span>' : ''}
+                </div>
+              </div>
+            </div>
+          `;
+        })
+        .join('');
+      const extraCnt = Math.max(0, sec.assets.length - 12);
+
+      return `
+        <div class="subevent-section-card" data-section-id="${escapeHtml(sec.section_id)}" style="padding: 0.68rem 0.8rem; border-radius: 8px; background: ${
+          isSecSelected ? 'rgba(6, 182, 212, 0.11)' : 'rgba(15, 23, 42, 0.65)'
+        }; border: 1px solid ${
+          isSecSelected
+            ? 'rgba(6, 182, 212, 0.68)'
+            : sec.has_parent_peak_asset
+              ? 'rgba(245, 158, 11, 0.48)'
+              : 'rgba(148, 163, 184, 0.22)'
+        }; display: flex; flex-direction: column; gap: 0.5rem;">
+          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 0.65rem; flex-wrap: wrap;">
+            <div style="display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; flex: 1;">
+              <input type="checkbox" class="subevent-section-toggle-cb" data-section-id="${escapeHtml(sec.section_id)}" ${isSecSelected ? 'checked' : ''} style="margin-top: 0.2rem; cursor: pointer;" title="Check multiple sections to combine them into a single Subevent" />
+              <div style="min-width: 0; flex: 1;">
+                <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                  <span class="badge badge-xs badge-cyan font-mono">#${sec.index}</span>
+                  <strong style="font-size: 0.84rem; color: var(--text-primary);">${escapeHtml(sec.title)}</strong>
+                  ${peakBadge}
+                  ${assignedBadge}
+                </div>
+                <div class="font-mono text-muted" style="font-size: 0.7rem; margin-top: 0.16rem;">
+                  ${escapeHtml(sec.basis_label)}
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.38rem; flex-wrap: wrap; margin-top: 0.3rem;">
+                  <span class="badge badge-xs badge-amber font-mono" style="font-weight: 700;">⭐ Avg ${sec.avg_score.toFixed(4)}</span>
+                  <span class="badge badge-xs badge-green font-mono">★ Qual Avg ${sec.qualified_avg_score.toFixed(4)} (${sec.qualified_assets}/${sec.total_assets})</span>
+                  <span class="badge badge-xs badge-outline font-mono">Range ${sec.min_score.toFixed(3)}..${sec.max_score.toFixed(3)}</span>
+                  <span class="badge badge-xs badge-blue font-mono" title="Aesthetic rank score = qual_avg * ln(qual_count + 1)">🏆 Rank ${sec.rank_score.toFixed(2)}</span>
+                  <span class="badge badge-xs badge-purple font-mono" title="Expected curated keepers if split into its own Subevent: round(ln(${sec.unique_assets || sec.total_assets})) = ${sec.expected_curated_count}">🎯 Exp Cur: ${sec.expected_curated_count} (ln ${sec.unique_assets || sec.total_assets}=${sec.expected_curated_ln.toFixed(2)})</span>
+                </div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0;">
+              ${
+                secCheckedCount > 0
+                  ? `<span class="badge badge-xs badge-cyan font-mono">${secCheckedCount} checked</span>`
+                  : ''
+              }
+              <button type="button" class="btn btn-xs ${isSecSelected ? 'btn-purple' : allAssigned ? 'btn-outline' : 'btn-cyan'} btn-identify-subevent-sec" data-section-id="${escapeHtml(sec.section_id)}">
+                ${isSecSelected ? '✓ Active in Builder' : '🌿 Identify Subevent'}
+              </button>
+            </div>
+          </div>
+          <div class="tag-db-assets-grid" style="max-height: 175px; overflow-y: auto;">
+            ${thumbsHtml}
+          </div>
+          ${
+            extraCnt > 0
+              ? `<div class="font-mono text-muted" style="font-size: 0.66rem;">+${extraCnt} more asset(s) in this section — click any thumbnail to browse &amp; toggle all ${sec.assets.length} section assets in the Lightbox.</div>`
+              : ''
+          }
+        </div>
+      `;
+    })
+    .join('');
+
+  listEl.querySelectorAll<HTMLInputElement>('.subevent-section-toggle-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const sid = cb.dataset.sectionId || '';
+      const sec = data.sections.find(s => s.section_id === sid);
+      if (sec) selectSubeventSectionForBuilder(sec, true);
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-identify-subevent-sec').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sid = btn.dataset.sectionId || '';
+      const sec = data.sections.find(s => s.section_id === sid);
+      if (sec) selectSubeventSectionForBuilder(sec, false);
+    });
+  });
+
+  listEl.querySelectorAll<HTMLInputElement>('.subevent-sec-asset-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const sid = cb.dataset.sectionId || '';
+      const aid = cb.dataset.assetId || '';
+      if (!aid) return;
+      const hadAnyBefore = splitSubeventsSelectedAssetIds.size > 0;
+      if (cb.checked) {
+        splitSubeventsSelectedAssetIds.add(aid);
+        if (sid) splitSubeventsActiveSectionIds.add(sid);
+      } else {
+        splitSubeventsSelectedAssetIds.delete(aid);
+      }
+      if (!hadAnyBefore && splitSubeventsSelectedAssetIds.size > 0) {
+        const activeSecs = data.sections.filter(s => splitSubeventsActiveSectionIds.has(s.section_id));
+        initSubeventTagsFromParentAndSections(activeSecs);
+      }
+      renderSplitSubeventsModalContent();
+    });
+  });
+
+  listEl.querySelectorAll<HTMLElement>('.btn-subevent-preview-asset').forEach(el => {
+    el.addEventListener('click', () => {
+      const sid = el.dataset.sectionId || '';
+      const aid = el.dataset.assetId || '';
+      const sec = data.sections.find(s => s.section_id === sid);
+      if (!sec || !aid) return;
+      openCleanupPreviewModal(aid, {
+        assetIds: sec.assets.map(x => x.asset_id),
+        groupLabel: `${sec.title} · Avg ${sec.avg_score.toFixed(4)}`,
+        hideMarkRemoved: true,
+        selectedIds: splitSubeventsSelectedAssetIds,
+        defaultSort: 'score',
+        onSelectionChange: () => {
+          if (splitSubeventsSelectedAssetIds.size > 0 && !splitSubeventsActiveSectionIds.size) {
+            splitSubeventsActiveSectionIds.add(sec.section_id);
+            initSubeventTagsFromParentAndSections([sec]);
+          }
+          renderSplitSubeventsModalContent();
+        }
+      });
+    });
+  });
+
+  // Render Subevent Builder panel when assets are selected
+  const selTotal = splitSubeventsSelectedAssetIds.size;
+  if (builderEl) {
+    if (selTotal > 0) {
+      builderEl.style.display = 'flex';
+      const { expected, lnRaw } = computeExpectedCuratedStats(selTotal);
+      const activeSecs = data.sections.filter(s => splitSubeventsActiveSectionIds.has(s.section_id));
+      if (builderHeadEl) {
+        builderHeadEl.textContent =
+          activeSecs.length === 1
+            ? `Identify Subevent from Section #${activeSecs[0].index} (${activeSecs[0].title})`
+            : `Identify Subevent (${activeSecs.length || 1} section(s) · ${selTotal} assets)`;
+      }
+      if (builderCntEl) {
+        builderCntEl.textContent = `${selTotal} selected · 🎯 Curate Target After Split: ${expected} (ln=${lnRaw.toFixed(2)})`;
+      }
+      if (submitBtn) {
+        submitBtn.disabled = isSubmittingCreateSubevent;
+        submitBtn.textContent = `🌿 Create Subevent in Moments (${selTotal} assets)`;
+      }
+
+      // Render quick-pick chips for Parent Event's Location & Activity tags so user can pick the city/activity in 1 click
+      const parentLocAndAct = (data.parent_saved_tags || []).filter(
+        t => t.category === 'location' || t.category === 'activity'
+      );
+      if (locHintsEl) {
+        if (parentLocAndAct.length > 0) {
+          locHintsEl.style.display = 'flex';
+          locHintsEl.innerHTML = `
+            <span class="font-mono text-muted">Parent Event Clues (click to add/toggle on Subevent):</span>
+            ${parentLocAndAct
+              .map(pt => {
+                const active = subeventTagState.tags.some(
+                  st => st.tag_value.toLowerCase() === pt.tag_value.toLowerCase()
+                );
+                return `<button type="button" class="disjoint-target-chip${active ? ' active' : ''} btn-subevent-parent-clue" data-cat="${escapeHtml(pt.category)}" data-val="${escapeHtml(pt.tag_value)}">
+                  ${pt.category === 'location' ? '📍' : '🎯'} ${escapeHtml(pt.tag_value)}
+                </button>`;
+              })
+              .join('')}
+          `;
+          locHintsEl.querySelectorAll<HTMLButtonElement>('.btn-subevent-parent-clue').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const cat = (btn.dataset.cat || 'location') as MomentTagItem['category'];
+              const val = (btn.dataset.val || '').trim();
+              if (!val) return;
+              const idx = subeventTagState.tags.findIndex(t => t.tag_value.toLowerCase() === val.toLowerCase());
+              if (idx >= 0) {
+                subeventTagState.tags.splice(idx, 1);
+              } else {
+                addTagToEngineState(subeventTagState, cat, val, true);
+              }
+              subeventTagState.onTagsChanged();
+              renderSplitSubeventsModalContent();
+            });
+          });
+        } else {
+          locHintsEl.style.display = 'none';
+          locHintsEl.innerHTML = '';
+        }
+      }
+      renderTaggingEngineCard(subeventTagState);
+    } else {
+      builderEl.style.display = 'none';
+    }
+  }
+}
+
+async function submitCreateSubevent(): Promise<void> {
+  if (isSubmittingCreateSubevent || !splitSubeventsParentMoment) return;
+  const nameInp = document.getElementById('split-subevents-name-input') as HTMLInputElement | null;
+  const statusEl = document.getElementById('split-subevents-status');
+  const submitBtn = document.getElementById('btn-submit-create-subevent') as HTMLButtonElement | null;
+
+  const subName = (nameInp?.value || '').trim();
+  const assetIds = Array.from(splitSubeventsSelectedAssetIds);
+  if (!subName) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">⚠️ Enter or compose a Subevent Moment name above.</span>';
+    }
+    return;
+  }
+  if (!assetIds.length) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = '<span class="text-red">⚠️ Select at least 1 asset for the Subevent.</span>';
+    }
+    return;
+  }
+
+  isSubmittingCreateSubevent = true;
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Creating Subevent...';
+  }
+  if (statusEl) {
+    statusEl.style.display = 'flex';
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Creating sibling Subevent <code>Moments/${escapeHtml(subName)}</code> (${assetIds.length} assets) in Media Organizer...</span>`;
+  }
+
+  beginApplePhotosSyncLock(`🍎 Creating Subevent Moments/${subName} in Media Organizer…`);
+  try {
+    const cleanTags = subeventTagState.tags.map(t => ({
+      category: t.category,
+      tag_value: t.tag_value,
+      include_in_name: t.include_in_name
+    }));
+    const res = await fetch('/api/media/memories/create-subevent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        parent_moment: splitSubeventsParentMoment,
+        subevent_name: subName,
+        asset_ids: assetIds,
+        tags: cleanTags
+      })
+    });
+    const out: CreateSubeventResponse = await res.json();
+    cancelApplePhotosSyncLock();
+    if (!res.ok || !out.ok) {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(out.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    unifiedGroupingAssetsCache.clear();
+    allGroupingsLoaded = false;
+    await Promise.all([
+      loadSplitSubeventsSuggestions(splitSubeventsParentMoment, splitSubeventsGranularity),
+      fetchPlannerOverview(true, 'm'),
+      fetchMemoriesFolders(),
+      ...(activePlannerModeView === 'g' ? [fetchAllUnifiedGroupings(true)] : [])
+    ]);
+    if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
+
+    if (statusEl) {
+      const expCur = out.expected_curated_count ?? computeExpectedCuratedStats(assetIds.length).expected;
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `
+        <span class="text-green" style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; width: 100%;">
+          <span>✅ Created Subevent <code>Moments/${escapeHtml(subName)}</code> (${out.asset_count ?? assetIds.length} assets · 🎯 Expected Curated: ${expCur}).</span>
+          <button type="button" class="btn btn-xs btn-purple" id="btn-curate-just-created-subevent">🎨 Curate "${escapeHtml(subName)}" (${expCur})</button>
+        </span>
+      `;
+      document.getElementById('btn-curate-just-created-subevent')?.addEventListener('click', () => {
+        closeSplitSubeventsModal();
+        void openResolveDisjointModal(subName, '', { isHistoricalMoment: true, isCurateM200: true });
+      });
+    }
+  } catch (err: any) {
+    cancelApplePhotosSyncLock();
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  } finally {
+    isSubmittingCreateSubevent = false;
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '🌿 Create Subevent in Moments';
+    }
+  }
 }
 

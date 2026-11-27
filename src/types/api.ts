@@ -670,6 +670,8 @@ export interface DisjointDetailResponse {
   moment_name?: string;
   historical_min?: number;
   suggested_target?: string;
+  has_subevents?: boolean;
+  parent_moment_name?: string;
   assets?: DisjointDetailAsset[];
   albums_present?: Array<{ parent: string; asset_count: number; full_path: string }>;
   name_suggestion?: DisjointNameSuggestion;
@@ -918,6 +920,17 @@ export interface UnifiedGroupingItem {
   is_duplicate_group?: boolean;
   is_deduped_group?: boolean;
   duplicate_of_moment?: string;
+  has_subevents?: boolean;
+  parent_moment_name?: string;
+  unsplit_assets_count?: number;
+  subevents?: Array<{
+    name: string;
+    moment_status: string;
+    total_assets: number;
+    curated_count: number;
+    published_count: number;
+    avg_score: number;
+  }>;
   manually_curated?: boolean;
   curation_matches_log?: boolean;
   curation_mismatch_count?: number;
@@ -967,6 +980,94 @@ export interface UnifiedGroupingItem {
   asset_ids?: string[];
   preview_assets: UnifiedGroupingPreviewAsset[];
   inline_assets?: UnifiedGroupingAssetItem[];
+}
+
+export interface SubeventSectionAssetItem {
+  asset_id: string;
+  original_filename: string;
+  score_normalized: number;
+  qualified: boolean;
+  date_created_utc: string;
+  month: string;
+  media_type: 'photo' | 'video';
+  duration: number;
+  file_size_bytes: number;
+  camera_model: string;
+  primary_owner: string;
+  location_label?: string;
+  is_duplicate_copy?: boolean;
+  duplicate_keeper_filename?: string;
+  already_in_subevent?: string;
+  asset_tags?: MomentTagItem[];
+}
+
+export interface SubeventSuggestionSection {
+  section_id: string;
+  index: number;
+  title: string;
+  basis_label: string;
+  location_hint?: string;
+  date_label: string;
+  time_of_day?: string;
+  time_range: string;
+  total_assets: number;
+  unique_assets: number;
+  qualified_assets: number;
+  unsplit_assets: number;
+  assigned_subevents: string[];
+  avg_score: number;
+  qualified_avg_score: number;
+  min_score: number;
+  max_score: number;
+  rank_score: number;
+  expected_curated_count: number;
+  expected_curated_ln: number;
+  has_parent_peak_asset: boolean;
+  peak_asset_id: string;
+  peak_asset_filename: string;
+  peak_asset_score: number;
+  assets: SubeventSectionAssetItem[];
+}
+
+export interface SubeventSuggestionsResponse {
+  ok: boolean;
+  error?: string;
+  moment_name: string;
+  granularity: 'auto' | '1h' | '4h' | 'day';
+  historical_min: number;
+  total_assets: number;
+  unsplit_assets: number;
+  parent_peak_asset?: {
+    asset_id: string;
+    filename: string;
+    score: number;
+  };
+  parent_saved_tags?: MomentTagItem[];
+  family_member_pool?: string[];
+  tag_db_counts?: Record<string, { assets: number; moments: number }>;
+  tag_catalog_by_category?: Record<string, TagCatalogItem[]>;
+  existing_subevents?: Array<{
+    subevent_name: string;
+    moment_status: string;
+    curated_count: number;
+    total_assets: number;
+  }>;
+  sections: SubeventSuggestionSection[];
+}
+
+export interface CreateSubeventResponse {
+  ok: boolean;
+  error?: string;
+  library_target?: string;
+  parent_moment?: string;
+  subevent_name?: string;
+  full_path?: string;
+  asset_count?: number;
+  photos_added?: number;
+  newly_imported?: number;
+  expected_curated_count?: number;
+  expected_curated_ln?: number;
+  tags_saved?: number;
 }
 
 export interface AllGroupingsResponse {
