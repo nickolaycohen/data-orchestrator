@@ -498,6 +498,7 @@ export interface MemoriesFoldersResponse {
   scope_counts?: {
     moments?: number;
     curated?: number;
+    published?: number;
     to_be_curated?: number;
     folders?: number;
     all?: number;
@@ -551,6 +552,8 @@ export interface PublishMomentInfoResponse {
   target_batch_size?: number;
   curated_dir?: string;
   curated_dir_exists?: boolean;
+  published_dir?: string;
+  published_dir_exists?: boolean;
   pub_rec_dir?: string;
   pub_rec_dir_exists?: boolean;
   pub_rec_sync?: {
@@ -581,6 +584,16 @@ export interface PublishMomentResponse {
   new_stage?: string;
   shutterfly_url?: string;
   youtube_url?: string;
+  published_folder_move?: {
+    ok?: boolean;
+    target_album_path?: string;
+    curated_album_removed?: boolean;
+    remaining_in_curated?: number;
+    lacie_published_dir?: string;
+    lacie_moved_files?: number;
+    lacie_curated_removed?: boolean;
+    photos_warning?: string | null;
+  };
   pub_rec_sync?: {
     synced?: boolean;
     copied?: number;
@@ -881,6 +894,7 @@ export interface UnifiedGroupingAssetItem {
   in_moments?: boolean;
   in_to_be_curated?: boolean;
   in_curated?: boolean;
+  in_published_folder?: boolean;
   is_published?: boolean;
   in_organizer_library?: boolean;
   organizer_folders?: string[];
@@ -920,6 +934,7 @@ export interface UnifiedGroupingItem {
   in_organizer_library?: boolean;
   organizer_mapped_count?: number;
   curated_folder_exists?: boolean;
+  published_folder_exists?: boolean;
   pub_rec_folder_exists?: boolean;
   total_assets: number;
   event_total_assets?: number;

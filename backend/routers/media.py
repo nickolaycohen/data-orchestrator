@@ -25,8 +25,17 @@ ORGANIZER_PHOTOS_LIBRARY_CANDIDATES = [
     Path.home() / "Pictures" / "MediaOrganizer.photoslibrary",
 ]
 CURATED_LACIE_DIR = Path("/Volumes/LaCie/Media Organizer/Curated")
+PUBLISHED_LACIE_DIR = Path("/Volumes/LaCie/Media Organizer/Published")
 PUBLISHING_RECOMMENDATION_DIR = Path("/Volumes/LaCie/Media Organizer/Publishing Recommendation")
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mpg"}
+_DEFAULT_PUBLISHED_LACIE_DIR = PUBLISHED_LACIE_DIR
+
+
+def _get_published_lacie_dir() -> Path:
+    """Resolve LaCie Published directory (auto-following CURATED_LACIE_DIR.parent in sandboxed/custom environments)."""
+    if PUBLISHED_LACIE_DIR != _DEFAULT_PUBLISHED_LACIE_DIR:
+        return PUBLISHED_LACIE_DIR
+    return CURATED_LACIE_DIR.parent / "Published"
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -2902,7 +2911,7 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
         WHERE moa.is_folder = 0
-          AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'memories', 'generic moments')
+          AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('moments', 'curated', 'published', 'tobecurated', 'memories', 'generic moments')
         """,
         """
         SELECT a.asset_id
@@ -3586,7 +3595,8 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
         WHERE (
             moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
-            OR LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
+            OR moa.full_path LIKE 'Media Organizer on LaCie/Published/%'
+            OR LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
         )
           AND LOWER(moa.album_name) NOT IN ('skippublishing', 'ignore', 'topscore excluded', 'highrated assets')
         """
@@ -3749,8 +3759,14 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
 
         fs_bases: set[str] = set()
         fs_curated_exists = False
-        if lacie_mounted:
-            for cand_dir in (CURATED_LACIE_DIR / name, CURATED_LACIE_DIR / name_stripped):
+        pub_lacie_dir = _get_published_lacie_dir()
+        if lacie_mounted or pub_lacie_dir.exists():
+            for cand_dir in (
+                CURATED_LACIE_DIR / name,
+                CURATED_LACIE_DIR / name_stripped,
+                pub_lacie_dir / name,
+                pub_lacie_dir / name_stripped,
+            ):
                 if cand_dir.is_dir():
                     fs_curated_exists = True
                     try:
@@ -3760,7 +3776,6 @@ def _compute_mode_m_from_db(cur, db_hist_min: float, last_th_utc: Optional[str])
                                     fs_bases.add(os.path.splitext(entry.name)[0].lower())
                     except OSError:
                         pass
-                    break
         fs_count = len(fs_bases)
 
         if stage == "M500" or (pub_count >= md["total_qualified"] and md["total_qualified"] > 0):
@@ -5935,6 +5950,7 @@ def query_memories_folders(
                               OR LOWER(full_path) LIKE 'media organizer on lacie/generic moments/%'
                         THEN 1 ELSE 0 END) AS moments_cnt,
                     SUM(CASE WHEN LOWER(COALESCE(parent_folder_name, '')) = 'curated' THEN 1 ELSE 0 END) AS curated_cnt,
+                    SUM(CASE WHEN LOWER(COALESCE(parent_folder_name, '')) = 'published' THEN 1 ELSE 0 END) AS published_cnt,
                     SUM(CASE WHEN LOWER(COALESCE(parent_folder_name, '')) = 'tobecurated' THEN 1 ELSE 0 END) AS tbc_cnt,
                     SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END) AS folders_cnt,
                     COUNT(*) AS all_cnt
@@ -5944,9 +5960,10 @@ def query_memories_folders(
             scope_counts = {
                 "moments": int(counts_row[0] or 0) if counts_row else 0,
                 "curated": int(counts_row[1] or 0) if counts_row else 0,
-                "to_be_curated": int(counts_row[2] or 0) if counts_row else 0,
-                "folders": int(counts_row[3] or 0) if counts_row else 0,
-                "all": int(counts_row[4] or 0) if counts_row else 0,
+                "published": int(counts_row[2] or 0) if counts_row else 0,
+                "to_be_curated": int(counts_row[3] or 0) if counts_row else 0,
+                "folders": int(counts_row[4] or 0) if counts_row else 0,
+                "all": int(counts_row[5] or 0) if counts_row else 0,
             }
 
             where_clauses = []
@@ -5964,6 +5981,11 @@ def query_memories_folders(
                 where_clauses.append(
                     "(LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated' "
                     "OR LOWER(moa.full_path) LIKE 'media organizer on lacie/curated/%')"
+                )
+            elif scope_clean == "published":
+                where_clauses.append(
+                    "(LOWER(COALESCE(moa.parent_folder_name, '')) = 'published' "
+                    "OR LOWER(moa.full_path) LIKE 'media organizer on lacie/published/%')"
                 )
             elif scope_clean == "to_be_curated":
                 where_clauses.append(
@@ -6356,20 +6378,34 @@ on run argv
             repeat with delName in deleteAlbumNames
                 set dStr to delName as string
                 if dStr is not "" then
-                    repeat with fCheck in {"Moments", "ToBeCurated", "Curated", "Highrated assets", "Memories", "Generic Moments"}
-                        if exists folder (fCheck as string) then
-                            set subF to folder (fCheck as string)
-                            if exists album dStr of subF then
-                                set candAlb to album dStr of subF
-                                if (id of candAlb) is not (id of targetAlbum) then
-                                    try
-                                        delete album id (id of candAlb)
-                                        set deletedCount to deletedCount + 1
-                                    end try
+                    if dStr contains ":::" then
+                        set oldD to AppleScript's text item delimiters
+                        set AppleScript's text item delimiters to ":::"
+                        set scopedFolder to (text item 1 of dStr) as string
+                        set scopedAlb to (text item 2 of dStr) as string
+                        set AppleScript's text item delimiters to oldD
+                        set checkFoldersList to {scopedFolder}
+                        set targetDelAlb to scopedAlb
+                    else
+                        set checkFoldersList to {"Moments", "ToBeCurated", "Curated", "Published", "Highrated assets", "Memories", "Generic Moments"}
+                        set targetDelAlb to dStr
+                    end if
+                    if targetDelAlb is not "" then
+                        repeat with fCheck in checkFoldersList
+                            if exists folder (fCheck as string) then
+                                set subF to folder (fCheck as string)
+                                if exists album targetDelAlb of subF then
+                                    set candAlb to album targetDelAlb of subF
+                                    if (id of candAlb) is not (id of targetAlbum) then
+                                        try
+                                            delete album id (id of candAlb)
+                                            set deletedCount to deletedCount + 1
+                                        end try
+                                    end if
                                 end if
                             end if
-                        end if
-                    end repeat
+                        end repeat
+                    end if
                 end if
             end repeat
         end if
@@ -6567,6 +6603,16 @@ def _reconcile_organizer_albums_from_photos_db(
                     ).fetchall()
                 }
 
+                completed_pub_moments: set[str] = set()
+                try:
+                    for (m_pub_nm,) in cur.execute(
+                        "SELECT TRIM(LOWER(moment_name)) FROM curated_moments WHERE UPPER(COALESCE(memory_stage, '')) = 'M500' AND COALESCE(photos_curated_exists, 0) = 0"
+                    ).fetchall():
+                        if m_pub_nm:
+                            completed_pub_moments.add(m_pub_nm)
+                except sqlite3.OperationalError:
+                    pass
+
                 for z_pk, z_title, par_title, full_p, z_kind, _depth in album_rows:
                     if int(z_kind) != 2:
                         continue
@@ -6578,10 +6624,13 @@ def _reconcile_organizer_albums_from_photos_db(
                     member_src_ids = [org_to_src[u] for u in member_org_uuids if u in org_to_src]
                     key_lc = (alb_nm.lower(), par_nm.lower())
                     ex_info = existing_org_keys.get(key_lc)
+                    # Do not resurrect Curated/<moment> from uncheckpointed Photos.sqlite WAL right after moving it to Published/<moment>
+                    if ex_info is None and par_nm.lower() == "curated" and alb_nm.lower() in completed_pub_moments:
+                        continue
                     if ex_info is None or ex_info[1] < len(member_src_ids):
                         alb_pk, _ = _upsert_organizer_album_in_db(cur, par_nm, alb_nm, member_src_ids)
                         dirty_db = True
-                        if par_nm.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments") and alb_nm.lower() not in ("ignore", "skippublishing", "topscore excluded", "highrated assets"):
+                        if par_nm.lower() in ("moments", "memories", "curated", "published", "tobecurated", "generic moments") and alb_nm.lower() not in ("ignore", "skippublishing", "topscore excluded", "highrated assets"):
                             try:
                                 m_ex = cur.execute(
                                     "SELECT 1 FROM moments WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?)) LIMIT 1",
@@ -7011,7 +7060,7 @@ def _compute_moment_event_pool_count(cur: sqlite3.Cursor, moment_name: str, fall
             JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
             WHERE moa.is_folder = 0
               AND LOWER(TRIM(moa.album_name)) = ?
-              AND LOWER(COALESCE(moa.parent_folder_name, 'moments')) IN ('moments', 'curated', 'tobecurated', 'memories', 'generic moments')
+              AND LOWER(COALESCE(moa.parent_folder_name, 'moments')) IN ('moments', 'curated', 'published', 'tobecurated', 'memories', 'generic moments')
             """,
             (m_lc,),
         ).fetchall():
@@ -7146,7 +7195,7 @@ def activate_or_create_organizer_library():
 
     init_script = r'''
     tell application "Photos"
-        repeat with fName in {"Moments", "ToBeCurated", "Curated", "Memories", "Generic Moments"}
+        repeat with fName in {"Moments", "ToBeCurated", "Curated", "Published", "Highrated assets", "Memories", "Generic Moments"}
             set sName to fName as string
             if not (exists folder sName) then
                 make new folder named sName
@@ -7301,7 +7350,7 @@ class CuratePublishBatchRequest(BaseModel):
 
 class OpenCuratedFolderRequest(BaseModel):
     moment_name: str
-    folder_kind: Optional[str] = "pub_rec"  # "pub_rec" | "curated"
+    folder_kind: Optional[str] = "pub_rec"  # "pub_rec" | "curated" | "published"
 
 
 class SyncPublishingRecRequest(BaseModel):
@@ -7326,7 +7375,8 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
         FROM media_organizer_album_assets moaa
         JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
         WHERE moa.full_path LIKE 'Media Organizer on LaCie/Curated/%'
-           OR LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
+           OR moa.full_path LIKE 'Media Organizer on LaCie/Published/%'
+           OR LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
         """
     )
     all_curated_album_aids = {r[0] for r in cur.fetchall()}
@@ -7402,7 +7452,7 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
                    FROM media_organizer_album_assets moaa
                    JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
                    WHERE moa.is_folder = 0
-                     AND LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
+                     AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
                      AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
                )
             """,
@@ -7417,7 +7467,7 @@ def _get_curated_asset_rows_for_moment(cur: sqlite3.Cursor, moment_name: str):
     # Also include rows recorded directly in moment_exports if missing above
     try:
         me_cols = {r[1] for r in cur.execute("PRAGMA table_info(moment_exports)").fetchall()}
-        stage_clause = "AND COALESCE(me.curation_stage, 'curated') = 'curated'" if "curation_stage" in me_cols else ""
+        stage_clause = "AND COALESCE(me.curation_stage, 'curated') IN ('curated', 'published')" if "curation_stage" in me_cols else ""
         cur.execute(
             f"""
             SELECT me.asset_id, COALESCE(v.original_filename, a.original_filename, ''), COALESCE(v.score_normalized, 0.0)
@@ -7451,6 +7501,7 @@ def _sync_publishing_recommendation_for_moment(
 ) -> dict:
     """Sync /Volumes/LaCie/Media Organizer/Publishing Recommendation/<moment> from Curated/<moment> matching CLI logic."""
     src_dir = CURATED_LACIE_DIR / moment_name
+    pub_src_dir = _get_published_lacie_dir() / moment_name
     dest_dir = PUBLISHING_RECOMMENDATION_DIR / moment_name
 
     if not PUBLISHING_RECOMMENDATION_DIR.parent.exists():
@@ -7480,7 +7531,7 @@ def _sync_publishing_recommendation_for_moment(
                 SELECT 1 FROM media_organizer_albums
                 WHERE is_folder = 0
                   AND COALESCE(library_scope, 'all_media') = 'organizer'
-                  AND LOWER(COALESCE(parent_folder_name, '')) = 'curated'
+                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('curated', 'published')
                   AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
                 LIMIT 1
                 """,
@@ -7510,14 +7561,18 @@ def _sync_publishing_recommendation_for_moment(
         }
 
     base_to_files: dict[str, list[str]] = {}
-    if src_dir.exists() and src_dir.is_dir():
-        try:
-            for entry in os.listdir(src_dir):
-                if not entry.startswith(".") and (src_dir / entry).is_file():
-                    b = os.path.splitext(entry)[0].lower()
-                    base_to_files.setdefault(b, []).append(entry)
-        except Exception:
-            pass
+    file_to_src_path: dict[str, Path] = {}
+    for cand_src in (src_dir, pub_src_dir):
+        if cand_src.exists() and cand_src.is_dir():
+            try:
+                for entry in os.listdir(cand_src):
+                    if not entry.startswith(".") and (cand_src / entry).is_file():
+                        b = os.path.splitext(entry)[0].lower()
+                        if entry not in file_to_src_path:
+                            file_to_src_path[entry] = cand_src / entry
+                            base_to_files.setdefault(b, []).append(entry)
+            except Exception:
+                pass
 
     proposed_files: list[str] = []
     for _aid, fn, _sc in top_batch:
@@ -7570,7 +7625,7 @@ def _sync_publishing_recommendation_for_moment(
 
     copied_cnt = 0
     for f in sync_files:
-        src_f = src_dir / f
+        src_f = file_to_src_path.get(f, src_dir / f)
         dst_f = dest_dir / f
         if src_f.exists() and not dst_f.exists():
             shutil.copy2(src_f, dst_f)
@@ -7749,20 +7804,25 @@ def get_moment_publish_info(moment_name: str):
             unpublished_rows = [(aid, fn, sc) for aid, fn, sc, is_pub in rows if not is_pub]
 
             moment_dir = CURATED_LACIE_DIR / m_name
+            pub_moment_dir = _get_published_lacie_dir() / m_name
             dir_exists = moment_dir.exists() and moment_dir.is_dir()
+            pub_dir_exists = pub_moment_dir.exists() and pub_moment_dir.is_dir()
             local_by_base: dict[str, list[str]] = {}
-            if dir_exists:
-                try:
-                    for entry in os.listdir(moment_dir):
-                        if not entry.startswith(".") and (moment_dir / entry).is_file():
-                            b = os.path.splitext(entry)[0].lower()
-                            local_by_base.setdefault(b, []).append(entry)
-                except Exception:
-                    pass
+            for scan_d in (moment_dir, pub_moment_dir):
+                if scan_d.exists() and scan_d.is_dir():
+                    try:
+                        for entry in os.listdir(scan_d):
+                            if not entry.startswith(".") and (scan_d / entry).is_file():
+                                b = os.path.splitext(entry)[0].lower()
+                                if entry not in local_by_base.get(b, []):
+                                    local_by_base.setdefault(b, []).append(entry)
+                    except Exception:
+                        pass
 
             assets_out = _enrich_publish_queue_assets(cur, m_name, unpublished_rows, local_by_base)
 
             pub_rec_dir = PUBLISHING_RECOMMENDATION_DIR / m_name
+            effective_src_dir = pub_moment_dir if (pub_dir_exists and not dir_exists) else moment_dir
             return {
                 "ok": True,
                 "moment_name": m_name,
@@ -7773,8 +7833,10 @@ def get_moment_publish_info(moment_name: str):
                 "published_count": len(moment_pub_aids),
                 "unpublished_count": len(unpublished_rows),
                 "target_batch_size": min(9, len(unpublished_rows)),
-                "curated_dir": str(moment_dir),
-                "curated_dir_exists": dir_exists,
+                "curated_dir": str(effective_src_dir),
+                "curated_dir_exists": dir_exists or pub_dir_exists,
+                "published_dir": str(pub_moment_dir),
+                "published_dir_exists": pub_dir_exists,
                 "pub_rec_dir": str(pub_rec_dir),
                 "pub_rec_dir_exists": pub_rec_dir.exists() and pub_rec_dir.is_dir(),
                 "pub_rec_sync": sync_res,
@@ -7895,15 +7957,23 @@ def curate_publish_batch_action(req: CuratePublishBatchRequest):
 
 @router.post("/memories/open-curated-folder")
 def open_curated_moment_folder(req: OpenCuratedFolderRequest):
-    """Open Publishing Recommendation or Curated Moment folder on LaCie in macOS Finder."""
+    """Open Publishing Recommendation, Curated, or Published Moment folder on LaCie in macOS Finder."""
     m_name = (req.moment_name or "").strip()
     kind = (req.folder_kind or "pub_rec").strip().lower()
-    base_dir = CURATED_LACIE_DIR if kind == "curated" else PUBLISHING_RECOMMENDATION_DIR
+    pub_lacie_dir = _get_published_lacie_dir()
+    if kind == "published":
+        base_dir = pub_lacie_dir
+    elif kind == "curated":
+        base_dir = CURATED_LACIE_DIR
+    else:
+        base_dir = PUBLISHING_RECOMMENDATION_DIR
     if not m_name:
         target = base_dir
     else:
         target = base_dir / m_name
-        if not target.exists() and base_dir.exists():
+        if not target.exists() and kind == "curated" and (pub_lacie_dir / m_name).exists():
+            target = pub_lacie_dir / m_name
+        elif not target.exists() and base_dir.exists():
             target = base_dir
     if not target.exists():
         return {"ok": False, "error": f"Folder not found: {target}"}
@@ -7971,6 +8041,173 @@ def sync_publishing_recommendations(req: SyncPublishingRecRequest):
             conn.close()
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _move_published_moment_to_published_folder(
+    cur: sqlite3.Cursor,
+    m_name: str,
+    published_ids: list[str],
+    remaining_curated_ids: list[str],
+    published_filenames: list[str],
+) -> dict:
+    """Move published Moment/assets from Curated/<m_name> to Published/<m_name> in Media Organizer.photoslibrary and on LaCie.
+    Preserves Highrated assets/<m_name> and keeps any unpublished curated assets (M450 partial publish) in Curated/<m_name>.
+    """
+    clean_pub_ids: list[str] = []
+    seen_p: set[str] = set()
+    for raw_id in published_ids or []:
+        s = (raw_id or "").strip()
+        if s and s not in seen_p:
+            seen_p.add(s)
+            clean_pub_ids.append(s)
+
+    clean_rem_ids: list[str] = []
+    seen_r: set[str] = set(seen_p)
+    for raw_id in remaining_curated_ids or []:
+        s = (raw_id or "").strip()
+        if s and s not in seen_r:
+            seen_r.add(s)
+            clean_rem_ids.append(s)
+
+    photos_warning: Optional[str] = None
+    target_album_path = f"Published/{m_name}"
+    curated_album_removed = not bool(clean_rem_ids)
+
+    if clean_pub_ids:
+        # Sync published assets into Media Organizer.photoslibrary / Published / <m_name> (creates 'Published' folder if absent)
+        # and remove Curated/<m_name> (plus ToBeCurated/<m_name> if any), leaving Highrated assets/<m_name> untouched!
+        del_scoped = [f"Curated:::{m_name}", f"ToBeCurated:::{m_name}"]
+        sync_pub = _sync_assets_to_organizer_library(
+            cur,
+            "Published",
+            m_name,
+            clean_pub_ids,
+            allow_existing=True,
+            delete_organizer_albums=del_scoped,
+        )
+        if not sync_pub.get("ok"):
+            photos_warning = sync_pub.get("error")
+            # Still maintain local organizer album state if this Moment already lived in Media Organizer
+            had_org = bool(
+                cur.execute(
+                    """
+                    SELECT 1 FROM media_organizer_albums
+                    WHERE is_folder = 0
+                      AND COALESCE(library_scope, 'all_media') = 'organizer'
+                      AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                    LIMIT 1
+                    """,
+                    (m_name,),
+                ).fetchone()
+            )
+            if had_org:
+                _, target_album_path = _upsert_organizer_album_in_db(cur, "Published", m_name, clean_pub_ids)
+        else:
+            target_album_path = sync_pub.get("full_path") or target_album_path
+
+        # Remove superseded 'organizer'-scoped Curated / ToBeCurated rows in media_organizer.db
+        old_cur_pks = [
+            int(r[0])
+            for r in cur.execute(
+                """
+                SELECT album_pk FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND COALESCE(library_scope, 'all_media') = 'organizer'
+                  AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('curated', 'tobecurated')
+                """,
+                (m_name,),
+            ).fetchall()
+        ]
+        if old_cur_pks:
+            ph_old = ",".join("?" for _ in old_cur_pks)
+            cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_old})", old_cur_pks)
+            cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_old})", old_cur_pks)
+
+        # For partial publication (M450), keep ONLY remaining unpublished curated items in Curated/<m_name>
+        if clean_rem_ids:
+            rem_sync = _sync_assets_to_organizer_library(
+                cur,
+                "Curated",
+                m_name,
+                clean_rem_ids,
+                allow_existing=True,
+            )
+            if not rem_sync.get("ok"):
+                _upsert_organizer_album_in_db(cur, "Curated", m_name, clean_rem_ids)
+
+        # Mark moment_exports rows for published assets as 'published'
+        try:
+            me_cols = {r[1] for r in cur.execute("PRAGMA table_info(moment_exports)").fetchall()}
+            if "curation_stage" in me_cols:
+                ph_p = ",".join("?" for _ in clean_pub_ids)
+                cur.execute(
+                    f"""
+                    UPDATE moment_exports
+                    SET curation_stage = 'published'
+                    WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                      AND asset_id IN ({ph_p})
+                    """,
+                    [m_name, *clean_pub_ids],
+                )
+        except sqlite3.OperationalError:
+            pass
+
+    # Move exported files on LaCie from Curated/<m_name> -> Published/<m_name>
+    pub_lacie_root = _get_published_lacie_dir()
+    src_cur_dir = CURATED_LACIE_DIR / m_name
+    dst_pub_dir = pub_lacie_root / m_name
+    lacie_moved_files = 0
+    lacie_curated_removed = False
+    pub_basenames = {os.path.splitext(fn)[0].lower() for fn in (published_filenames or []) if fn}
+
+    if src_cur_dir.is_dir() or CURATED_LACIE_DIR.exists() or pub_lacie_root.exists():
+        try:
+            pub_lacie_root.mkdir(parents=True, exist_ok=True)
+            if src_cur_dir.is_dir():
+                dst_pub_dir.mkdir(parents=True, exist_ok=True)
+                for entry in list(os.listdir(src_cur_dir)):
+                    if entry.startswith("."):
+                        continue
+                    sf_p = src_cur_dir / entry
+                    if not sf_p.is_file():
+                        continue
+                    b_lc = os.path.splitext(entry)[0].lower()
+                    if (not clean_rem_ids) or (b_lc in pub_basenames):
+                        df_p = dst_pub_dir / entry
+                        if df_p.exists():
+                            sf_p.unlink()
+                        else:
+                            shutil.move(str(sf_p), str(df_p))
+                        lacie_moved_files += 1
+                rem_entries = [e for e in os.listdir(src_cur_dir) if not e.startswith(".")]
+                if not clean_rem_ids or not rem_entries:
+                    shutil.rmtree(src_cur_dir, ignore_errors=True)
+                    lacie_curated_removed = True
+            elif clean_pub_ids:
+                # Fallback if Curated/<m_name> had not been exported yet: copy originals directly from read-only All-Media to Published/<m_name>
+                src_origs = _resolve_source_originals_map(cur, clean_pub_ids)
+                if src_origs:
+                    dst_pub_dir.mkdir(parents=True, exist_ok=True)
+                    for _aid, (src_f, orig_fn) in src_origs.items():
+                        safe_fn = os.path.basename(orig_fn) or src_f.name
+                        df_p = dst_pub_dir / safe_fn
+                        if not df_p.exists():
+                            shutil.copy2(src_f, df_p)
+                            lacie_moved_files += 1
+        except Exception:
+            pass
+
+    return {
+        "ok": photos_warning is None,
+        "target_album_path": target_album_path,
+        "curated_album_removed": curated_album_removed,
+        "remaining_in_curated": len(clean_rem_ids),
+        "lacie_published_dir": str(dst_pub_dir),
+        "lacie_moved_files": lacie_moved_files,
+        "lacie_curated_removed": lacie_curated_removed,
+        "photos_warning": photos_warning,
+    }
 
 
 @router.post("/memories/publish")
@@ -8074,26 +8311,66 @@ def publish_moment_assets(req: PublishMomentRequest):
                     pub_rows,
                 )
 
-            curated_rows, _ = _get_curated_asset_rows_for_moment(cur, m_name)
+            curated_rows, moment_pub_after = _get_curated_asset_rows_for_moment(cur, m_name)
             curated_total = len(curated_rows)
-            total_pub_after = len(already_published) + len(pub_rows)
+            all_pub_set = set(already_published) | set(to_insert_ids) | set(moment_pub_after)
+            total_pub_after = len(all_pub_set)
             new_stage = (
                 "M500"
                 if (curated_total > 0 and total_pub_after >= curated_total)
                 else ("M450" if total_pub_after > 0 else "M400")
             )
 
-            cur.execute(
-                """
-                INSERT INTO curated_moments (moment_name, memory_stage, shutterfly_url, youtube_url)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(moment_name) DO UPDATE SET
-                    memory_stage = excluded.memory_stage,
-                    shutterfly_url = COALESCE(excluded.shutterfly_url, curated_moments.shutterfly_url),
-                    youtube_url = COALESCE(excluded.youtube_url, curated_moments.youtube_url)
-                """,
-                (m_name, new_stage, sf_url_val, yt_url_val),
+            published_ids_ordered: list[str] = [aid for aid, _fn, _sc, _is_p in curated_rows if aid in all_pub_set]
+            for aid_extra in clean_ids:
+                if aid_extra not in set(published_ids_ordered):
+                    published_ids_ordered.append(aid_extra)
+            skip_set = set(skip_candidates)
+            remaining_curated_ids = [
+                aid
+                for aid, _fn, _sc, _is_p in curated_rows
+                if aid not in set(published_ids_ordered) and aid not in skip_set
+            ]
+            pub_fn_list = [fn for aid, fn, _sc, _is_p in curated_rows if aid in set(published_ids_ordered) and fn]
+            for aid_extra in published_ids_ordered:
+                if fn_map.get(aid_extra) and fn_map[aid_extra] not in pub_fn_list:
+                    pub_fn_list.append(fn_map[aid_extra])
+
+            published_folder_move = _move_published_moment_to_published_folder(
+                cur,
+                m_name,
+                published_ids_ordered,
+                remaining_curated_ids,
+                pub_fn_list,
             )
+
+            cm_cols_pub = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+            cur_exists_val = 1 if remaining_curated_ids else 0
+            if "photos_curated_exists" in cm_cols_pub:
+                cur.execute(
+                    """
+                    INSERT INTO curated_moments (moment_name, memory_stage, shutterfly_url, youtube_url, photos_curated_exists)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(moment_name) DO UPDATE SET
+                        memory_stage = excluded.memory_stage,
+                        photos_curated_exists = excluded.photos_curated_exists,
+                        shutterfly_url = COALESCE(excluded.shutterfly_url, curated_moments.shutterfly_url),
+                        youtube_url = COALESCE(excluded.youtube_url, curated_moments.youtube_url)
+                    """,
+                    (m_name, new_stage, sf_url_val, yt_url_val, cur_exists_val),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO curated_moments (moment_name, memory_stage, shutterfly_url, youtube_url)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(moment_name) DO UPDATE SET
+                        memory_stage = excluded.memory_stage,
+                        shutterfly_url = COALESCE(excluded.shutterfly_url, curated_moments.shutterfly_url),
+                        youtube_url = COALESCE(excluded.youtube_url, curated_moments.youtube_url)
+                    """,
+                    (m_name, new_stage, sf_url_val, yt_url_val),
+                )
 
             if sf_url_val:
                 cur.execute(
@@ -8129,6 +8406,7 @@ def publish_moment_assets(req: PublishMomentRequest):
                 "shutterfly_url": sf_url_val or "",
                 "youtube_url": yt_url_val or "",
                 "pub_rec_sync": pub_rec_sync,
+                "published_folder_move": published_folder_move,
             }
         finally:
             conn.close()
@@ -8584,7 +8862,7 @@ def _reset_moment_pipeline_to_m100(
             WHERE is_folder = 0
               AND {scope_pred}
               AND TRIM(LOWER(album_name)) IN ({ph_n})
-              AND LOWER(COALESCE(parent_folder_name, '')) IN ('curated', 'tobecurated', 'highrated assets', 'moments', 'generic moments', 'memories')
+              AND LOWER(COALESCE(parent_folder_name, '')) IN ('curated', 'published', 'tobecurated', 'highrated assets', 'moments', 'generic moments', 'memories')
             """,
             [n.lower() for n in all_names],
         ).fetchall()
@@ -8715,8 +8993,9 @@ def _reset_moment_pipeline_to_m100(
         )
 
     removed_export_dirs = 0
+    pub_lacie_dir = _get_published_lacie_dir()
     for nm in all_names:
-        for base_dir in (CURATED_LACIE_DIR, PUBLISHING_RECOMMENDATION_DIR):
+        for base_dir in (CURATED_LACIE_DIR, pub_lacie_dir, PUBLISHING_RECOMMENDATION_DIR):
             try:
                 cand_dir = base_dir / nm
                 if cand_dir.exists() and cand_dir.is_dir():
@@ -8794,7 +9073,7 @@ def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> No
         WHERE is_folder = 0
           AND COALESCE(library_scope, 'all_media') = 'organizer'
           AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments', 'memories')
+          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'published', 'tobecurated', 'generic moments', 'memories')
         """,
         (source_moment,),
     ).fetchall()
@@ -8827,7 +9106,12 @@ def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> No
                 """,
                 (source_moment,),
             )
-        for folder in (PUBLISHING_RECOMMENDATION_DIR / source_moment, CURATED_LACIE_DIR / source_moment):
+        pub_lacie_dir = _get_published_lacie_dir()
+        for folder in (
+            PUBLISHING_RECOMMENDATION_DIR / source_moment,
+            CURATED_LACIE_DIR / source_moment,
+            pub_lacie_dir / source_moment,
+        ):
             if folder.exists() and folder.is_dir():
                 try:
                     shutil.rmtree(folder)
@@ -9362,7 +9646,7 @@ def _sync_moment_folder_metadata_json(
             tagged_at_utc = datetime('now')
         WHERE is_folder = 0
           AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'memories', 'curated', 'tobecurated', 'generic moments')
+          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'memories', 'curated', 'published', 'tobecurated', 'generic moments')
         """,
         (payload_json, paradigm, m_name),
     )
@@ -9870,7 +10154,7 @@ def _load_moment_detail_core(
             JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
             WHERE moa.is_folder = 0
               AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
-              AND LOWER(COALESCE(moa.parent_folder_name, '')) = 'curated'
+              AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('curated', 'published')
               AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
             """,
             (m_name,),
@@ -9934,7 +10218,7 @@ def _load_moment_detail_core(
         SELECT parent_folder_name, asset_count, full_path
         FROM media_organizer_albums
         WHERE is_folder = 0 AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+          AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'published', 'tobecurated', 'generic moments')
         """,
         (m_name,),
     )
@@ -10124,7 +10408,7 @@ def _get_disjoint_moment_detail_impl(
                 FROM media_organizer_albums
                 WHERE is_folder = 0
                   AND TRIM(COALESCE(album_name, '')) != ''
-                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'generic moments', 'curated', 'tobecurated')
+                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'generic moments', 'curated', 'published', 'tobecurated')
                 """
             ).fetchall()
             existing_albums = [
@@ -11449,7 +11733,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                                   AND COALESCE(library_scope, 'all_media') = 'organizer'
                                   AND album_pk != ?
                                   AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-                                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'tobecurated', 'generic moments')
+                                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'curated', 'published', 'tobecurated', 'generic moments')
                                 """,
                                 (tgt_pk, sm),
                             ).fetchall()
@@ -12530,6 +12814,7 @@ def get_all_unified_groupings():
             tbc_aids_by_lc: dict[str, set[str]] = {}
             cur_aids_by_lc: dict[str, set[str]] = {}
             org_cur_aids_by_lc: dict[str, set[str]] = {}
+            org_pub_folder_aids_by_lc: dict[str, set[str]] = {}
             org_tbc_aids_by_lc: dict[str, set[str]] = {}
             org_hr_aids_by_lc: dict[str, set[str]] = {}
             all_media_cur_aids_by_lc: dict[str, set[str]] = {}
@@ -12593,6 +12878,8 @@ def get_all_unified_groupings():
                             org_album_aids_by_lc.setdefault(lc, set()).add(aid)
                             if par_lc == "curated":
                                 org_cur_aids_by_lc.setdefault(lc, set()).add(aid)
+                            elif par_lc == "published":
+                                org_pub_folder_aids_by_lc.setdefault(lc, set()).add(aid)
                             elif par_lc == "tobecurated":
                                 org_tbc_aids_by_lc.setdefault(lc, set()).add(aid)
                             elif par_lc == "highrated assets":
@@ -12600,7 +12887,7 @@ def get_all_unified_groupings():
                         else:
                             fp_lc = fp_clean.lower()
                             all_media_album_aids_by_fp.setdefault(fp_lc, set()).add(aid)
-                            if par_lc == "curated":
+                            if par_lc in ("curated", "published"):
                                 all_media_cur_aids_by_lc.setdefault(lc, set()).add(aid)
                             if par_lc not in _non_moment_src_parents:
                                 am_bucket = all_media_folders_by_aid.setdefault(aid, [])
@@ -12614,7 +12901,7 @@ def get_all_unified_groupings():
                                     )
                         if par_lc == "tobecurated":
                             tbc_aids_by_lc.setdefault(lc, set()).add(aid)
-                        elif par_lc == "curated":
+                        elif par_lc in ("curated", "published"):
                             cur_aids_by_lc.setdefault(lc, set()).add(aid)
             except sqlite3.OperationalError:
                 pass
@@ -12775,6 +13062,8 @@ def get_all_unified_groupings():
 
             tag_status_by_lc, tagged_aids = _load_moment_tagging_status_map(cur)
             lacie_mounted = CURATED_LACIE_DIR.exists()
+            pub_lacie_root = _get_published_lacie_dir()
+            pub_lacie_mounted = pub_lacie_root.exists()
             now_local = datetime.now()
 
             _ensure_deduped_moment_groups_table(cur)
@@ -12862,11 +13151,16 @@ def get_all_unified_groupings():
                 )
                 pub_set = set() if is_new_pipeline_unpub else pub_aids_by_lc.get(lc, set())
                 pub_cnt = len(pub_set)
-                org_cur_set = {aid for aid in org_cur_aids_by_lc.get(lc, set()) if aid in asset_info_map}
+                org_cur_set = {
+                    aid
+                    for aid in (org_cur_aids_by_lc.get(lc, set()) | org_pub_folder_aids_by_lc.get(lc, set()))
+                    if aid in asset_info_map
+                }
                 legacy_cur_set = {aid for aid in all_media_cur_aids_by_lc.get(lc, set()) if aid in asset_info_map}
                 tbc_cnt = len(org_tbc_aids_by_lc.get(lc, set())) if in_org_lib else len(tbc_aids_by_lc.get(lc, set()))
                 tbc_exists = bool(tbc_cnt > 0 or (not in_org_lib and cm.get("tbc_exists")))
                 fs_curated_exists = bool(lacie_mounted and (CURATED_LACIE_DIR / name).is_dir())
+                fs_published_exists = bool(pub_lacie_mounted and (pub_lacie_root / name).is_dir())
                 fs_pub_rec_exists = bool(lacie_mounted and (PUBLISHING_RECOMMENDATION_DIR / name).is_dir())
 
                 src_am_agg: dict[str, dict] = {}
@@ -12972,7 +13266,9 @@ def get_all_unified_groupings():
                         raw_f_bucket.values(),
                         key=lambda x: (
                             0 if x.get("library_scope") == "organizer" else 1,
-                            0 if str(x.get("parent_folder") or "").lower() == "curated" else (2 if str(x.get("parent_folder") or "").lower() == "highrated assets" else 1),
+                            0
+                            if str(x.get("parent_folder") or "").lower() in ("published", "curated")
+                            else (2 if str(x.get("parent_folder") or "").lower() == "highrated assets" else 1),
                             x["full_path"].lower(),
                         ),
                     )
@@ -13145,7 +13441,7 @@ def get_all_unified_groupings():
                     or pub_cnt > 0
                     or bool(moments_col_aids_by_lc.get(lc))
                     or any(
-                        p.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments", "yyyy-mm-dd")
+                        p.lower() in ("moments", "memories", "curated", "published", "tobecurated", "generic moments", "yyyy-mm-dd")
                         for p in parents_sorted
                     )
                 )
@@ -13183,6 +13479,7 @@ def get_all_unified_groupings():
                         "in_organizer_library": in_org_lib,
                         "organizer_mapped_count": org_mapped_cnt,
                         "curated_folder_exists": fs_curated_exists,
+                        "published_folder_exists": fs_published_exists,
                         "pub_rec_folder_exists": fs_pub_rec_exists,
                         "total_assets": total_cnt,
                         "event_total_assets": event_total_cnt,
@@ -13640,6 +13937,7 @@ def get_unified_grouping_assets(moment_name: str):
             in_moments_set: set[str] = set()
             in_tbc_set: set[str] = set()
             in_cur_set: set[str] = set()
+            in_pub_folder_set: set[str] = set()
             org_cur_aids: set[str] = set()
             is_org_moment = False
             try:
@@ -13656,7 +13954,7 @@ def get_unified_grouping_assets(moment_name: str):
                 ).fetchall():
                     if lib_scope == "organizer":
                         is_org_moment = True
-                        if aid and par_nm == "curated":
+                        if aid and par_nm in ("curated", "published"):
                             org_cur_aids.add(aid)
                     if not aid:
                         continue
@@ -13664,6 +13962,9 @@ def get_unified_grouping_assets(moment_name: str):
                         in_tbc_set.add(aid)
                     elif par_nm == "curated":
                         in_cur_set.add(aid)
+                    elif par_nm == "published":
+                        in_cur_set.add(aid)
+                        in_pub_folder_set.add(aid)
                     elif par_nm == "highrated assets":
                         pass
                     else:
@@ -13806,6 +14107,7 @@ def get_unified_grouping_assets(moment_name: str):
                         "in_moments": aid in in_moments_set,
                         "in_to_be_curated": aid in in_tbc_set,
                         "in_curated": aid in effective_cur_set,
+                        "in_published_folder": aid in in_pub_folder_set,
                         "is_published": aid in pub_set,
                         "in_organizer_library": aid in mapped_src_aids or bool(org_folders_by_src_aid.get(aid)),
                         "organizer_folders": [x["full_path"] for x in org_folders_by_src_aid.get(aid, [])],

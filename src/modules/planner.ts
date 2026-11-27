@@ -4102,6 +4102,7 @@ async function fetchMemoriesFolders(): Promise<void> {
     const scopeLabels: Record<string, string> = {
       moments: `Moments (${sc.moments ?? 0})`,
       curated: `Curated (${sc.curated ?? 0})`,
+      published: `Published (${sc.published ?? 0})`,
       to_be_curated: `ToBeCurated (${sc.to_be_curated ?? 0})`,
       folders: `Top Folders (${sc.folders ?? 0})`,
       all: `All (${sc.all ?? 0})`
@@ -4187,11 +4188,10 @@ function renderMemoriesFolders(items: MemoriesFolderItem[]): void {
           </td>
           <td style="text-align: right;" class="font-mono">
             <strong>${item.asset_count}</strong>
-            ${
-              !item.is_folder && item.asset_count > 0
-                ? `<div class="text-muted" style="font-size: 0.63rem;" title="Expected curated count = round(ln(${item.asset_count})) = ${computeExpectedCuratedStats(item.asset_count).lnRaw.toFixed(2)}">🎯 exp ${computeExpectedCuratedStats(item.asset_count).expected}</div>`
-                : ''
-            }
+            ${!item.is_folder && item.asset_count > 0
+          ? `<div class="text-muted" style="font-size: 0.63rem;" title="Expected curated count = round(ln(${item.asset_count})) = ${computeExpectedCuratedStats(item.asset_count).lnRaw.toFixed(2)}">🎯 exp ${computeExpectedCuratedStats(item.asset_count).expected}</div>`
+          : ''
+        }
           </td>
           <td>${stageHtml}</td>
           <td style="text-align: right;">
@@ -5349,8 +5349,8 @@ async function submitPublishMoment(): Promise<void> {
   if (statusEl) {
     statusEl.style.display = 'flex';
     statusEl.innerHTML = `<div class="spinner-sm"></div><span>${skipIds.length > 0
-      ? `Moving ${skipIds.length} unselected asset(s) to SkipPublishing & recording publication of ${assetIds.length} asset(s)...`
-      : `Recording publication of ${assetIds.length} asset(s) for <code>${escapeHtml(publishMomentName)}</code>...`
+      ? `Moving ${skipIds.length} unselected asset(s) to SkipPublishing, recording publication of ${assetIds.length} asset(s), & moving Moment to Published...`
+      : `Recording publication of ${assetIds.length} asset(s) & moving <code>${escapeHtml(publishMomentName)}</code> from Curated ➜ Published...`
       }</span>`;
   }
 
@@ -5392,8 +5392,15 @@ async function submitPublishMoment(): Promise<void> {
 
     if (statusEl) {
       const syncInfo = data.pub_rec_sync;
+      const moveInfo = data.published_folder_move;
       const skipNote =
         (data.skip_publishing_moved ?? 0) > 0 ? ` · ${data.skip_publishing_moved} unselected ➜ SkipPublishing` : '';
+      const moveNote = moveInfo
+        ? moveInfo.curated_album_removed
+          ? ` · Moved Curated ➜ ${moveInfo.target_album_path || `Published/${data.moment_name || publishMomentName}`}`
+          : ` · Added to ${moveInfo.target_album_path || `Published/${data.moment_name || publishMomentName}`} (${moveInfo.remaining_in_curated ?? 0} remaining in Curated)`
+        : '';
+      const moveWarn = moveInfo?.photos_warning ? ` (⚠️ Photos note: ${moveInfo.photos_warning})` : '';
       const syncSuffix = syncInfo?.removed_folder
         ? ' · Pub. Rec folder removed (M500 complete)'
         : syncInfo?.synced
@@ -5404,7 +5411,7 @@ async function submitPublishMoment(): Promise<void> {
         <span class="text-green">
           ✅ Recorded <strong>${data.inserted_count ?? 0}</strong> asset(s) for
           <code>${escapeHtml(data.moment_name || publishMomentName)}</code>
-          (Stage: <strong>${escapeHtml(data.new_stage || 'M450')}</strong> · Total Published: ${data.total_published ?? 0}/${data.curated_total ?? 0}${escapeHtml(skipNote)}${escapeHtml(syncSuffix)}).
+          (Stage: <strong>${escapeHtml(data.new_stage || 'M450')}</strong> · Total Published: ${data.total_published ?? 0}/${data.curated_total ?? 0}${escapeHtml(moveNote)}${escapeHtml(skipNote)}${escapeHtml(syncSuffix)}${escapeHtml(moveWarn)}).
         </span>
       `;
     }
@@ -5607,9 +5614,8 @@ function refreshExpectedCuratedUI(): void {
             : 'badge-amber';
     const mismatchNote =
       resolveDisjointIsCurateM200 && diff !== 0 && poolTotal > 0
-        ? `<div class="text-amber" style="width: 100%; font-size: 0.71rem;">⚠️ Must select exactly <strong>${expected}</strong> keeper${expected === 1 ? '' : 's'} (<code>round(ln(${poolTotal})) = ${expected}</code>) to mark Curated &amp; unlock Publish — ${
-            diff > 0 ? `uncheck ${diff} item(s) or click "Select Top ${expected}"` : `check ${Math.abs(diff)} more item(s)`
-          }.</div>`
+        ? `<div class="text-amber" style="width: 100%; font-size: 0.71rem;">⚠️ Must select exactly <strong>${expected}</strong> keeper${expected === 1 ? '' : 's'} (<code>round(ln(${poolTotal})) = ${expected}</code>) to mark Curated &amp; unlock Publish — ${diff > 0 ? `uncheck ${diff} item(s) or click "Select Top ${expected}"` : `check ${Math.abs(diff)} more item(s)`
+        }.</div>`
         : '';
     const hrNote =
       resolveDisjointIsCurateM200 && hrPreview.highratedAssets.length > 0
@@ -5619,13 +5625,12 @@ function refreshExpectedCuratedUI(): void {
       poolTotal > 0
         ? `<div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; width: 100%;">
              <span>📐 <strong>Logarithmic Curation Rule:</strong> <code>round(ln(${poolTotal})) = round(${lnRaw.toFixed(2)}) = ${expected}</code> Recommended Keeper${expected === 1 ? '' : 's'}</span>
-             <span class="badge badge-xs ${matchCls} font-mono">${
-               diff === 0
-                 ? `✅ ${totalSel} / 🎯 ${expected} Selected (Matches ln(${poolTotal}) ✓)`
-                 : diff > 0
-                   ? `⚠️ ${totalSel} / 🎯 ${expected} Selected (+${diff} over ln target)`
-                   : `⚠️ ${totalSel} / 🎯 ${expected} Selected (${diff} vs ln target)`
-             }</span>
+             <span class="badge badge-xs ${matchCls} font-mono">${diff === 0
+          ? `✅ ${totalSel} / 🎯 ${expected} Selected (Matches ln(${poolTotal}) ✓)`
+          : diff > 0
+            ? `⚠️ ${totalSel} / 🎯 ${expected} Selected (+${diff} over ln target)`
+            : `⚠️ ${totalSel} / 🎯 ${expected} Selected (${diff} vs ln target)`
+        }</span>
              ${hrNote}
            </div>
            <div class="text-muted" style="font-size: 0.67rem; width: 100%;">
@@ -7660,14 +7665,14 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     });
     const isRetagPipelineReset = Boolean(
       (resolveDisjointOpenedFromCuration && resolveDisjointRetagExpanded) ||
-        priorAlbumsToRemove.some(al =>
-          ['curated', 'tobecurated', 'highrated assets'].includes((al.parent_folder_name || '').trim().toLowerCase())
-        ) ||
-        allGroupingsData?.groupings.some(
-          g =>
-            allSourceNamesLc.has(g.name.toLowerCase()) &&
-            (g.curated_count > 0 || g.moment_status === 'M300' || g.moment_status === 'M400' || g.moment_status === 'M450')
-        )
+      priorAlbumsToRemove.some(al =>
+        ['curated', 'tobecurated', 'highrated assets'].includes((al.parent_folder_name || '').trim().toLowerCase())
+      ) ||
+      allGroupingsData?.groupings.some(
+        g =>
+          allSourceNamesLc.has(g.name.toLowerCase()) &&
+          (g.curated_count > 0 || g.moment_status === 'M300' || g.moment_status === 'M400' || g.moment_status === 'M450')
+      )
     );
     titleEl.textContent = isRetagPipelineReset
       ? '🔄 Confirm Retag & Pipeline Reset (Back to M100 Moments)'
@@ -7883,8 +7888,8 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
   const additionalMoments =
     isMerge || isCurate
       ? Array.from(combinedExtraMoments.entries())
-          .filter(([, entry]) => !entry.isTimeframeDeviceSelection)
-          .map(([k]) => k)
+        .filter(([, entry]) => !entry.isTimeframeDeviceSelection)
+        .map(([k]) => k)
       : [];
   const additionalAssetIds: string[] = [];
   if (isMerge || isCurate) {
@@ -8431,8 +8436,12 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
           `<span class="badge badge-xs badge-green font-mono" title="Copied into Media Organizer.photoslibrary: ${escapeHtml(orgPaths)}">⚡ Media Organizer: ${escapeHtml(orgPaths)}</span>`
         );
       }
-      if (a.is_published) folderChips.push('<span class="badge badge-xs badge-green font-mono">📢 Published</span>');
-      if (a.in_curated) folderChips.push('<span class="badge badge-xs badge-blue font-mono">✅ Curated</span>');
+      if (a.is_published || a.in_published_folder) {
+        folderChips.push('<span class="badge badge-xs badge-green font-mono">📢 Published</span>');
+      }
+      if (a.in_curated && !a.in_published_folder) {
+        folderChips.push('<span class="badge badge-xs badge-blue font-mono">✅ Curated</span>');
+      }
       if (a.in_to_be_curated) folderChips.push('<span class="badge badge-xs badge-amber font-mono">🟡 TBC</span>');
       if (a.in_moments && !a.in_curated && !a.in_to_be_curated) {
         folderChips.push('<span class="badge badge-xs badge-outline font-mono">📁 Moments</span>');
@@ -8445,13 +8454,13 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
       const tagsHtml =
         a.asset_tags && a.asset_tags.length > 0
           ? `<div style="display: flex; align-items: center; gap: 0.25rem; margin-top: 0.16rem; flex-wrap: wrap;">${a.asset_tags
-              .map(t => `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.6rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`)
-              .join('')}</div>`
+            .map(t => `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.6rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`)
+            .join('')}</div>`
           : '';
       const isSearchFileMatch = Boolean(
         allGroupingsSearchQuery &&
-          ((a.original_filename || '').toLowerCase().includes(allGroupingsSearchQuery) ||
-            (a.asset_id || '').toLowerCase().includes(allGroupingsSearchQuery))
+        ((a.original_filename || '').toLowerCase().includes(allGroupingsSearchQuery) ||
+          (a.asset_id || '').toLowerCase().includes(allGroupingsSearchQuery))
       );
       const searchMatchBadge = isSearchFileMatch
         ? '<span class="badge badge-xs badge-blue font-mono" style="font-weight: 700;">🔍 Search Match</span>'
@@ -8494,35 +8503,33 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
   const orgSummaryBannerHtml =
     orgTargets.length > 0 || srcAllMedia.length > 0
       ? `<div style="display: flex; flex-direction: column; gap: 0.35rem; padding: 0.45rem 0.65rem; margin-bottom: 0.45rem; border-radius: 6px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.32);">
-          ${
-            orgTargets.length > 0
-              ? `<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+          ${orgTargets.length > 0
+        ? `<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
                   <div class="font-mono" style="font-size: 0.72rem; color: #6ee7b7; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
                     <strong>⚡ Media Organizer Library:</strong>
                     ${orgTargets
-                      .map(
-                        ot =>
-                          `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-exp-open-photos" data-library-scope="organizer" data-album-name="${escapeHtml(ot.album_name)}" data-full-path="${escapeHtml(ot.full_path)}" data-sample-aid="${escapeHtml(sampleAidExp)}" title="Spotlight ${escapeHtml(ot.full_path)} in Media Organizer.photoslibrary">📁 ${escapeHtml(ot.full_path)} (${ot.matched_count}/${g.total_assets}) ↗</button>`
-                      )
-                      .join('')}
+          .map(
+            ot =>
+              `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-exp-open-photos" data-library-scope="organizer" data-album-name="${escapeHtml(ot.album_name)}" data-full-path="${escapeHtml(ot.full_path)}" data-sample-aid="${escapeHtml(sampleAidExp)}" title="Spotlight ${escapeHtml(ot.full_path)} in Media Organizer.photoslibrary">📁 ${escapeHtml(ot.full_path)} (${ot.matched_count}/${g.total_assets}) ↗</button>`
+          )
+          .join('')}
                   </div>
                   <span class="font-mono text-muted" style="font-size: 0.67rem;">~/Pictures/Media Organizer.photoslibrary</span>
                 </div>`
-              : ''
-          }
-          ${
-            showAllMediaSourceLinks && srcAllMedia.length > 0
-              ? `<div class="font-mono" style="font-size: 0.69rem; color: var(--text-secondary); display: flex; align-items: center; gap: 0.38rem; flex-wrap: wrap; padding-top: 0.2rem; border-top: 1px dashed rgba(148, 163, 184, 0.2);">
+        : ''
+      }
+          ${showAllMediaSourceLinks && srcAllMedia.length > 0
+        ? `<div class="font-mono" style="font-size: 0.69rem; color: var(--text-secondary); display: flex; align-items: center; gap: 0.38rem; flex-wrap: wrap; padding-top: 0.2rem; border-top: 1px dashed rgba(148, 163, 184, 0.2);">
                   <span class="text-muted">📀 Legacy in All-Media (read-only — delete manually in Photos):</span>
                   ${srcAllMedia
-                    .map(
-                      am =>
-                        `<button type="button" class="badge badge-xs badge-outline font-mono pub-badge-link btn-ugrp-exp-open-photos" data-library-scope="all_media" data-album-name="${escapeHtml(am.album_name)}" data-full-path="${escapeHtml(am.full_path)}" data-sample-aid="${escapeHtml(sampleAidExp)}" title="Read-only spotlight in All-Media.photoslibrary: ${escapeHtml(am.full_path)} (${am.all_migrated ? 'all active assets migrated — safe to delete manually in Photos' : `${am.matched_count}/${am.source_total_count} migrated`})">📀 ${escapeHtml(am.parent_folder)}/${escapeHtml(am.album_name)}${am.all_migrated ? ' ✓' : ` (${am.matched_count}/${am.source_total_count})`} ↗</button>`
-                    )
-                    .join('')}
+          .map(
+            am =>
+              `<button type="button" class="badge badge-xs badge-outline font-mono pub-badge-link btn-ugrp-exp-open-photos" data-library-scope="all_media" data-album-name="${escapeHtml(am.album_name)}" data-full-path="${escapeHtml(am.full_path)}" data-sample-aid="${escapeHtml(sampleAidExp)}" title="Read-only spotlight in All-Media.photoslibrary: ${escapeHtml(am.full_path)} (${am.all_migrated ? 'all active assets migrated — safe to delete manually in Photos' : `${am.matched_count}/${am.source_total_count} migrated`})">📀 ${escapeHtml(am.parent_folder)}/${escapeHtml(am.album_name)}${am.all_migrated ? ' ✓' : ` (${am.matched_count}/${am.source_total_count})`} ↗</button>`
+          )
+          .join('')}
                 </div>`
-              : ''
-          }
+        : ''
+      }
         </div>`
       : '';
 
@@ -8535,14 +8542,13 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
           <span>Select All</span>
         </label>
         <span class="badge badge-xs badge-green font-mono">${selCount} / ${assets.length} selected</span>
-        ${
-          isTaggingCompleteExp
-            ? `<span class="badge badge-xs badge-purple font-mono" title="Expected curated count = round(ln(${evTotExp})) = ${effectiveLnExp.toFixed(2)}">🎯 Expected Curated: ${effectiveExpExp} (ln ${evTotExp} = ${effectiveLnExp.toFixed(2)})</span>
+        ${isTaggingCompleteExp
+      ? `<span class="badge badge-xs badge-purple font-mono" title="Expected curated count = round(ln(${evTotExp})) = ${effectiveLnExp.toFixed(2)}">🎯 Expected Curated: ${effectiveExpExp} (ln ${evTotExp} = ${effectiveLnExp.toFixed(2)})</span>
                <button type="button" class="btn btn-xs ${curatedOnly ? 'btn-purple' : 'btn-outline'} btn-ugrp-curated-only" data-grouping-id="${escapeHtml(g.grouping_id)}">
                  ${curatedOnly ? `★ Curated Only (${selCount})` : '👁️ Curated Only'}
                </button>`
-            : `<span class="badge badge-xs badge-outline font-mono" title="Complete Step 1 Moment Tagging first — Manual Curation unlocks afterward">🔒 Complete Moment Tagging before Curation</span>`
-        }
+      : `<span class="badge badge-xs badge-outline font-mono" title="Complete Step 1 Moment Tagging first — Manual Curation unlocks afterward">🔒 Complete Moment Tagging before Curation</span>`
+    }
       </div>
       <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
         ${primaryActionBtn}
@@ -8918,14 +8924,14 @@ function renderAllUnifiedGroupings(): void {
       const batchesHtml =
         g.batches.length <= 3
           ? g.batches
-              .map(
-                b =>
-                  `<span class="badge badge-xs ${batchStatusBadgeClass(b.status_code)} font-mono" title="${b.count} asset(s) in batch ${escapeHtml(b.month)} (status ${escapeHtml(b.status_code)})">📅 ${escapeHtml(b.month)} · ${escapeHtml(b.status_code)}</span>`
-              )
-              .join('')
+            .map(
+              b =>
+                `<span class="badge badge-xs ${batchStatusBadgeClass(b.status_code)} font-mono" title="${b.count} asset(s) in batch ${escapeHtml(b.month)} (status ${escapeHtml(b.status_code)})">📅 ${escapeHtml(b.month)} · ${escapeHtml(b.status_code)}</span>`
+            )
+            .join('')
           : `<span class="badge badge-xs ${batchStatusBadgeClass(g.batches[0].status_code)} font-mono" title="${escapeHtml(
-              g.batches.map(b => `${b.month} [${b.status_code}] (${b.count})`).join(', ')
-            )}">📅 ${escapeHtml(g.batches[0].month)}..${escapeHtml(g.batches[g.batches.length - 1].month)} (${g.batches.length} batches)</span>`;
+            g.batches.map(b => `${b.month} [${b.status_code}] (${b.count})`).join(', ')
+          )}">📅 ${escapeHtml(g.batches[0].month)}..${escapeHtml(g.batches[g.batches.length - 1].month)} (${g.batches.length} batches)</span>`;
 
       const photosFolders = g.photos_folders || [];
       const orgFolders = photosFolders.filter(pf => pf.library_scope === 'organizer');
@@ -8970,9 +8976,16 @@ function renderAllUnifiedGroupings(): void {
         }
       }
 
-      const curatedFinderPillHtml = g.curated_folder_exists
-        ? `<button type="button" class="badge badge-xs badge-outline font-mono pub-badge-link btn-ugrp-open-curated" data-moment-name="${escapeHtml(g.name)}" title="Open exported Curated folder on LaCie in Finder">📂 Curated ↗</button>`
-        : '';
+      const curatedFinderPillHtml = [
+        g.published_folder_exists
+          ? `<button type="button" class="badge badge-xs badge-green font-mono pub-badge-link btn-ugrp-open-curated" data-moment-name="${escapeHtml(g.name)}" data-folder-kind="published" title="Open Published folder on LaCie in Finder">📦 Published ↗</button>`
+          : '',
+        g.curated_folder_exists
+          ? `<button type="button" class="badge badge-xs badge-outline font-mono pub-badge-link btn-ugrp-open-curated" data-moment-name="${escapeHtml(g.name)}" data-folder-kind="curated" title="Open exported Curated folder on LaCie in Finder">📂 Curated ↗</button>`
+          : ''
+      ]
+        .filter(Boolean)
+        .join(' ');
 
       const sfCnt = g.shutterfly_count || 0;
       const ytCnt = g.youtube_count || 0;
@@ -9055,22 +9068,21 @@ function renderAllUnifiedGroupings(): void {
       const mismatchPillHtml =
         !isCuratedRow && !isCompletedM500Row && mismatchCurCnt > 0
           ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(
-              `Prior curation has ${mismatchCurCnt} item(s), which does not match logarithmic expectation ln(${evTot}) = ${expCurCnt}. Treated as uncurated — Publish is locked until curated to ${expCurCnt} keeper(s).`
-            )}">⚠️ Uncurated (${mismatchCurCnt} cur ≠ 🎯 ${expCurCnt})</span>`
+            `Prior curation has ${mismatchCurCnt} item(s), which does not match logarithmic expectation ln(${evTot}) = ${expCurCnt}. Treated as uncurated — Publish is locked until curated to ${expCurCnt} keeper(s).`
+          )}">⚠️ Uncurated (${mismatchCurCnt} cur ≠ 🎯 ${expCurCnt})</span>`
           : '';
       const pendingPubCnt = isCuratedRow ? (g.pending_publish_count ?? Math.max(0, g.curated_count - g.published_count)) : 0;
       const propPreview = g.proposed_publish_preview || [];
       const propTooltip = propPreview.length
         ? `Step 2B Pending Publishing:\n• Total in Moment: ${g.total_assets} · Curated: ${g.curated_count} · Published: ${g.published_count} · Pending: ${pendingPubCnt}\n• Can Publish: ${g.can_publish_str}\n• Proposed Next (${g.propose_next_str || '—'}): ${propPreview
-            .slice(0, 5)
-            .map(p => `${p.filename} [${p.score.toFixed(4)}]`)
-            .join(', ')}${propPreview.length > 5 ? ` (+${propPreview.length - 5})` : ''}`
+          .slice(0, 5)
+          .map(p => `${p.filename} [${p.score.toFixed(4)}]`)
+          .join(', ')}${propPreview.length > 5 ? ` (+${propPreview.length - 5})` : ''}`
         : '';
       const step2bPubPillHtml =
         isCuratedRow && pendingPubCnt > 0
-          ? `<span class="badge badge-xs ${g.can_publish_ok ? 'badge-green' : 'badge-amber'} font-mono" title="${escapeHtml(propTooltip)}">${
-              g.can_publish_ok ? '🚀 Can Publish: Yes' : `⏳ Publish: ${escapeHtml(g.can_publish_str)}`
-            } · Pending ${pendingPubCnt}${g.propose_next_str && g.propose_next_str !== '—' ? ` · Next: ${escapeHtml(g.propose_next_str)}` : ''}</span>`
+          ? `<span class="badge badge-xs ${g.can_publish_ok ? 'badge-green' : 'badge-amber'} font-mono" title="${escapeHtml(propTooltip)}">${g.can_publish_ok ? '🚀 Can Publish: Yes' : `⏳ Publish: ${escapeHtml(g.can_publish_str)}`
+          } · Pending ${pendingPubCnt}${g.propose_next_str && g.propose_next_str !== '—' ? ` · Next: ${escapeHtml(g.propose_next_str)}` : ''}</span>`
           : '';
 
       const countsParts: string[] = [
@@ -9141,12 +9153,12 @@ function renderAllUnifiedGroupings(): void {
       const lockedCurateRowBtn = `<button type="button" class="btn btn-xs btn-outline" disabled style="opacity: 0.45; cursor: not-allowed;" title="Locked — complete Moment Tagging (Step 1 &amp; Step 2) first before Manual Curation">🔒 Curate (${expCurCnt})</button>`;
       const dupGroupPillHtml = g.is_deduped_group
         ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(
-            `Deduplicated into '${g.duplicate_of_moment || ''}' — click Remove on the right to open All-Media.photoslibrary and manually delete this legacy Moment in Photos`
-          )}">♻️ Deduped → ${escapeHtml(g.duplicate_of_moment || 'Primary')}</span>`
+          `Deduplicated into '${g.duplicate_of_moment || ''}' — click Remove on the right to open All-Media.photoslibrary and manually delete this legacy Moment in Photos`
+        )}">♻️ Deduped → ${escapeHtml(g.duplicate_of_moment || 'Primary')}</span>`
         : g.is_duplicate_group && g.duplicate_of_moment
           ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(
-              `100% of this group's active assets already belong to '${g.duplicate_of_moment}' — click Dedup to reconcile DB tags & switch button to Remove (All-Media link)`
-            )}">♻️ Dup of: ${escapeHtml(g.duplicate_of_moment)}</span>`
+            `100% of this group's active assets already belong to '${g.duplicate_of_moment}' — click Dedup to reconcile DB tags & switch button to Remove (All-Media link)`
+          )}">♻️ Dup of: ${escapeHtml(g.duplicate_of_moment)}</span>`
           : '';
       const removeTargetFolder = legacyFolders[0] || srcAllMedia[0];
       const removeAlbumName = removeTargetFolder?.album_name || g.name;
@@ -9154,13 +9166,13 @@ function renderAllUnifiedGroupings(): void {
       const dedupRowBtnHtml =
         g.is_duplicate_group && !g.is_deduped_group && g.duplicate_of_moment
           ? `<button type="button" class="btn btn-xs btn-amber btn-ugrp-row-action" data-action="dedup" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(
-              `Deduplicate '${g.name}' into '${g.duplicate_of_moment}' — merges DB tags & changes button to Remove (All-Media link)`
-            )}">♻️ Dedup</button>`
+            `Deduplicate '${g.name}' into '${g.duplicate_of_moment}' — merges DB tags & changes button to Remove (All-Media link)`
+          )}">♻️ Dedup</button>`
           : '';
       const quickActionHtml = g.is_deduped_group
         ? `<button type="button" class="btn btn-xs btn-red btn-ugrp-open-photos" data-grouping-id="${escapeHtml(g.grouping_id)}" data-is-remove-link="1" data-library-scope="all_media" data-album-name="${escapeHtml(removeAlbumName)}" data-full-path="${escapeHtml(removeFullPath)}" data-sample-aid="${escapeHtml(sampleAid)}" title="${escapeHtml(
-            `Deduped into '${g.duplicate_of_moment || ''}' — click to open '${removeAlbumName}' in All-Media.photoslibrary (Read-Only) so you can manually delete the Moment from Apple Photos`
-          )}">🗑️ Remove</button>
+          `Deduped into '${g.duplicate_of_moment || ''}' — click to open '${removeAlbumName}' in All-Media.photoslibrary (Read-Only) so you can manually delete the Moment from Apple Photos`
+        )}">🗑️ Remove</button>
            <button type="button" class="btn btn-xs btn-icon btn-ugrp-row-action" data-action="dismiss_dedup" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Already deleted from All-Media in Photos? Click to dismiss this row">✕</button>`
         : !isTaggingCompleteRow
           ? g.kind === 'unassigned'
@@ -9437,13 +9449,14 @@ function renderAllUnifiedGroupings(): void {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       const mName = btn.dataset.momentName || '';
+      const fKind = btn.dataset.folderKind || 'curated';
       if (!mName) return;
       btn.disabled = true;
       try {
         await fetch('/api/media/memories/open-curated-folder', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ moment_name: mName, folder_kind: 'curated' })
+          body: JSON.stringify({ moment_name: mName, folder_kind: fKind })
         });
       } finally {
         btn.disabled = false;
