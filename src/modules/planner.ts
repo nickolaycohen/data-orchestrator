@@ -1003,18 +1003,16 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
     }
     openResolveActionConfirmDialog(resolveDisjointIsCurateM200 ? 'curate' : 'merge_new');
   });
+  document.getElementById('btn-expand-retag-reset')?.addEventListener('click', () => {
+    expandRetagResetInCurationModal();
+  });
+  document.getElementById('btn-cancel-retag-reset')?.addEventListener('click', () => {
+    collapseRetagResetBackToCuration();
+  });
   document.getElementById('resolve-disjoint-manual-curate-toggle')?.addEventListener('change', (e) => {
     const chk = e.target as HTMLInputElement | null;
     resolveDisjointIsCurateM200 = Boolean(chk?.checked);
-    const curateBoxEl = document.getElementById('resolve-disjoint-curate-box');
-    if (curateBoxEl) curateBoxEl.style.display = resolveDisjointIsCurateM200 ? 'flex' : 'none';
-    if (resolveDisjointIsCurateM200 && resolveDisjointAssets.length > 0) {
-      const { expected } = computeExpectedCuratedStats(getCombinedPoolTotalCount());
-      if (resolveDisjointSelectedIds.size > expected) {
-        selectTopExpectedKeepersInDialog();
-        return;
-      }
-    }
+    syncResolveDisjointWorkflowStepUI();
     renderResolveDisjointAssets();
     updateResolveDisjointSelectionSummary();
     updateResolveDisjointTargetPreview();
@@ -5591,7 +5589,9 @@ function refreshExpectedCuratedUI(): void {
   const hrPreview = computeHighratedUnselectedPreview();
 
   if (pill) {
-    pill.textContent = `${selectedCount} / 🎯 ${expected} recommended (of ${resolveDisjointAssets.length} assets)`;
+    pill.textContent = resolveDisjointIsCurateM200
+      ? `${selectedCount} / 🎯 ${expected} recommended (of ${resolveDisjointAssets.length} assets)`
+      : `${selectedCount} / ${resolveDisjointAssets.length} event asset(s) included`;
   }
 
   const expTextEl = document.getElementById('resolve-disjoint-expected-curated-text');
@@ -5721,7 +5721,7 @@ function renderResolveDisjointAssets(): void {
       const kRank = keeperRankMap.get(a.asset_id) || 0;
       const recRank = recommendedCardRank.get(a.asset_id) || 0;
       const recBadge =
-        recRank > 0
+        resolveDisjointIsCurateM200 && recRank > 0
           ? `<span class="badge badge-xs badge-purple font-mono" title="Top ${expForCards} recommended keeper by AI score: round(ln(${poolForCards})) = round(${lnForCards.toFixed(2)}) = ${expForCards}">🎯 Rec #${recRank}/${expForCards} (ln ${poolForCards})</span>`
           : '';
       const isHighratedUnselected = !checked && Boolean(hrPreviewForCards?.highratedIds.has(a.asset_id));
@@ -5817,8 +5817,8 @@ function renderResolveDisjointAssets(): void {
           groupLabel: resolveDisjointMomentName,
           hideMarkRemoved: true,
           selectedIds: resolveDisjointSelectedIds,
-          targetSelectionCount: expNow,
-          logPoolTotal: poolNow,
+          targetSelectionCount: resolveDisjointIsCurateM200 ? expNow : undefined,
+          logPoolTotal: resolveDisjointIsCurateM200 ? poolNow : undefined,
           defaultSort: 'score',
           onSelectionChange: () => {
             renderResolveDisjointAssets();
@@ -6462,10 +6462,18 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
     `;
   }
 
+  const hideInlineEngineSaves =
+    state === sourceTagState && resolveDisjointOpenedFromCuration && resolveDisjointRetagExpanded;
   const saveOnlyLabel = state.hideSaveUseBtn ? '💾 Save DB Tags (This Batch)' : '💾 Save Tags Only (Keep Name)';
-  const saveUseBtnHtml = state.hideSaveUseBtn
-    ? ''
-    : `<button type="button" class="btn btn-xs btn-purple btn-engine-save-use" ${state.isSaving ? 'disabled' : ''} title="Record tagging session into DB AND copy checked tags into Target Moment Album Name">
+  const saveOnlyBtnHtml = hideInlineEngineSaves
+    ? `<span class="badge badge-xs badge-amber font-mono" title="Use the bottom Retag &amp; Reset Pipeline button to apply modified tags and reset pipeline back to M100">⚠️ Submit below to Retag &amp; Reset Pipeline</span>`
+    : `<button type="button" class="btn btn-xs btn-outline btn-engine-save-only" ${state.isSaving ? 'disabled' : ''} title="Record tagging session into media_organizer.db for ONLY this Moment's selected assets without changing folder names">
+            ${saveOnlyLabel}
+          </button>`;
+  const saveUseBtnHtml =
+    state.hideSaveUseBtn || hideInlineEngineSaves
+      ? ''
+      : `<button type="button" class="btn btn-xs btn-purple btn-engine-save-use" ${state.isSaving ? 'disabled' : ''} title="Record tagging session into DB AND copy checked tags into Target Moment Album Name">
             ✨ Save Tags &amp; Use for Name
           </button>`;
 
@@ -6478,9 +6486,7 @@ function renderTaggingEngineCard(state: TaggingEngineState): void {
         </div>
         <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
           ${copyBtnHtml}
-          <button type="button" class="btn btn-xs btn-outline btn-engine-save-only" ${state.isSaving ? 'disabled' : ''} title="Record tagging session into media_organizer.db for ONLY this Moment's selected assets without changing folder names">
-            ${saveOnlyLabel}
-          </button>
+          ${saveOnlyBtnHtml}
           ${saveUseBtnHtml}
         </div>
       </div>
@@ -6872,6 +6878,147 @@ function getCombinedSelectedAssetCount(): number {
   return total;
 }
 
+let resolveDisjointOpenedFromCuration = false;
+let resolveDisjointRetagExpanded = false;
+
+function renderCollapsedMomentTagsSummaryHtml(): string {
+  if (!sourceTagState.tags.length) {
+    return `<span class="text-muted">Tagged as <code>${escapeHtml(resolveDisjointMomentName)}</code></span>`;
+  }
+  return sourceTagState.tags
+    .map(t => {
+      const cls =
+        t.category === 'family_member'
+          ? 'badge-green'
+          : t.category === 'people'
+            ? 'badge-purple'
+            : t.category === 'activity'
+              ? 'badge-blue'
+              : t.category === 'location'
+                ? 'badge-amber'
+                : 'badge-outline';
+      return `<span class="badge badge-xs ${cls} font-mono" style="font-size: 0.65rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`;
+    })
+    .join(' ');
+}
+
+function syncResolveDisjointWorkflowStepUI(): void {
+  const isCurationStep = resolveDisjointIsCurateM200 && !resolveDisjointRetagExpanded;
+  const isRetagResetMode = resolveDisjointOpenedFromCuration && resolveDisjointRetagExpanded;
+
+  const titleEl = document.getElementById('resolve-disjoint-modal-title');
+  const collapsedBarEl = document.getElementById('resolve-disjoint-collapsed-tags-bar');
+  const collapsedSumEl = document.getElementById('resolve-disjoint-collapsed-tags-summary');
+  const retagBannerEl = document.getElementById('resolve-disjoint-retag-reset-banner');
+  const step1El = document.getElementById('resolve-disjoint-step1-section');
+  const step2El = document.getElementById('resolve-disjoint-step2-merge-section');
+  const expBarEl = document.getElementById('resolve-disjoint-expected-curated-bar');
+  const curateToggleBarEl = document.getElementById('resolve-disjoint-manual-curate-toggle-bar');
+  const curateBoxEl = document.getElementById('resolve-disjoint-curate-box');
+  const hideUnselBtn = document.getElementById('btn-disjoint-hide-unselected');
+  const assetsHeadEl = document.getElementById('resolve-disjoint-assets-heading');
+  const pathLblEl = document.getElementById('resolve-disjoint-target-path-label');
+  const targetInp = document.getElementById('resolve-disjoint-target-input') as HTMLInputElement | null;
+  const btnLegacy = document.getElementById('btn-resolve-disjoint-legacy-merge');
+
+  const poolN = getCombinedPoolTotalCount();
+  const { expected } = computeExpectedCuratedStats(poolN);
+
+  if (titleEl) {
+    if (isCurationStep) {
+      titleEl.textContent =
+        poolN > 0
+          ? `🎨 Manual Curation — ${resolveDisjointMomentName} (Target: round(ln ${poolN}) = ${expected} Keeper${expected === 1 ? '' : 's'})`
+          : `🎨 Manual Curation — ${resolveDisjointMomentName}`;
+    } else if (isRetagResetMode) {
+      titleEl.textContent = `🔄 Retag & Reset Pipeline (Step 1: Tagging · Step 2: Merge Event Assets) — ${resolveDisjointMomentName}`;
+    } else {
+      titleEl.textContent = `🏷️ Moment Tagging — Step 1: Tagging / Moment Creation · Step 2: Merge Event Assets (${resolveDisjointMomentName})`;
+    }
+  }
+
+  if (collapsedBarEl) collapsedBarEl.style.display = isCurationStep ? 'flex' : 'none';
+  if (collapsedSumEl && isCurationStep) {
+    collapsedSumEl.innerHTML = renderCollapsedMomentTagsSummaryHtml();
+  }
+  if (retagBannerEl) retagBannerEl.style.display = isRetagResetMode ? 'flex' : 'none';
+  if (step1El) step1El.style.display = isCurationStep ? 'none' : 'flex';
+  if (step2El) step2El.style.display = isCurationStep ? 'none' : 'flex';
+  if (expBarEl) expBarEl.style.display = isCurationStep ? 'flex' : 'none';
+  if (curateToggleBarEl) curateToggleBarEl.style.display = 'none';
+  if (curateBoxEl) curateBoxEl.style.display = isCurationStep ? 'flex' : 'none';
+  if (hideUnselBtn) hideUnselBtn.style.display = isCurationStep ? 'inline-flex' : 'none';
+  if (assetsHeadEl) {
+    assetsHeadEl.textContent = isCurationStep
+      ? 'Select Keepers for Manual Curation (click thumbnail to preview, check keepers)'
+      : 'Assets in Source Group for Step 1 Moment Creation (uncheck any duplicate copies to exclude)';
+  }
+  if (pathLblEl) {
+    pathLblEl.textContent = isCurationStep
+      ? 'Manual Curation Destination · Target Path (Tagging Locked — Expand Retag Above to Change)'
+      : isRetagResetMode
+        ? 'Pipeline Reset Destination · Target Path (Resets Moment Back to Moments / M100)'
+        : 'Step 1 & 2 Moment Destination · Target Path';
+  }
+  if (targetInp) {
+    targetInp.readOnly = isCurationStep;
+  }
+  if (btnLegacy) {
+    btnLegacy.style.display = isCurationStep || resolveDisjointCompleted ? 'none' : '';
+  }
+}
+
+function expandRetagResetInCurationModal(): void {
+  resolveDisjointRetagExpanded = true;
+  resolveDisjointIsCurateM200 = false;
+  disjointFilterCuratedOnly = false;
+  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
+  if (parentSel) {
+    parentSel.value = 'Moments';
+    parentSel.disabled = false;
+  }
+  // Select all non-duplicate event assets when retagging so the full event pool stays in Moments/<Target>
+  resolveDisjointSelectedIds.clear();
+  const nonDups = resolveDisjointAssets.filter(a => !a.is_duplicate_copy);
+  (nonDups.length ? nonDups : resolveDisjointAssets).forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
+
+  syncResolveDisjointWorkflowStepUI();
+  renderTaggingEngineCard(sourceTagState);
+  renderResolveDisjointAssets();
+  updateResolveDisjointSelectionSummary();
+  updateResolveDisjointTargetPreview();
+}
+
+function collapseRetagResetBackToCuration(): void {
+  resolveDisjointRetagExpanded = false;
+  resolveDisjointIsCurateM200 = true;
+  combinedExtraMoments.clear();
+  const parentSel = document.getElementById('resolve-disjoint-parent-select') as HTMLSelectElement | null;
+  if (parentSel) {
+    parentSel.value = 'Curated';
+    parentSel.disabled = true;
+  }
+  applyTargetMomentName(resolveDisjointMomentName, false);
+  const { expected } = computeExpectedCuratedStats(resolveDisjointAssets.length);
+  const existingOrgCurated = resolveDisjointAssets.filter(a => a.in_organizer_curated);
+  resolveDisjointSelectedIds.clear();
+  if (existingOrgCurated.length === expected && expected > 0) {
+    existingOrgCurated.forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
+  } else {
+    const nonDups = resolveDisjointAssets.filter(a => !a.is_duplicate_copy);
+    const ranked = [...(nonDups.length ? nonDups : resolveDisjointAssets)].sort(
+      (a, b) => b.score_normalized - a.score_normalized
+    );
+    ranked.slice(0, expected).forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
+  }
+  syncResolveDisjointWorkflowStepUI();
+  renderTaggingEngineCard(sourceTagState);
+  renderResolveDisjointCombineTray();
+  renderResolveDisjointAssets();
+  updateResolveDisjointSelectionSummary();
+  updateResolveDisjointTargetPreview();
+}
+
 function updateResolveDisjointTargetPreview(): void {
   const previewEl = document.getElementById('resolve-disjoint-target-path-preview');
   const statusNoteEl = document.getElementById('resolve-disjoint-target-status-note');
@@ -6881,20 +7028,26 @@ function updateResolveDisjointTargetPreview(): void {
   const rawTarget = (targetInp?.value || '').trim();
   const targetName = rawTarget || '—';
 
-  const manualCurateActive = resolveDisjointIsCurateM200;
-  const existingCurated = rawTarget ? getExistingTargetAlbumInfo('Curated', rawTarget).exists : false;
+  const manualCurateActive = resolveDisjointIsCurateM200 && !resolveDisjointRetagExpanded;
+  const isRetagResetMode = resolveDisjointOpenedFromCuration && resolveDisjointRetagExpanded;
 
   if (parentSel) {
     const curatedOpt = parentSel.querySelector<HTMLOptionElement>('option[value="Curated"]');
+    const tbcOpt = parentSel.querySelector<HTMLOptionElement>('option[value="ToBeCurated"]');
     if (curatedOpt) {
-      curatedOpt.disabled = !manualCurateActive && !existingCurated;
+      curatedOpt.disabled = !manualCurateActive;
+      curatedOpt.hidden = !manualCurateActive;
+    }
+    if (tbcOpt) {
+      tbcOpt.disabled = true;
+      tbcOpt.hidden = true;
     }
     if (manualCurateActive) {
       parentSel.value = 'Curated';
       parentSel.disabled = true;
     } else {
       parentSel.disabled = false;
-      if (!existingCurated && parentSel.value === 'Curated') {
+      if (parentSel.value === 'Curated' || parentSel.value === 'ToBeCurated') {
         parentSel.value = 'Moments';
       }
     }
@@ -6975,12 +7128,20 @@ function updateResolveDisjointTargetPreview(): void {
       }
     } else {
       btnSubmit.disabled = isSubmittingResolveDisjoint;
-      if (existingInfo.exists) {
-        btnSubmit.textContent = `➕ Add Missing Assets & Tag Existing (${totalSelCount})`;
-        btnSubmit.title = 'Destination folder already exists — copy only missing assets into Media Organizer and update DB tags';
+      if (isRetagResetMode) {
+        btnSubmit.textContent = `🔄 Retag & Reset Pipeline to Moments (${totalSelCount})`;
+        btnSubmit.title =
+          'Apply updated tags/merges, clear prior Curated / Highrated organizer folders, and reset pipeline back to M100 (Moments)';
+      } else if (combinedExtraMoments.size > 0) {
+        btnSubmit.textContent = `🏷️ Save Tags & Merge Event into Moments (${totalSelCount})`;
+        btnSubmit.title =
+          'Complete Step 1 Tagging & Step 2 Same-Event Merge into Media Organizer.photoslibrary / Moments / [Target]';
+      } else if (existingInfo.exists) {
+        btnSubmit.textContent = `🏷️ Update Moment Tags & Sync Moments (${totalSelCount})`;
+        btnSubmit.title = 'Save Moment tags, place missing assets into Media Organizer / Moments, and reset pipeline to M100';
       } else {
-        btnSubmit.textContent = `✨ Merge & Tag into Moments (${totalSelCount})`;
-        btnSubmit.title = 'Consolidate source(s) + apply DB tags into Media Organizer.photoslibrary / Moments / [Target]';
+        btnSubmit.textContent = `🏷️ Create & Tag Moment (${totalSelCount})`;
+        btnSubmit.title = 'Complete Step 1 Moment Tagging & Creation inside Media Organizer.photoslibrary / Moments / [Target]';
       }
     }
   }
@@ -6993,12 +7154,20 @@ export async function openResolveDisjointModal(
 ): Promise<void> {
   const isUnassigned = Boolean(options?.isUnassignedCluster);
   const isHistorical = Boolean(options?.isHistoricalMoment);
-  const isCurateM200 = Boolean(options?.isCurateM200);
+  // Never allow opening Manual Curation for unassigned groupings before Moment Tagging is complete
+  const requestedCurate = Boolean(options?.isCurateM200) && !isUnassigned;
+  const srcGroupingInitial = allGroupingsData?.groupings.find(
+    g => g.name.toLowerCase() === momentName.trim().toLowerCase()
+  );
+  const knownUntagged = srcGroupingInitial ? !srcGroupingInitial.is_tagged : false;
+  const isCurateM200 = requestedCurate && !knownUntagged;
   const explicitIds = (options?.assetIds || []).map(s => (s || '').trim()).filter(Boolean);
   resolveDisjointMomentName = momentName;
   resolveDisjointIsUnassignedCluster = isUnassigned;
   resolveDisjointIsHistoricalMoment = isHistorical;
   resolveDisjointIsCurateM200 = isCurateM200;
+  resolveDisjointOpenedFromCuration = isCurateM200;
+  resolveDisjointRetagExpanded = false;
   resolveDisjointExplicitAssetIds = explicitIds;
   resolveDisjointAssets = [];
   resolveDisjointSelectedIds.clear();
@@ -7052,24 +7221,14 @@ export async function openResolveDisjointModal(
   const candPreviewEl = document.getElementById('resolve-disjoint-candidate-preview-panel');
   const statusEl = document.getElementById('resolve-disjoint-status');
 
-  if (titleEl) {
-    titleEl.textContent = isCurateM200
-      ? `🎨 Curate M200 Moment (Tag & Approve ➜ Curated) · ${momentName}`
-      : isUnassigned
-        ? `🏷️ Tag & Consolidate Unassigned Group · ${momentName}`
-        : isHistorical
-          ? `🏷️ Tag Historical Moment (All Assets) · ${momentName}`
-          : `🏷️ Tag & Consolidate Moment · ${momentName}`;
-  }
   if (badgeEl) badgeEl.textContent = 'loading...';
   if (summaryEl) {
     summaryEl.innerHTML = isCurateM200
-      ? '<div class="spinner-sm"></div><span>Inspecting proposed ToBeCurated Moment assets, DB tags, and Curated destination...</span>'
+      ? '<div class="spinner-sm"></div><span>Loading tagged Moment assets and logarithmic curation target...</span>'
       : isUnassigned
-        ? '<div class="spinner-sm"></div><span>Inspecting unassigned group assets, duplicates, DB tags, and nearby Moment candidates...</span>'
-        : '<div class="spinner-sm"></div><span>Inspecting Moment assets, DB tags, and consolidation candidates...</span>';
+        ? '<div class="spinner-sm"></div><span>Loading unassigned assets for Step 1 (Tagging &amp; Moment Creation) and Step 2 (Same-Event Merge)...</span>'
+        : '<div class="spinner-sm"></div><span>Loading Moment assets for Step 1 (Tagging) and Step 2 (Same-Event Merge)...</span>';
   }
-  const curateBoxEl = document.getElementById('resolve-disjoint-curate-box');
   const manCurToggle = document.getElementById('resolve-disjoint-manual-curate-toggle') as HTMLInputElement | null;
   const delSrcRowEl = document.getElementById('resolve-disjoint-delete-source-row');
   const roSrcNoteEl = document.getElementById('resolve-disjoint-readonly-source-note');
@@ -7080,7 +7239,6 @@ export async function openResolveDisjointModal(
   const srcGrouping = allGroupingsData?.groupings.find(g => g.name.toLowerCase() === momentName.trim().toLowerCase());
   const srcIsOrganizerAlbum = Boolean(srcGrouping?.in_organizer_library);
   if (manCurToggle) manCurToggle.checked = isCurateM200;
-  if (curateBoxEl) curateBoxEl.style.display = isCurateM200 ? 'flex' : 'none';
   if (delSrcRowEl) delSrcRowEl.style.display = !isCurateM200 && srcIsOrganizerAlbum ? 'flex' : 'none';
   if (roSrcNoteEl) roSrcNoteEl.style.display = !isCurateM200 && !srcIsOrganizerAlbum ? 'flex' : 'none';
   if (handleUnselCb) handleUnselCb.checked = false;
@@ -7091,7 +7249,7 @@ export async function openResolveDisjointModal(
   if (albumsBarEl) albumsBarEl.style.display = 'none';
   if (listEl) listEl.innerHTML = '';
   if (chipsEl) chipsEl.innerHTML = '<span class="text-muted font-mono" style="font-size: 0.69rem;">Searching nearby Moments...</span>';
-  if (targetInp) targetInp.value = '';
+  if (targetInp) targetInp.value = isCurateM200 ? momentName : '';
   if (parentSel) {
     parentSel.value = isCurateM200 ? 'Curated' : 'Moments';
     parentSel.disabled = isCurateM200;
@@ -7101,6 +7259,7 @@ export async function openResolveDisjointModal(
   if (shareDisjointCb) shareDisjointCb.checked = false;
   if (searchInp) searchInp.value = '';
   if (candPreviewEl) candPreviewEl.style.display = 'none';
+  syncResolveDisjointWorkflowStepUI();
   renderTaggingEngineCard(sourceTagState);
   renderPropagateTagsPreview();
   renderResolveDisjointCombineTray();
@@ -7169,7 +7328,21 @@ export async function openResolveDisjointModal(
         is_duplicate_copy: Boolean(a.is_duplicate_copy)
       });
     });
-    if (isCurateM200 && assets.length > 0) {
+    const hasSavedTagsInDb = Boolean(
+      (data.saved_tags && data.saved_tags.length > 0) || data.last_tag_session || srcGrouping?.is_tagged
+    );
+    const forcedToTaggingFirst = resolveDisjointIsCurateM200 && !hasSavedTagsInDb;
+    if (forcedToTaggingFirst) {
+      resolveDisjointIsCurateM200 = false;
+      resolveDisjointOpenedFromCuration = false;
+      resolveDisjointRetagExpanded = false;
+      if (parentSel) {
+        parentSel.value = 'Moments';
+        parentSel.disabled = false;
+      }
+    }
+
+    if (resolveDisjointIsCurateM200 && assets.length > 0) {
       const { expected } = computeExpectedCuratedStats(assets.length);
       const existingOrgCurated = assets.filter(a => a.in_organizer_curated);
       resolveDisjointSelectedIds.clear();
@@ -7184,7 +7357,9 @@ export async function openResolveDisjointModal(
         );
         ranked.slice(0, expected).forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
       }
-    } else if (resolveDisjointSelectedIds.size === 0) {
+    } else {
+      // In Moment Tagging mode (Step 1), include ALL non-duplicate event assets in the Moment!
+      resolveDisjointSelectedIds.clear();
       const nonDups = assets.filter(a => !a.is_duplicate_copy);
       (nonDups.length ? nonDups : assets).forEach(a => resolveDisjointSelectedIds.add(a.asset_id));
     }
@@ -7194,24 +7369,40 @@ export async function openResolveDisjointModal(
     const histMin = data.historical_min ?? 0.5315;
     const { expected: initExp, lnRaw: initLn } = computeExpectedCuratedStats(assets.length);
     if (badgeEl) {
-      badgeEl.textContent = `${qualCount} qual · ${assets.length} total · 🎯 exp ${initExp} (ln=${initLn.toFixed(2)})`;
+      badgeEl.textContent = resolveDisjointIsCurateM200
+        ? `${qualCount} qual · ${assets.length} total · 🎯 exp ${initExp} (ln=${initLn.toFixed(2)})`
+        : `${assets.length} event asset(s) · ${qualCount} qual`;
     }
     if (summaryEl) {
-      summaryEl.innerHTML = isUnassigned
-        ? `
-          <span>
-            Unassigned group <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
-            ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s)` : ''}.
-            Review duplicates, tag in DB, click any existing Moment pill to preview &amp; merge, or create a New Format Moment.
-          </span>
-        `
-        : `
-          <span>
-            <strong>${escapeHtml(momentName)}</strong> has <strong>${qualCount}</strong> qualified asset(s) (&gt; ${histMin.toFixed(4)})
-            ${belowCount > 0 ? `and <strong>${belowCount}</strong> lower-rated asset(s) inside Apple Photos albums` : ''}.
-            Tag independently in DB, click any existing Moment pill to preview &amp; tag its assets identically, or consolidate into a New Format Moment.
+      if (forcedToTaggingFirst) {
+        summaryEl.innerHTML = `
+          <span class="text-amber">
+            🔒 <strong>Complete Moment Tagging First:</strong> <code>${escapeHtml(momentName)}</code> does not have saved Moment tags yet.
+            Complete <strong>Step 1 (Tagging &amp; Moment Creation)</strong> and optional <strong>Step 2 (Same-Event Merge)</strong> below to unlock Manual Curation.
           </span>
         `;
+      } else if (resolveDisjointIsCurateM200) {
+        summaryEl.innerHTML = `
+          <span>
+            <strong>Manual Curation:</strong> Select <strong>${initExp}</strong> keeper${initExp === 1 ? '' : 's'} (<code>round(ln(${assets.length})) = ${initExp}</code>) from <strong>${escapeHtml(momentName)}</strong>.
+            Tagging is locked by default — expand <em>Retag / Modify Tags</em> below only if you want to retag and reset this Moment back to <code>Moments</code> (<code>M100</code>).
+          </span>
+        `;
+      } else {
+        summaryEl.innerHTML = isUnassigned
+          ? `
+            <span>
+              <strong>Step 1:</strong> Tag unassigned group <strong>${escapeHtml(momentName)}</strong> (${assets.length} asset(s), ${qualCount} &gt; ${histMin.toFixed(4)}) to create its Moment in <code>Moments</code>.
+              <strong>Step 2:</strong> Optionally merge other Moments or timeframe device photos from the same event. (Manual Curation unlocks once tagging is complete.)
+            </span>
+          `
+          : `
+            <span>
+              <strong>Step 1:</strong> Tag <strong>${escapeHtml(momentName)}</strong> (${assets.length} asset(s)${belowCount > 0 ? `, including ${belowCount} lower-rated` : ''}) and compose its canonical Moment name in <code>Moments</code>.
+              <strong>Step 2:</strong> Optionally merge nearby Moments or timeframe device photos belonging to the same event.
+            </span>
+          `;
+      }
     }
 
     sourceTagState.tagDbCounts = data.tag_db_counts || {};
@@ -7247,22 +7438,28 @@ export async function openResolveDisjointModal(
       existingTargetAlbumsMap.set(k, al.asset_count ?? 0);
     });
 
-    const fallbackName = isUnassigned && /uncategorized/i.test(momentName) ? '' : momentName;
-    const defaultNewName = composeMomentNameFromTags(sourceTagState.tags, fallbackName);
-    const hasCustomTypedTarget = Boolean(
-      isUnassigned && suggestedTarget && !/uncategorized/i.test(suggestedTarget) && !(data.saved_tags?.length)
-    );
-    const effectiveDefault = hasCustomTypedTarget
-      ? suggestedTarget
-      : (defaultNewName || data.suggested_target || suggestedTarget || '');
-    if (effectiveDefault) {
-      applyTargetMomentName(effectiveDefault, false);
+    if (resolveDisjointIsCurateM200) {
+      // In Manual Curation mode, keep target locked to the already-tagged Moment name by default
+      applyTargetMomentName(momentName, false);
+    } else {
+      const fallbackName = isUnassigned && /uncategorized/i.test(momentName) ? '' : momentName;
+      const defaultNewName = composeMomentNameFromTags(sourceTagState.tags, fallbackName);
+      const hasCustomTypedTarget = Boolean(
+        isUnassigned && suggestedTarget && !/uncategorized/i.test(suggestedTarget) && !(data.saved_tags?.length)
+      );
+      const effectiveDefault = hasCustomTypedTarget
+        ? suggestedTarget
+        : (defaultNewName || data.suggested_target || suggestedTarget || '');
+      if (effectiveDefault) {
+        applyTargetMomentName(effectiveDefault, false);
+      }
     }
 
     nearbyMomentCandidatesList = data.nearby_candidates || [];
     renderCandidateMomentChips(nearbyMomentCandidatesList);
     renderResolveDisjointCombineTray();
     renderPropagateTagsPreview();
+    syncResolveDisjointWorkflowStepUI();
     updateResolveDisjointTargetPreview();
     renderResolveDisjointAssets();
 
@@ -7448,9 +7645,35 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
     const extraEntries = Array.from(combinedExtraMoments.values());
     const totalAssetSel = assetIds.length + extraEntries.reduce((acc, e) => acc + e.assetIds.size, 0);
 
-    titleEl.textContent = existingInfo.exists
-      ? '➕ Confirm Add Missing Assets & Merge Plan'
-      : '✨ Confirm New Moment Merge Plan';
+    const realExtraMoments = extraEntries.filter(e => !e.isTimeframeDeviceSelection);
+    const allSourceNamesLc = new Set(
+      [
+        ...(resolveDisjointIsUnassignedCluster ? [] : [resolveDisjointMomentName]),
+        ...realExtraMoments.map(e => e.momentName)
+      ].map(s => s.trim().toLowerCase())
+    );
+    const priorAlbumsToRemove = existingAlbumsList.filter(al => {
+      const nmLc = (al.album_name || '').trim().toLowerCase();
+      const parLc = (al.parent_folder_name || 'Moments').trim().toLowerCase();
+      if (!allSourceNamesLc.has(nmLc)) return false;
+      return !(nmLc === targetMoment.toLowerCase() && parLc === resolvedParent.toLowerCase());
+    });
+    const isRetagPipelineReset = Boolean(
+      (resolveDisjointOpenedFromCuration && resolveDisjointRetagExpanded) ||
+        priorAlbumsToRemove.some(al =>
+          ['curated', 'tobecurated', 'highrated assets'].includes((al.parent_folder_name || '').trim().toLowerCase())
+        ) ||
+        allGroupingsData?.groupings.some(
+          g =>
+            allSourceNamesLc.has(g.name.toLowerCase()) &&
+            (g.curated_count > 0 || g.moment_status === 'M300' || g.moment_status === 'M400' || g.moment_status === 'M450')
+        )
+    );
+    titleEl.textContent = isRetagPipelineReset
+      ? '🔄 Confirm Retag & Pipeline Reset (Back to M100 Moments)'
+      : existingInfo.exists
+        ? '🏷️ Confirm Moment Tagging & Sync Plan'
+        : '🏷️ Confirm Moment Tagging & Creation Plan';
     subEl.innerHTML = `Target: <code>${escapeHtml(fullTargetPath)}</code>`;
 
     stepsHtml.push(
@@ -7483,19 +7706,6 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
       `<strong>Copy only missing non-duplicate assets (${totalAssetSel} selected):</strong> Inspect items from ${sourceListParts.join(' + ')} and add only unique assets not already in destination.${skipNote}`
     );
 
-    const realExtraMoments = extraEntries.filter(e => !e.isTimeframeDeviceSelection);
-    const allSourceNamesLc = new Set(
-      [
-        ...(resolveDisjointIsUnassignedCluster ? [] : [resolveDisjointMomentName]),
-        ...realExtraMoments.map(e => e.momentName)
-      ].map(s => s.trim().toLowerCase())
-    );
-    const priorAlbumsToRemove = existingAlbumsList.filter(al => {
-      const nmLc = (al.album_name || '').trim().toLowerCase();
-      const parLc = (al.parent_folder_name || 'Moments').trim().toLowerCase();
-      if (!allSourceNamesLc.has(nmLc)) return false;
-      return !(nmLc === targetMoment.toLowerCase() && parLc === resolvedParent.toLowerCase());
-    });
     const deletableSources = [
       ...(resolveDisjointIsUnassignedCluster ? [] : [resolveDisjointMomentName]),
       ...realExtraMoments.map(e => e.momentName)
@@ -7526,11 +7736,11 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
         : parentLcForStage === 'curated'
           ? 'M300'
           : 'M100';
-    if (!existingInfo.exists) {
-      stepsHtml.push(
-        `<strong>Reset Moment Status (treat as new folder):</strong> Initialize/reset <code>${escapeHtml(targetMoment)}</code> stage in <code>curated_moments</code> to <code>${newFolderResetStage}</code> so it runs through Mode [M] as a new folder and assets moved from any <code>Deleted</code> folder can be re-published.`
-      );
-    }
+    stepsHtml.push(
+      isRetagPipelineReset
+        ? `<strong>⚠️ Pipeline Reset to <code>M100</code> (Uncurated in Moments):</strong> Clear any prior <code>Curated</code> / <code>Highrated assets</code> albums &amp; LaCie exports for <code>${escapeHtml(resolveDisjointMomentName)}</code> / <code>${escapeHtml(targetMoment)}</code> inside <code>Media Organizer</code> and reset <code>curated_moments</code> to <code>M100</code> so you can curate fresh after retagging.`
+        : `<strong>Initialize Moment Stage (<code>${newFolderResetStage}</code>):</strong> Set <code>${escapeHtml(targetMoment)}</code> in <code>curated_moments</code> to <code>${newFolderResetStage}</code> (Uncurated in <code>Moments</code>), unlocking Manual Curation next.`
+    );
 
     if (action === 'merge_new' && (savePerSource || shareDisjoint)) {
       const tagSummary = formatUnifiedMetadataSummary(sourceTagState.tags);
@@ -7589,7 +7799,11 @@ function openResolveActionConfirmDialog(action: ResolveDisjointAction, skipAutoI
       noteEl.innerHTML = '✅ Already-present assets in destination and skipped duplicate copies will not be re-added.';
     }
     proceedBtn.className = 'btn btn-purple';
-    proceedBtn.textContent = existingInfo.exists ? '➕ Confirm & Add Missing Assets' : '✨ Confirm & Merge Moment';
+    proceedBtn.textContent = isRetagPipelineReset
+      ? '🔄 Confirm Retag & Reset Pipeline'
+      : existingInfo.exists
+        ? '🏷️ Confirm Tagging & Sync Moments'
+        : '🏷️ Confirm Create & Tag Moment';
   } else if (action === 'skip_publishing') {
     titleEl.textContent = '⏭️ Confirm SkipPublishing Action';
     subEl.innerHTML = `Source Moment: <code>${escapeHtml(resolveDisjointMomentName)}</code>`;
@@ -8084,21 +8298,27 @@ async function ensureGroupingAssetsLoaded(g: UnifiedGroupingItem): Promise<Unifi
 function getOrInitGroupingSelectedSet(
   gid: string,
   assets: UnifiedGroupingAssetItem[],
-  poolTotalHint?: number
+  poolTotalHint?: number,
+  isTaggingComplete = true
 ): Set<string> {
   if (!unifiedGroupingSelectedIds.has(gid)) {
     const sel = new Set<string>();
-    const poolN = Math.max(poolTotalHint || 0, assets.length);
-    const { expected } = computeExpectedCuratedStats(poolN);
-    const existingCurated = assets.filter(a => a.in_curated && a.in_organizer_library);
-    if (existingCurated.length > 0 && existingCurated.length === expected) {
-      existingCurated.forEach(a => sel.add(a.asset_id));
+    const nonDups = assets.filter(a => !a.is_duplicate_copy);
+    if (!isTaggingComplete) {
+      // Before Moment Tagging is complete, select ALL non-duplicate event assets for Step 1 Moment Creation
+      (nonDups.length ? nonDups : assets).forEach(a => sel.add(a.asset_id));
     } else {
-      const nonDups = assets.filter(a => !a.is_duplicate_copy);
-      const ranked = [...(nonDups.length ? nonDups : assets)].sort(
-        (a, b) => b.score_normalized - a.score_normalized
-      );
-      ranked.slice(0, expected).forEach(a => sel.add(a.asset_id));
+      const poolN = Math.max(poolTotalHint || 0, assets.length);
+      const { expected } = computeExpectedCuratedStats(poolN);
+      const existingCurated = assets.filter(a => a.in_curated && a.in_organizer_library);
+      if (existingCurated.length > 0 && existingCurated.length === expected) {
+        existingCurated.forEach(a => sel.add(a.asset_id));
+      } else {
+        const ranked = [...(nonDups.length ? nonDups : assets)].sort(
+          (a, b) => b.score_normalized - a.score_normalized
+        );
+        ranked.slice(0, expected).forEach(a => sel.add(a.asset_id));
+      }
     }
     unifiedGroupingSelectedIds.set(gid, sel);
   }
@@ -8109,7 +8329,13 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
   if (!assets.length) {
     return '<div class="text-muted font-mono" style="padding: 0.6rem;">No active assets found in this grouping.</div>';
   }
-  const selSet = getOrInitGroupingSelectedSet(g.grouping_id, assets, g.event_total_assets || g.total_assets);
+  const isTaggingCompleteExp = g.kind === 'moment' && Boolean(g.is_tagged);
+  const selSet = getOrInitGroupingSelectedSet(
+    g.grouping_id,
+    assets,
+    g.event_total_assets || g.total_assets,
+    isTaggingCompleteExp
+  );
   const curatedOnly = unifiedGroupingCuratedOnly.has(g.grouping_id);
   const keeperRankMap = new Map<string, number>();
   let kCounter = 0;
@@ -8146,20 +8372,24 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
       ? `<button type="button" class="btn btn-xs btn-amber btn-ugrp-exp-dedup" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(`Deduplicate against '${g.duplicate_of_moment}' — merges DB tags & switches button to Remove (All-Media link)`)}">♻️ Dedup</button>`
       : '';
 
+  const lockedCurateExpBtn = `<button type="button" class="btn btn-xs btn-outline" disabled style="opacity: 0.45; cursor: not-allowed;" title="Locked — complete Moment Tagging (Step 1: Tagging &amp; Moment Creation · Step 2: Merge Event Assets) first before Manual Curation">🔒 Curate (${effectiveExpExp})</button>`;
   const primaryActionBtn = g.is_deduped_group
     ? `<button type="button" class="btn btn-xs btn-red btn-ugrp-exp-open-photos" data-is-remove-link="1" data-library-scope="all_media" data-album-name="${escapeHtml(expRemoveAlbum)}" data-full-path="${escapeHtml(expRemovePath)}" data-sample-aid="${escapeHtml(expSampleAid)}" title="${escapeHtml(`Deduped into '${g.duplicate_of_moment || ''}' — open '${expRemoveAlbum}' in All-Media.photoslibrary to manually delete this Moment in Photos`)}">🗑️ Remove in All-Media ↗</button>`
-    : isCuratedExp && pendingPubExp > 0
-      ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Review & publish curated batch (Step 2B)">🚀 Publish (${g.propose_next_str || pendingPubExp})</button>
-         <button type="button" class="btn btn-xs btn-outline btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Re-Curate / Tag</button>`
-      : isCompletedM500Exp
-        ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🔄 Republish</button>
-           <button type="button" class="btn btn-xs btn-outline btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Re-Curate / Tag</button>`
-        : g.kind === 'unassigned'
-          ? `${g.is_tagged ? '' : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-assign-selected" data-grouping-id="${escapeHtml(g.grouping_id)}">✨ Tag &amp; Assign (${selCount})</button>`}
-             <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate-selected" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ${effectiveExpExp} keepers)">🎨 Manual Curate (${effectiveExpExp})</button>`
+    : !isTaggingCompleteExp
+      ? g.kind === 'unassigned'
+        ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-assign-selected" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Moment Tagging (Step 1: Tagging &amp; Moment Creation · Step 2: Merge Event Assets)">🏷️ Moment Tagging (${selCount})</button>
+           ${lockedCurateExpBtn}`
+        : `${expDedupBtn}
+           <button type="button" class="btn btn-xs btn-cyan btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Moment Tagging (Step 1: Tagging &amp; Moment Creation · Step 2: Merge Event Assets)">🏷️ Moment Tagging</button>
+           ${lockedCurateExpBtn}`
+      : isCuratedExp && pendingPubExp > 0
+        ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Review & publish curated batch (Step 2B)">🚀 Publish (${g.propose_next_str || pendingPubExp})</button>
+           <button type="button" class="btn btn-xs btn-outline btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Re-Curate</button>`
+        : isCompletedM500Exp
+          ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-publish" data-grouping-id="${escapeHtml(g.grouping_id)}">🔄 Republish</button>
+             <button type="button" class="btn btn-xs btn-outline btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}">🎨 Re-Curate</button>`
           : `${expDedupBtn}
-             ${g.is_tagged ? '' : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}">🏷️ Tag / Consolidate</button>`}
-             <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Tagging Dialog with Manual Curation Step enabled (target ${effectiveExpExp} keepers)">🎨 Manual Curate (${effectiveExpExp})</button>`;
+             <button type="button" class="btn btn-xs btn-purple btn-ugrp-curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Manual Curation (target ${effectiveExpExp} keepers; tagging collapsed by default)">🎨 Manual Curate (${effectiveExpExp})</button>`;
 
   const nonDupExp = assets.filter(a => !a.is_duplicate_copy);
   const rankedRecExp = [...(nonDupExp.length ? nonDupExp : assets)].sort(
@@ -8175,12 +8405,14 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
       const kRank = keeperRankMap.get(a.asset_id) || 0;
       const expRecRank = expRecRankMap.get(a.asset_id) || 0;
       const recBadge =
-        expRecRank > 0
+        isTaggingCompleteExp && expRecRank > 0
           ? `<span class="badge badge-xs badge-purple font-mono" title="Top ${effectiveExpExp} recommended keeper by AI score: round(ln(${evTotExp})) = round(${effectiveLnExp.toFixed(2)}) = ${effectiveExpExp}">🎯 Rec #${expRecRank}/${effectiveExpExp} (ln ${evTotExp})</span>`
           : '';
-      const expOverTarget = selCount > effectiveExpExp;
+      const expOverTarget = isTaggingCompleteExp && selCount > effectiveExpExp;
       const keeperBadge = checked
-        ? `<span class="badge badge-xs ${expOverTarget ? 'badge-amber' : 'badge-green'} font-mono" style="font-weight: 700;">${expOverTarget ? '⚠️' : '★'} Keeper ${kRank} / 🎯 ${effectiveExpExp}</span>`
+        ? isTaggingCompleteExp
+          ? `<span class="badge badge-xs ${expOverTarget ? 'badge-amber' : 'badge-green'} font-mono" style="font-weight: 700;">${expOverTarget ? '⚠️' : '★'} Keeper ${kRank} / 🎯 ${effectiveExpExp}</span>`
+          : `<span class="badge badge-xs badge-green font-mono" style="font-weight: 700;">★ Included ${kRank}/${selCount}</span>`
         : '<span class="badge badge-xs badge-amber font-mono">⏭️ Unselected</span>';
       const qualBadge = a.qualified
         ? '<span class="badge badge-xs badge-green font-mono">★ QUALIFIED</span>'
@@ -8294,10 +8526,14 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
           <span>Select All</span>
         </label>
         <span class="badge badge-xs badge-green font-mono">${selCount} / ${assets.length} selected</span>
-        <span class="badge badge-xs badge-purple font-mono" title="Expected curated count = round(ln(${evTotExp})) = ${effectiveLnExp.toFixed(2)}">🎯 Expected Curated: ${effectiveExpExp} (ln ${evTotExp} = ${effectiveLnExp.toFixed(2)})</span>
-        <button type="button" class="btn btn-xs ${curatedOnly ? 'btn-purple' : 'btn-outline'} btn-ugrp-curated-only" data-grouping-id="${escapeHtml(g.grouping_id)}">
-          ${curatedOnly ? `★ Curated Only (${selCount})` : '👁️ Curated Only'}
-        </button>
+        ${
+          isTaggingCompleteExp
+            ? `<span class="badge badge-xs badge-purple font-mono" title="Expected curated count = round(ln(${evTotExp})) = ${effectiveLnExp.toFixed(2)}">🎯 Expected Curated: ${effectiveExpExp} (ln ${evTotExp} = ${effectiveLnExp.toFixed(2)})</span>
+               <button type="button" class="btn btn-xs ${curatedOnly ? 'btn-purple' : 'btn-outline'} btn-ugrp-curated-only" data-grouping-id="${escapeHtml(g.grouping_id)}">
+                 ${curatedOnly ? `★ Curated Only (${selCount})` : '👁️ Curated Only'}
+               </button>`
+            : `<span class="badge badge-xs badge-outline font-mono" title="Complete Step 1 Moment Tagging first — Manual Curation unlocks afterward">🔒 Complete Moment Tagging before Curation</span>`
+        }
       </div>
       <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
         ${primaryActionBtn}
@@ -8311,7 +8547,13 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
 
 function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingItem): void {
   const assets = unifiedGroupingAssetsCache.get(g.grouping_id) || [];
-  const selSet = getOrInitGroupingSelectedSet(g.grouping_id, assets);
+  const isTaggingComplete = g.kind === 'moment' && Boolean(g.is_tagged);
+  const selSet = getOrInitGroupingSelectedSet(
+    g.grouping_id,
+    assets,
+    g.event_total_assets || g.total_assets,
+    isTaggingComplete
+  );
   const rerenderBody = () => {
     bodyEl.innerHTML = renderExpandedGroupingBodyHtml(g, assets);
     wireExpandedGroupingBodyEvents(bodyEl, g);
@@ -8354,8 +8596,8 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
         groupLabel: `${g.name} (${g.moment_status})`,
         hideMarkRemoved: true,
         selectedIds: selSet,
-        targetSelectionCount: expCnt,
-        logPoolTotal: poolN,
+        targetSelectionCount: isTaggingComplete ? expCnt : undefined,
+        logPoolTotal: isTaggingComplete ? poolN : undefined,
         defaultSort: 'score',
         onSelectionChange: () => rerenderBody()
       });
@@ -8832,7 +9074,9 @@ function renderAllUnifiedGroupings(): void {
       const allCopiedToOrganizer =
         Boolean(g.in_organizer_library) &&
         ((g.organizer_mapped_count || 0) >= g.total_assets && g.total_assets > 0);
-      const tagBtnLabel = allCopiedToOrganizer ? '🏷️ Tag / Merge' : '🏷️ Tag &amp; Copy';
+      const isTaggingCompleteRow = g.kind === 'moment' && Boolean(g.is_tagged);
+      const tagBtnLabel = allCopiedToOrganizer ? '🏷️ Moment Tagging' : '🏷️ Tag &amp; Copy';
+      const lockedCurateRowBtn = `<button type="button" class="btn btn-xs btn-outline" disabled style="opacity: 0.45; cursor: not-allowed;" title="Locked — complete Moment Tagging (Step 1 &amp; Step 2) first before Manual Curation">🔒 Curate (${expCurCnt})</button>`;
       const dupGroupPillHtml = g.is_deduped_group
         ? `<span class="badge badge-xs badge-amber font-mono" title="${escapeHtml(
             `Deduplicated into '${g.duplicate_of_moment || ''}' — click Remove on the right to open All-Media.photoslibrary and manually delete this legacy Moment in Photos`
@@ -8856,18 +9100,21 @@ function renderAllUnifiedGroupings(): void {
             `Deduped into '${g.duplicate_of_moment || ''}' — click to open '${removeAlbumName}' in All-Media.photoslibrary (Read-Only) so you can manually delete the Moment from Apple Photos`
           )}">🗑️ Remove</button>
            <button type="button" class="btn btn-xs btn-icon btn-ugrp-row-action" data-action="dismiss_dedup" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Already deleted from All-Media in Photos? Click to dismiss this row">✕</button>`
-        : isCuratedRow && pendingPubCnt > 0
-          ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(propTooltip || `Review & publish batch for '${g.name}'`)}">🚀 Publish</button>
-             <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation or tags">🎨 Curate</button>`
-          : isCompletedM500Row
-            ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Publish / Republish dialog">🔄 Republish</button>
-               <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation or tags">🎨 Curate</button>`
-            : g.kind === 'unassigned'
-              ? `${g.is_tagged ? '' : `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & assign selected assets into Moments">✨ Tag &amp; Assign</button>`}
-                 <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & manually curate ${expCurCnt} keepers (ln ${evTot}) directly into Curated & Ready to Publish">🎨 Curate (${expCurCnt})</button>`
+        : !isTaggingCompleteRow
+          ? g.kind === 'unassigned'
+            ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-row-action" data-action="assign" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Step 1: Tagging &amp; Moment Creation · Step 2: Merge Same-Event Assets">🏷️ Moment Tagging</button>
+               ${lockedCurateRowBtn}`
+            : `${dedupRowBtnHtml}
+               <button type="button" class="btn btn-xs ${allCopiedToOrganizer ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Step 1: Tagging &amp; Moment Creation · Step 2: Merge Same-Event Assets">${tagBtnLabel}</button>
+               ${lockedCurateRowBtn}`
+          : isCuratedRow && pendingPubCnt > 0
+            ? `<button type="button" class="btn btn-xs ${g.published_count > 0 ? 'btn-purple' : 'btn-green'} btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="${escapeHtml(propTooltip || `Review & publish batch for '${g.name}'`)}">🚀 Publish</button>
+               <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation (or expand Retag to reset pipeline)">🎨 Curate</button>`
+            : isCompletedM500Row
+              ? `<button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="publish" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Publish / Republish dialog">🔄 Republish</button>
+                 <button type="button" class="btn btn-xs btn-outline btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Adjust manual curation (or expand Retag to reset pipeline)">🎨 Curate</button>`
               : `${dedupRowBtnHtml}
-                 ${g.is_tagged ? '' : `<button type="button" class="btn btn-xs ${allCopiedToOrganizer ? 'btn-outline' : 'btn-cyan'} btn-ugrp-row-action" data-action="tag" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & copy/consolidate into Moments">${tagBtnLabel}</button>`}
-                 <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Tag & manually curate ${expCurCnt} keepers (ln ${evTot}) directly into Curated & Ready to Publish">🎨 Curate (${expCurCnt})</button>`;
+                 <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Manually curate ${expCurCnt} keepers (ln ${evTot}) into Curated &amp; Ready to Publish">🎨 Curate (${expCurCnt})</button>`;
 
       const cachedAssets = unifiedGroupingAssetsCache.get(g.grouping_id);
       const bodyInnerHtml = isExpanded
@@ -8989,16 +9236,17 @@ function renderAllUnifiedGroupings(): void {
       if (!g || !aid) return;
       try {
         const assets = await ensureGroupingAssetsLoaded(g);
+        const isTaggingCompleteThumb = g.kind === 'moment' && Boolean(g.is_tagged);
         const poolN = Math.max(g.event_total_assets || g.total_assets, assets.length);
         const { expected: expCnt } = computeExpectedCuratedStats(poolN);
-        const selSet = getOrInitGroupingSelectedSet(gid, assets, poolN);
+        const selSet = getOrInitGroupingSelectedSet(gid, assets, poolN, isTaggingCompleteThumb);
         openCleanupPreviewModal(aid, {
           assetIds: assets.map(x => x.asset_id),
           groupLabel: `${g.name} (${g.moment_status})`,
           hideMarkRemoved: true,
           selectedIds: selSet,
-          targetSelectionCount: expCnt,
-          logPoolTotal: poolN,
+          targetSelectionCount: isTaggingCompleteThumb ? expCnt : undefined,
+          logPoolTotal: isTaggingCompleteThumb ? poolN : undefined,
           defaultSort: 'score',
           onSelectionChange: () => {
             if (expandedUnifiedGroupingIds.has(gid)) {
@@ -9031,23 +9279,14 @@ function renderAllUnifiedGroupings(): void {
         void dismissDedupedMomentGrouping(g, btn);
       } else if (act === 'assign') {
         const assets = g.inline_assets || unifiedGroupingAssetsCache.get(gid) || [];
-        const selSet = getOrInitGroupingSelectedSet(gid, assets);
-        const ids = assets.filter(a => selSet.has(a.asset_id)).map(a => a.asset_id);
+        const allIds = assets.map(a => a.asset_id);
         const prefill = /uncategorized/i.test(g.name) ? '' : g.name;
-        void openResolveDisjointModal(g.name, prefill, { assetIds: ids, isUnassignedCluster: true });
+        void openResolveDisjointModal(g.name, prefill, { assetIds: allIds, isUnassignedCluster: true });
       } else if (act === 'curate') {
-        if (g.kind === 'unassigned') {
-          const assets = g.inline_assets || unifiedGroupingAssetsCache.get(gid) || [];
-          const allIds = assets.map(a => a.asset_id);
-          const prefill = /uncategorized/i.test(g.name) ? '' : g.name;
-          void openResolveDisjointModal(g.name, prefill, {
-            assetIds: allIds,
-            isUnassignedCluster: true,
-            isCurateM200: true
-          });
-        } else {
-          void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true, isCurateM200: true });
+        if (g.kind === 'unassigned' || !g.is_tagged) {
+          return;
         }
+        void openResolveDisjointModal(g.name, '', { isHistoricalMoment: true, isCurateM200: true });
       } else if (act === 'publish') {
         void openPublishMomentModal(g.name);
       } else {

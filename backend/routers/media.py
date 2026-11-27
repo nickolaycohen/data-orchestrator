@@ -8470,6 +8470,240 @@ end run
 '''
 
 
+def _moment_has_completed_tagging(cur: sqlite3.Cursor, moment_name: str, asset_ids: Optional[list[str]] = None) -> bool:
+    """Return True if the Moment (or its event assets) already has saved DB tags / confirmed tagging paradigm."""
+    m_clean = (moment_name or "").strip()
+    if not m_clean:
+        return False
+    existing_tables = {
+        r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "moment_tags" in existing_tables:
+        if cur.execute(
+            "SELECT 1 FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+            (m_clean,),
+        ).fetchone():
+            return True
+        clean_aids = [s.strip() for s in (asset_ids or []) if s and s.strip()]
+        if clean_aids:
+            ph = ",".join("?" for _ in clean_aids[:400])
+            if cur.execute(
+                f"SELECT 1 FROM moment_tags WHERE asset_id IN ({ph}) LIMIT 1",
+                clean_aids[:400],
+            ).fetchone():
+                return True
+    if "moment_tag_sessions" in existing_tables:
+        if cur.execute(
+            "SELECT 1 FROM moment_tag_sessions WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+            (m_clean,),
+        ).fetchone():
+            return True
+    for tbl in ("moments", "media_organizer_albums"):
+        if tbl in existing_tables:
+            t_cols = {r[1] for r in cur.execute(f"PRAGMA table_info({tbl})").fetchall()}
+            if "tagging_paradigm" in t_cols:
+                if cur.execute(
+                    f"""
+                    SELECT 1 FROM {tbl}
+                    WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                      AND (TRIM(COALESCE(tagging_paradigm, '')) != '' OR TRIM(COALESCE(tags_metadata_json, '')) != '')
+                    LIMIT 1
+                    """,
+                    (m_clean,),
+                ).fetchone():
+                    return True
+    if "assets" in existing_tables and asset_ids:
+        a_cols = {r[1] for r in cur.execute("PRAGMA table_info(assets)").fetchall()}
+        if "tags_metadata_json" in a_cols:
+            clean_aids = [s.strip() for s in asset_ids if s and s.strip()]
+            if clean_aids:
+                ph = ",".join("?" for _ in clean_aids[:400])
+                if cur.execute(
+                    f"SELECT 1 FROM assets WHERE asset_id IN ({ph}) AND TRIM(COALESCE(tags_metadata_json, '')) != '' LIMIT 1",
+                    clean_aids[:400],
+                ).fetchone():
+                    return True
+    return False
+
+
+def _reset_moment_pipeline_to_m100(
+    cur: sqlite3.Cursor,
+    moment_names: list[str],
+    target_moment: str,
+    event_asset_ids: Optional[list[str]] = None,
+    keep_album_pk: Optional[int] = None,
+) -> dict:
+    """Reset pipeline state back to M100 (Uncurated in Moments) when a Moment or its assets are tagged/retagged.
+    Clears organizer Curated / ToBeCurated / Highrated assets albums, LaCie exports, and curated_album flags
+    while leaving All-Media.photoslibrary 100% read-only.
+    """
+    tgt_clean = (target_moment or "").strip()
+    all_names: list[str] = []
+    seen_lc: set[str] = set()
+    for nm in [tgt_clean, *(moment_names or [])]:
+        s = (nm or "").strip()
+        if s and s.lower() not in seen_lc:
+            seen_lc.add(s.lower())
+            all_names.append(s)
+
+    clean_aids = [s.strip() for s in (event_asset_ids or []) if s and s.strip()]
+    existing_tables = {
+        r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+
+    cleared_album_pks: list[int] = []
+    if "media_organizer_albums" in existing_tables and all_names:
+        moa_cols = {r[1] for r in cur.execute("PRAGMA table_info(media_organizer_albums)").fetchall()}
+        has_scope = "library_scope" in moa_cols
+        ph_n = ",".join("?" for _ in all_names)
+        scope_pred = "COALESCE(library_scope, 'all_media') = 'organizer'" if has_scope else "album_pk < 0"
+        rows_alb = cur.execute(
+            f"""
+            SELECT album_pk, TRIM(LOWER(album_name)), LOWER(COALESCE(parent_folder_name, ''))
+            FROM media_organizer_albums
+            WHERE is_folder = 0
+              AND {scope_pred}
+              AND TRIM(LOWER(album_name)) IN ({ph_n})
+              AND LOWER(COALESCE(parent_folder_name, '')) IN ('curated', 'tobecurated', 'highrated assets', 'moments', 'generic moments', 'memories')
+            """,
+            [n.lower() for n in all_names],
+        ).fetchall()
+        for pk_val, alb_lc, par_lc in rows_alb:
+            pk_i = int(pk_val)
+            if keep_album_pk is not None and pk_i == int(keep_album_pk):
+                continue
+            # Preserve Moments/<target_moment> when keep_album_pk wasn't supplied (e.g. save_moment_tags in-place reset)
+            if keep_album_pk is None and alb_lc == tgt_clean.lower() and par_lc in ("moments", "generic moments"):
+                continue
+            cleared_album_pks.append(pk_i)
+
+        if cleared_album_pks:
+            ph_pks = ",".join("?" for _ in cleared_album_pks)
+            if "media_organizer_album_assets" in existing_tables:
+                cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_pks})", cleared_album_pks)
+            cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_pks})", cleared_album_pks)
+
+    if "moment_exports" in existing_tables and all_names:
+        ph_n = ",".join("?" for _ in all_names)
+        cur.execute(
+            f"DELETE FROM moment_exports WHERE TRIM(LOWER(album_name)) IN ({ph_n})",
+            [n.lower() for n in all_names],
+        )
+
+    if "assets" in existing_tables:
+        a_cols = {r[1] for r in cur.execute("PRAGMA table_info(assets)").fetchall()}
+        set_parts = []
+        if "curated_album" in a_cols:
+            set_parts.append("curated_album = NULL")
+        if "to_be_curated_album" in a_cols:
+            set_parts.append("to_be_curated_album = NULL")
+        if "updated_at_utc" in a_cols:
+            set_parts.append("updated_at_utc = datetime('now')")
+        if set_parts and all_names:
+            ph_n = ",".join("?" for _ in all_names)
+            lc_names = [n.lower() for n in all_names]
+            where_clauses = [f"TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) IN ({ph_n})"]
+            params_a: list = list(lc_names)
+            if "curated_album" in a_cols:
+                where_clauses.append(f"TRIM(LOWER(COALESCE(curated_album, ''))) IN ({ph_n})")
+                params_a.extend(lc_names)
+            if "to_be_curated_album" in a_cols:
+                where_clauses.append(f"TRIM(LOWER(COALESCE(to_be_curated_album, ''))) IN ({ph_n})")
+                params_a.extend(lc_names)
+            cur.execute(
+                f"UPDATE assets SET {', '.join(set_parts)} WHERE {' OR '.join(where_clauses)}",
+                params_a,
+            )
+        if clean_aids and tgt_clean:
+            for idx_c in range(0, len(clean_aids), 400):
+                chunk_c = clean_aids[idx_c : idx_c + 400]
+                ph_c = ",".join("?" for _ in chunk_c)
+                extra_s = [p for p in set_parts if not p.startswith("MomentsAlbumName")]
+                assign_sql = ", ".join(["MomentsAlbumName = ?", *extra_s])
+                cur.execute(
+                    f"UPDATE assets SET {assign_sql} WHERE asset_id IN ({ph_c})",
+                    [tgt_clean, *chunk_c],
+                )
+
+    had_prior_curation = bool(cleared_album_pks)
+    if "curated_moments" in existing_tables and tgt_clean:
+        cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+        if "manually_curated" not in cm_cols:
+            try:
+                cur.execute("ALTER TABLE curated_moments ADD COLUMN manually_curated INTEGER DEFAULT 0")
+                cm_cols.add("manually_curated")
+            except sqlite3.OperationalError:
+                pass
+        if "event_total_assets" not in cm_cols:
+            try:
+                cur.execute("ALTER TABLE curated_moments ADD COLUMN event_total_assets INTEGER DEFAULT 0")
+                cm_cols.add("event_total_assets")
+            except sqlite3.OperationalError:
+                pass
+
+        for old_nm in all_names:
+            row_prev = cur.execute(
+                "SELECT COALESCE(memory_stage, ''), COALESCE(curated_count, 0) FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
+                (old_nm,),
+            ).fetchone()
+            if row_prev and ((row_prev[0] or "") in ("M200", "M300", "M400", "M450", "M500") or int(row_prev[1] or 0) > 0):
+                had_prior_curation = True
+            if old_nm.lower() != tgt_clean.lower() and row_prev:
+                cur.execute(
+                    """
+                    UPDATE curated_moments
+                    SET memory_stage = 'Deleted',
+                        to_be_curated_count = 0,
+                        curated_count = 0,
+                        photos_to_be_curated_exists = 0,
+                        photos_curated_exists = 0,
+                        manually_curated = 0,
+                        last_pipeline_sync = datetime('now')
+                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                    """,
+                    (old_nm,),
+                )
+
+        ev_cnt = len(clean_aids)
+        cur.execute(
+            """
+            INSERT INTO curated_moments (
+                moment_name, to_be_curated_count, curated_count, memory_stage,
+                last_pipeline_sync, photos_to_be_curated_exists, photos_curated_exists,
+                manually_curated, event_total_assets
+            ) VALUES (?, 0, 0, 'M100', datetime('now'), 0, 0, 0, ?)
+            ON CONFLICT(moment_name) DO UPDATE SET
+                memory_stage = 'M100',
+                to_be_curated_count = 0,
+                curated_count = 0,
+                photos_to_be_curated_exists = 0,
+                photos_curated_exists = 0,
+                manually_curated = 0,
+                event_total_assets = CASE WHEN excluded.event_total_assets > 0 THEN excluded.event_total_assets ELSE curated_moments.event_total_assets END,
+                last_pipeline_sync = datetime('now')
+            """,
+            (tgt_clean, ev_cnt),
+        )
+
+    removed_export_dirs = 0
+    for nm in all_names:
+        for base_dir in (CURATED_LACIE_DIR, PUBLISHING_RECOMMENDATION_DIR):
+            try:
+                cand_dir = base_dir / nm
+                if cand_dir.exists() and cand_dir.is_dir():
+                    shutil.rmtree(cand_dir)
+                    removed_export_dirs += 1
+            except Exception:
+                pass
+
+    return {
+        "pipeline_reset_to": "M100",
+        "had_prior_curation": had_prior_curation,
+        "cleared_organizer_albums": len(cleared_album_pks),
+        "removed_export_dirs": removed_export_dirs,
+    }
+
+
 def _reset_new_folder_curated_moment_stage(
     cur: sqlite3.Cursor,
     target_moment: str,
@@ -9427,6 +9661,7 @@ class SaveMomentTagsRequest(BaseModel):
     merge_existing: bool = True
     removed_tags: list[str] = []
     include_all_moment_assets: bool = False
+    reset_pipeline: bool = False
 
 
 def _moment_membership_where_sql(m_name: str) -> tuple[str, tuple[str, str, str, str]]:
@@ -10268,6 +10503,14 @@ def save_moment_tags(req: SaveMomentTagsRequest):
             tag_catalog_by_category = _compute_tag_catalog_by_category(cur)
             metadata_struct = _build_tag_metadata_struct(saved_tags_out, session_id=session_id, moment_name=m_name)
             metadata_summary = _format_metadata_summary_str(session_tags or saved_tags_out)
+            pipeline_reset_info = None
+            if req.reset_pipeline:
+                pipeline_reset_info = _reset_moment_pipeline_to_m100(
+                    cur,
+                    [m_name],
+                    m_name,
+                    event_asset_ids=clean_aids,
+                )
             conn.commit()
             return {
                 "ok": True,
@@ -10287,6 +10530,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
                 "tag_catalog_by_category": tag_catalog_by_category,
                 "moment_tags_union": moment_union_tags,
                 "moment_paradigm_confirmed": bool(moment_union_tags),
+                "pipeline_reset": pipeline_reset_info,
             }
         finally:
             conn.close()
@@ -10881,30 +11125,14 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
             return {"ok": False, "error": "Target Moment name is required to merge"}
         if "/" in target_moment or "/" in target_parent:
             return {"ok": False, "error": "Moment and folder names cannot contain '/'"}
-        if target_parent.lower() == "curated" and target_moment.lower() != src_moment.lower():
-            try:
-                conn_chk = sqlite3.connect(str(MEDIA_DB_PATH), timeout=15)
-                try:
-                    cur_chk = conn_chk.cursor()
-                    cur_exists = cur_chk.execute(
-                        """
-                        SELECT 1 FROM media_organizer_albums
-                        WHERE is_folder = 0
-                          AND LOWER(COALESCE(parent_folder_name, '')) = 'curated'
-                          AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
-                        LIMIT 1
-                        """,
-                        (target_moment,),
-                    ).fetchone()
-                finally:
-                    conn_chk.close()
-            except Exception:
-                cur_exists = None
-                if not cur_exists:
-                    return {
-                        "ok": False,
-                        "error": f"Cannot copy new folder '{target_moment}' directly to Curated — consolidate into Moments first.",
-                    }
+        if target_parent.lower() in ("curated", "tobecurated"):
+            return {
+                "ok": False,
+                "error": (
+                    f"Moment Tagging & Consolidation (Steps 1–2) must target 'Moments' (not '{target_parent}'). "
+                    "Complete Moment Tagging first, then run Manual Curation."
+                ),
+            }
 
     clean_ids: list[str] = []
     seen: set[str] = set()
@@ -11073,7 +11301,16 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     if r[0]
                 ]
 
-            del_org_albums = [sm for sm in combined_src_moments if req.delete_source_albums and sm.lower() != target_moment.lower()]
+            # Include target_moment alongside source moments so AppleScript clears any prior Curated / ToBeCurated / Highrated
+            # organizer albums on retagging while preserving targetAlbum (Moments/<target_moment>) via id inequality check!
+            del_org_albums: list[str] = []
+            if req.delete_source_albums:
+                seen_del_lc: set[str] = set()
+                for cand_del in [target_moment, *combined_src_moments]:
+                    cd_s = (cand_del or "").strip()
+                    if cd_s and cd_s.lower() not in seen_del_lc:
+                        seen_del_lc.add(cd_s.lower())
+                        del_org_albums.append(cd_s)
             pre_merge_unselected_ids = (
                 _collect_unselected_event_asset_ids(
                     cur,
@@ -11228,16 +11465,14 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 if unselected_action_m == "skip_publishing":
                     _upsert_album_and_assets_in_db(cur, "Moments", "SkipPublishing", unselected_ids_m)
 
-            # Reset M status on the destination folder only when creating a new folder name or consolidating multiple Moments
-            is_rename_or_consolidation = bool(req.is_unassigned_cluster or add_moments or src_moment.lower() != target_moment.lower())
-            if is_rename_or_consolidation:
-                _reset_new_folder_curated_moment_stage(
-                    cur,
-                    target_moment,
-                    target_parent,
-                    asset_count=len(combined_asset_ids),
-                    force=True,
-                )
+            # Tagging / Retagging / Merging into Moments ALWAYS resets pipeline state for these assets & Moment back to M100!
+            pipeline_reset_info = _reset_moment_pipeline_to_m100(
+                cur,
+                combined_src_moments,
+                target_moment,
+                event_asset_ids=combined_asset_ids,
+                keep_album_pk=tgt_pk,
+            )
 
             # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
             clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
@@ -11347,6 +11582,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
         "tags_applied": tags_applied_count,
         "moment_tags_union": moment_union_tags,
         "moment_paradigm_confirmed": bool(moment_union_tags),
+        "pipeline_reset": pipeline_reset_info,
         "unselected_count": unselected_count_done,
         "unselected_error": unselected_error,
         "highrated_copied_count": len(highrated_ids_m),
@@ -11575,6 +11811,14 @@ def curate_moment_action(req: CurateMomentRequest):
         return {"ok": False, "error": "Target Moment name cannot contain '/'"}
     if unselected_action not in ("ignore", "skip_publishing", "none"):
         return {"ok": False, "error": f"Unsupported unselected_action: {unselected_action}"}
+    if req.is_unassigned_cluster:
+        return {
+            "ok": False,
+            "error": (
+                "Manual Curation is locked for untagged / unassigned groupings. "
+                "Complete Moment Tagging (Step 1: Tagging & Moment Creation · Step 2: Event Merge) first."
+            ),
+        }
     is_renamed = target_moment.lower() != src_moment.lower()
 
     primary_selected_ids: list[str] = []
@@ -11635,6 +11879,15 @@ def curate_moment_action(req: CurateMomentRequest):
             cur = conn.cursor()
             _ensure_moment_tag_tables(cur)
             _ensure_organizer_library_tables(cur)
+
+            if not _moment_has_completed_tagging(cur, src_moment, [*selected_ids, *unselected_ids]):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Manual Curation is locked because '{src_moment}' has not completed Moment Tagging yet. "
+                        "Complete Moment Tagging (Step 1 & Step 2) first before curating."
+                    ),
+                }
 
             scan_moment_names = list(extra_moments) if req.is_unassigned_cluster else [src_moment, *extra_moments]
             all_event_unselected_ids = _collect_unselected_event_asset_ids(

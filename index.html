@@ -2638,7 +2638,10 @@
             <div class="publish-asset-list" id="publish-moment-asset-list"></div>
           </div>
 
-          <div id="publish-moment-tagging-mount"></div>
+          <details style="padding: 0.45rem 0.65rem; border-radius: 6px; background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(148, 163, 184, 0.22);">
+            <summary class="font-mono" style="font-size: 0.72rem; cursor: pointer; color: #cbd5e1; user-select: none;">🏷️ Moment Tags (Collapsed — use Curate ▸ Retag to modify tags &amp; reset pipeline)</summary>
+            <div id="publish-moment-tagging-mount" style="margin-top: 0.45rem;"></div>
+          </details>
 
           <div class="publish-urls-grid">
             <div>
@@ -2710,11 +2713,44 @@
           <div id="resolve-disjoint-albums-bar" class="publish-folder-bar" style="display: none; font-size: 0.72rem;">
           </div>
 
-          <div id="resolve-disjoint-source-tagging-mount"></div>
+          <div id="resolve-disjoint-collapsed-tags-bar"
+            style="display: none; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; padding: 0.52rem 0.75rem; border-radius: 8px; background: rgba(15, 23, 42, 0.72); border: 1px solid rgba(148, 163, 184, 0.28);">
+            <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; min-width: 0; flex: 1;">
+              <span class="badge badge-xs badge-purple font-mono">🔒 Tagging Complete</span>
+              <span id="resolve-disjoint-collapsed-tags-summary" class="font-mono" style="font-size: 0.72rem; color: #e2e8f0;">—</span>
+            </div>
+            <button type="button" class="btn btn-xs btn-outline" id="btn-expand-retag-reset"
+              style="border-color: rgba(245, 158, 11, 0.45); color: #fde68a; white-space: nowrap;"
+              title="Expand Moment Tagging to modify tags or merge event assets — retagging resets the pipeline back to Step 1 (M100 Moments)">
+              ▸ Retag / Modify Tags (Resets Pipeline)...
+            </button>
+          </div>
+
+          <div id="resolve-disjoint-retag-reset-banner"
+            style="display: none; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; padding: 0.52rem 0.75rem; border-radius: 8px; background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245, 158, 11, 0.48); color: #fde68a; font-size: 0.73rem;">
+            <span style="flex: 1; min-width: 220px;">
+              ⚠️ <strong>Retagging Resets Pipeline to M100 (Moments):</strong> Saving modified tags or merging assets resets pipeline progress for these asset(s) — prior <code>Curated</code> / <code>Highrated assets</code> folders &amp; exports in <code>Media Organizer</code> will be cleared so you can curate fresh afterward.
+            </span>
+            <button type="button" class="btn btn-xs btn-outline" id="btn-cancel-retag-reset" style="white-space: nowrap;">
+              ↩ Collapse &amp; Return to Curation
+            </button>
+          </div>
+
+          <div id="resolve-disjoint-step1-section"
+            style="display: flex; flex-direction: column; gap: 0.5rem; padding: 0.65rem 0.75rem; border-radius: 8px; background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.3);">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <span class="badge badge-xs badge-blue font-mono">STEP 1</span>
+                <strong style="font-size: 0.83rem; color: #e0f2fe;">Tagging &amp; Moment Creation</strong>
+              </div>
+              <span class="font-mono text-muted" style="font-size: 0.68rem;">Assign tags &amp; compose canonical Moment name (creates/updates <code>Moments</code> folder)</span>
+            </div>
+            <div id="resolve-disjoint-source-tagging-mount"></div>
+          </div>
 
           <div>
             <div id="resolve-disjoint-expected-curated-bar"
-              style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; padding: 0.48rem 0.7rem; margin-bottom: 0.45rem; border-radius: 8px; background: rgba(139, 92, 246, 0.11); border: 1px solid rgba(139, 92, 246, 0.38);">
+              style="display: none; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; padding: 0.48rem 0.7rem; margin-bottom: 0.45rem; border-radius: 8px; background: rgba(139, 92, 246, 0.11); border: 1px solid rgba(139, 92, 246, 0.38);">
               <div class="font-mono" id="resolve-disjoint-expected-curated-text"
                 style="font-size: 0.73rem; display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; color: #ddd6fe;">
                 <span>🎯 <strong>Expected Curated Target (ln N):</strong> —</span>
@@ -2728,29 +2764,33 @@
             </div>
             <div
               style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; gap: 0.5rem; flex-wrap: wrap;">
-              <strong style="font-size: 0.8rem;">Assets in Grouping / Moment (click thumbnail to preview, check keepers)</strong>
+              <strong style="font-size: 0.8rem;" id="resolve-disjoint-assets-heading">Assets in Source Group (included in Moment)</strong>
               <div style="display: flex; align-items: center; gap: 0.4rem;">
                 <span class="badge badge-xs badge-purple font-mono" id="resolve-disjoint-selected-pill">0
                   selected</span>
                 <button type="button" class="btn btn-xs btn-outline" id="btn-disjoint-hide-unselected"
+                  style="display: none;"
                   title="Filter list to show only selected keepers">👁️ Curated Only</button>
               </div>
             </div>
             <div class="publish-asset-list" id="resolve-disjoint-asset-list"></div>
           </div>
 
-          <div
-            style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 0.6rem;">
+          <div id="resolve-disjoint-step2-merge-section"
+            style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(139, 92, 246, 0.32); display: flex; flex-direction: column; gap: 0.6rem;">
             <div
               style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
-              <strong style="font-size: 0.82rem;">Consolidate Moments &amp; Target Moment Name</strong>
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <span class="badge badge-xs badge-purple font-mono">STEP 2</span>
+                <strong style="font-size: 0.83rem; color: #ede9fe;">Merge with Other Assets Belonging to Same Event</strong>
+              </div>
               <span class="badge badge-xs badge-amber font-mono" id="resolve-disjoint-combine-count-badge">1
                 asset</span>
             </div>
 
             <div>
               <span class="font-mono text-muted"
-                style="font-size: 0.67rem; display: block; margin-bottom: 0.25rem;">Sources Included in This
+                style="font-size: 0.67rem; display: block; margin-bottom: 0.25rem;">Sources Included in This Event
                 Consolidation:</span>
               <div class="disjoint-target-chips" id="resolve-disjoint-combine-tray"></div>
             </div>
@@ -2758,7 +2798,7 @@
             <div>
               <div
                 style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.3rem; flex-wrap: wrap;">
-                <label class="font-mono text-muted" style="font-size: 0.68rem;">Search or Pick Existing Moments (click
+                <label class="font-mono text-muted" style="font-size: 0.68rem;">Search or Pick Existing Moments from Same Event (click
                   pill to preview assets &amp; combine):</label>
                 <input type="search" id="resolve-disjoint-moment-search" class="form-control"
                   placeholder="🔍 Search any Moment (e.g. Ski, Blue, Soccer)..."
@@ -2851,13 +2891,15 @@
               into
               a multi-asset New Moment.
             </div>
+          </div>
 
+          <div id="resolve-disjoint-destination-section"
+            style="padding: 0.75rem; border-radius: var(--radius-sm); background: rgba(15, 23, 42, 0.55); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 0.55rem;">
             <div class="disjoint-target-path-box">
-              <span class="font-mono text-muted"
-                style="font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.28rem;">Final
-                Merge Destination · Target Path</span>
+              <span id="resolve-disjoint-target-path-label" class="font-mono text-muted"
+                style="font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.28rem;">Step 1 &amp; 2 Moment Destination · Target Path</span>
               <div class="disjoint-target-path-inline">
-                <span class="disjoint-target-prefix font-mono">Media Organizer on LaCie /</span>
+                <span class="disjoint-target-prefix font-mono">Media Organizer /</span>
                 <select id="resolve-disjoint-parent-select" class="form-control disjoint-target-parent-select"
                   aria-label="Target Folder">
                   <option value="Moments">Moments</option>
@@ -2883,7 +2925,7 @@
             </label>
 
             <label id="resolve-disjoint-manual-curate-toggle-bar"
-              style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; padding: 0.52rem 0.75rem; border-radius: 8px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.38); cursor: pointer;">
+              style="display: none; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; padding: 0.52rem 0.75rem; border-radius: 8px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.38); cursor: pointer;">
               <span style="display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.76rem; font-weight: 600; color: #a7f3d0;">
                 <input type="checkbox" id="resolve-disjoint-manual-curate-toggle" />
                 <span>🎨 Manual Curation Step — Approve Selected Keepers directly into <code>Curated</code> &amp; Ready to Publish</span>
