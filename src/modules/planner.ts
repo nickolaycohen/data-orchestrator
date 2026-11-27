@@ -8448,9 +8448,17 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
               .map(t => `<span class="badge badge-xs badge-outline font-mono" style="font-size: 0.6rem;">🏷️ ${escapeHtml(t.tag_value)}</span>`)
               .join('')}</div>`
           : '';
+      const isSearchFileMatch = Boolean(
+        allGroupingsSearchQuery &&
+          ((a.original_filename || '').toLowerCase().includes(allGroupingsSearchQuery) ||
+            (a.asset_id || '').toLowerCase().includes(allGroupingsSearchQuery))
+      );
+      const searchMatchBadge = isSearchFileMatch
+        ? '<span class="badge badge-xs badge-blue font-mono" style="font-weight: 700;">🔍 Search Match</span>'
+        : '';
       const rowStateCls = checked ? ' is-selected' : ' is-unselected-grey';
       return `
-        <div class="publish-asset-row${rowStateCls}${a.is_duplicate_copy ? ' is-dup-copy' : ''}">
+        <div class="publish-asset-row${rowStateCls}${a.is_duplicate_copy ? ' is-dup-copy' : ''}" ${isSearchFileMatch ? 'style="border-color: rgba(56, 189, 248, 0.75); box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.25);"' : ''}>
           <div class="publish-asset-left">
             <input type="checkbox" class="ugrp-asset-cb" data-grouping-id="${escapeHtml(g.grouping_id)}" data-asset-id="${escapeHtml(a.asset_id)}" ${checked ? 'checked' : ''} style="cursor: pointer;" />
             <button type="button" class="disjoint-row-thumb-btn btn-ugrp-preview-asset" data-grouping-id="${escapeHtml(g.grouping_id)}" data-asset-id="${escapeHtml(a.asset_id)}" title="Open Curation Lightbox (Space toggles selection)" style="width: 40px; height: 40px;">
@@ -8461,6 +8469,7 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
                 #${idx + 1} · ${escapeHtml(a.original_filename || a.asset_id)}
               </div>
               <div style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.15rem; flex-wrap: wrap;">
+                ${searchMatchBadge}
                 ${keeperBadge}
                 ${recBadge}
                 ${qualBadge}
@@ -8835,6 +8844,7 @@ function renderAllUnifiedGroupings(): void {
       return false;
     }
     if (allGroupingsSearchQuery) {
+      const cachedGrpAssets = unifiedGroupingAssetsCache.get(g.grouping_id) || [];
       const hay = [
         g.name,
         g.moment_status,
@@ -8846,7 +8856,12 @@ function renderAllUnifiedGroupings(): void {
         ...(g.photos_folders || []).map(pf => `${pf.parent_folder} ${pf.full_path}`),
         ...(g.organizer_target_folders || []).map(ot => `${ot.album_name} ${ot.full_path}`),
         ...(g.source_all_media_folders || []).map(am => `${am.album_name} ${am.parent_folder} ${am.full_path}`),
-        ...g.batches.map(b => `${b.month} ${b.status_code}`)
+        ...g.batches.map(b => `${b.month} ${b.status_code}`),
+        ...(g.asset_filenames || []),
+        ...(g.asset_ids || []),
+        ...(g.preview_assets || []).map(pa => `${pa.filename} ${pa.asset_id}`),
+        ...(g.inline_assets || []).map(ia => `${ia.original_filename} ${ia.asset_id}`),
+        ...cachedGrpAssets.map(ca => `${ca.original_filename} ${ca.asset_id}`)
       ]
         .join(' ')
         .toLowerCase();
@@ -9116,6 +9131,45 @@ function renderAllUnifiedGroupings(): void {
               : `${dedupRowBtnHtml}
                  <button type="button" class="btn btn-xs btn-purple btn-ugrp-row-action" data-action="curate" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Manually curate ${expCurCnt} keepers (ln ${evTot}) into Curated &amp; Ready to Publish">🎨 Curate (${expCurCnt})</button>`;
 
+      let matchedAssetPillHtml = '';
+      if (allGroupingsSearchQuery) {
+        const seenFnLc = new Set<string>();
+        const matchedFns: string[] = [];
+        const pushIfMatch = (fn?: string, aid?: string) => {
+          const cleanFn = (fn || '').trim();
+          const cleanAid = (aid || '').trim();
+          if (
+            (cleanFn && cleanFn.toLowerCase().includes(allGroupingsSearchQuery)) ||
+            (cleanAid && cleanAid.toLowerCase().includes(allGroupingsSearchQuery))
+          ) {
+            const label = cleanFn || cleanAid;
+            const k = label.toLowerCase();
+            if (!seenFnLc.has(k)) {
+              seenFnLc.add(k);
+              matchedFns.push(label);
+            }
+          }
+        };
+        const fns = g.asset_filenames || [];
+        const aids = g.asset_ids || [];
+        const maxLen = Math.max(fns.length, aids.length);
+        for (let i = 0; i < maxLen; i++) {
+          pushIfMatch(fns[i], aids[i]);
+        }
+        (g.preview_assets || []).forEach(pa => pushIfMatch(pa.filename, pa.asset_id));
+        (g.inline_assets || []).forEach(ia => pushIfMatch(ia.original_filename, ia.asset_id));
+        (unifiedGroupingAssetsCache.get(g.grouping_id) || []).forEach(ca => pushIfMatch(ca.original_filename, ca.asset_id));
+        if (matchedFns.length > 0) {
+          const previewText =
+            matchedFns.length === 1
+              ? `📄 ${matchedFns[0]}`
+              : `📄 ${matchedFns[0]} (+${matchedFns.length - 1} file${matchedFns.length === 2 ? '' : 's'})`;
+          matchedAssetPillHtml = `<span class="badge badge-xs badge-blue font-mono" title="${escapeHtml(
+            `Matching asset(s) in this grouping:\n${matchedFns.slice(0, 15).join('\n')}${matchedFns.length > 15 ? `\n(+${matchedFns.length - 15} more)` : ''}`
+          )}">${escapeHtml(previewText)}</span>`;
+        }
+      }
+
       const cachedAssets = unifiedGroupingAssetsCache.get(g.grouping_id);
       const bodyInnerHtml = isExpanded
         ? cachedAssets
@@ -9132,6 +9186,7 @@ function renderAllUnifiedGroupings(): void {
                 <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
                   <strong style="font-size: 0.85rem; color: var(--text-primary);">${escapeHtml(g.name)}</strong>
                   <span class="badge badge-xs ${stCls} font-mono">${escapeHtml(g.moment_status)}</span>
+                  ${matchedAssetPillHtml}
                   ${expCurPillHtml}
                   ${dupGroupPillHtml}
                   ${mismatchPillHtml}

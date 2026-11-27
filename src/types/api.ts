@@ -945,6 +945,8 @@ export interface UnifiedGroupingItem {
   is_tagged: boolean;
   paradigm_confirmed: boolean;
   tag_summary: string;
+  asset_filenames?: string[];
+  asset_ids?: string[];
   preview_assets: UnifiedGroupingPreviewAsset[];
   inline_assets?: UnifiedGroupingAssetItem[];
 }

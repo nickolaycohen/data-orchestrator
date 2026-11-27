@@ -10694,11 +10694,32 @@ def search_moments_for_consolidation(q: str = "", exclude_moment: str = "", anch
             ).fetchall()
             tag_counts = {r[0]: int(r[1] or 0) for r in tag_cnt_rows if r[0]}
 
+            filename_matched_moments_lc: set[str] = set()
+            if q_clean:
+                like_pat = f"%{q_clean}%"
+                for (m_match_lc,) in cur.execute(
+                    """
+                    SELECT DISTINCT LOWER(TRIM(a.MomentsAlbumName))
+                    FROM assets a
+                    LEFT JOIN ranked_assets_view v ON v.asset_id = a.asset_id
+                    WHERE a.MomentsAlbumName IS NOT NULL
+                      AND TRIM(a.MomentsAlbumName) != ''
+                      AND COALESCE(a.removed_from_source, 0) = 0
+                      AND (
+                          LOWER(COALESCE(v.original_filename, a.original_filename, '')) LIKE ?
+                          OR LOWER(COALESCE(a.asset_id, '')) LIKE ?
+                      )
+                    """,
+                    (like_pat, like_pat),
+                ).fetchall():
+                    if m_match_lc:
+                        filename_matched_moments_lc.add(m_match_lc)
+
             results = []
             for m_alb, total_cnt, qual_cnt, min_dt_s, max_dt_s in moment_rows:
                 if excl and m_alb.lower() == excl:
                     continue
-                if q_clean and q_clean not in m_alb.lower():
+                if q_clean and q_clean not in m_alb.lower() and m_alb.lower() not in filename_matched_moments_lc:
                     continue
                 d_min = _parse_utc_dt(min_dt_s)
                 d_max = _parse_utc_dt(max_dt_s)
@@ -13060,6 +13081,12 @@ def get_all_unified_groupings():
                     )
                 )
 
+                valid_set = set(valid_members)
+                searchable_aids = [
+                    *valid_members,
+                    *[aid for aid in sorted(own_active_aids) if aid not in valid_set and aid in asset_info_map],
+                ]
+
                 unified_groupings.append(
                     {
                         "grouping_id": f"moment::{name}",
@@ -13114,6 +13141,8 @@ def get_all_unified_groupings():
                         "is_tagged": is_tagged,
                         "paradigm_confirmed": bool(t_info and t_info.get("paradigm_confirmed")),
                         "tag_summary": (t_info or {}).get("tag_summary", ""),
+                        "asset_filenames": [asset_info_map[aid][0] for aid in searchable_aids if asset_info_map[aid][0]],
+                        "asset_ids": searchable_aids,
                         "preview_assets": preview_assets,
                     }
                 )
@@ -13279,6 +13308,8 @@ def get_all_unified_groupings():
                         "is_tagged": False,
                         "paradigm_confirmed": False,
                         "tag_summary": "",
+                        "asset_filenames": [x["original_filename"] for x in inline_assets if x["original_filename"]],
+                        "asset_ids": [x["asset_id"] for x in inline_assets if x["asset_id"]],
                         "preview_assets": [
                             {
                                 "asset_id": x["asset_id"],
