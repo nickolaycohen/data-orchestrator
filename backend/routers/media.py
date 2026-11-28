@@ -329,11 +329,15 @@ def _planner_db_lock(operation: str = "Media Organizer Update", wait_timeout_sec
 def _open_rw_media_db(timeout: float = 60.0) -> sqlite3.Connection:
     conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=timeout)
     conn.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except Exception:
+        pass
     return conn
 
 
-def _commit_with_retry(conn: sqlite3.Connection, max_attempts: int = 8) -> None:
-    """Commit SQLite transaction with exponential backoff if a background reader/writer briefly holds a lock."""
+def _commit_with_retry(conn: sqlite3.Connection, max_attempts: int = 25) -> None:
+    """Commit SQLite transaction with linear/exponential backoff if a background reader/writer briefly holds a lock."""
     for attempt in range(max_attempts):
         try:
             conn.commit()
@@ -341,7 +345,31 @@ def _commit_with_retry(conn: sqlite3.Connection, max_attempts: int = 8) -> None:
         except sqlite3.OperationalError as err:
             if "locked" not in str(err).lower() or attempt == max_attempts - 1:
                 raise
-            time.sleep(0.25 * (attempt + 1))
+            time.sleep(min(2.0, 0.25 * (attempt + 1)))
+
+
+def _execute_with_retry(cur: sqlite3.Cursor, sql: str, params=(), max_attempts: int = 25) -> sqlite3.Cursor:
+    """Execute a query with retry if SQLite encounters a momentary lock from a background reader/writer."""
+    for attempt in range(max_attempts):
+        try:
+            return cur.execute(sql, params)
+        except sqlite3.OperationalError as err:
+            if "locked" not in str(err).lower() or attempt == max_attempts - 1:
+                raise
+            time.sleep(min(2.0, 0.25 * (attempt + 1)))
+    return cur
+
+
+def _executemany_with_retry(cur: sqlite3.Cursor, sql: str, seq_of_params, max_attempts: int = 25) -> sqlite3.Cursor:
+    """Execute many with retry if SQLite encounters a momentary lock from a background reader/writer."""
+    for attempt in range(max_attempts):
+        try:
+            return cur.executemany(sql, seq_of_params)
+        except sqlite3.OperationalError as err:
+            if "locked" not in str(err).lower() or attempt == max_attempts - 1:
+                raise
+            time.sleep(min(2.0, 0.25 * (attempt + 1)))
+    return cur
 
 
 router = APIRouter(prefix="/api/media", tags=["media"])
@@ -6251,6 +6279,48 @@ def _insert_album_asset_row_if_missing(cur: sqlite3.Cursor, album_pk: int, aid: 
     return True
 
 
+def _bulk_insert_album_asset_rows_if_missing(
+    cur: sqlite3.Cursor, album_pk: int, aids: list[str], chunk_size: int = 500
+) -> int:
+    """Bulk insert assets into media_organizer_album_assets in efficient chunks."""
+    clean_aids = [s.strip() for s in aids if s and s.strip()]
+    if not clean_aids:
+        return 0
+    total_inserted = 0
+    for chunk in _iter_id_chunks(clean_aids, chunk_size):
+        ph = ",".join("?" for _ in chunk)
+        existing_rows = cur.execute(
+            f"SELECT asset_id FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id IN ({ph})",
+            [album_pk, *chunk],
+        ).fetchall()
+        existing_set = {r[0] for r in existing_rows if r[0]}
+        needed_aids = [a for a in chunk if a not in existing_set]
+        if not needed_aids:
+            continue
+        ph_needed = ",".join("?" for _ in needed_aids)
+        _execute_with_retry(
+            cur,
+            f"""
+            INSERT INTO media_organizer_album_assets (album_pk, asset_id, original_filename, date_created_utc, synced_at_utc)
+            SELECT ?, a.asset_id, a.original_filename, a.date_created_utc, datetime('now')
+            FROM assets a
+            WHERE a.asset_id IN ({ph_needed})
+            """,
+            [album_pk, *needed_aids],
+        )
+        if cur.rowcount < len(needed_aids):
+            _executemany_with_retry(
+                cur,
+                """
+                INSERT OR IGNORE INTO media_organizer_album_assets (album_pk, asset_id, synced_at_utc)
+                VALUES (?, ?, datetime('now'))
+                """,
+                [(album_pk, a) for a in needed_aids],
+            )
+        total_inserted += len(needed_aids)
+    return total_inserted
+
+
 @router.get("/memories/folders")
 def query_memories_folders(
     scope: str = "moments",
@@ -6681,9 +6751,7 @@ on run argv
 
         set albumExistingIds to {}
         try
-            repeat with exItem in (every media item of targetAlbum)
-                copy ((id of exItem) as string) to end of albumExistingIds
-            end repeat
+            set albumExistingIds to (id of every media item of targetAlbum)
         end try
 
         set addedCount to 0
@@ -6692,24 +6760,17 @@ on run argv
             repeat with orgUuid in existingUuids
                 set uStr to orgUuid as string
                 set alreadyIn to false
-                repeat with exId in albumExistingIds
-                    if (exId as string) starts with uStr then
-                        set alreadyIn to true
-                        exit repeat
-                    end if
-                end repeat
+                if (albumExistingIds as string) contains uStr then
+                    set alreadyIn to true
+                end if
                 if not alreadyIn then
                     try
                         set matchedItem to media item id (uStr & "/L0/001")
                         copy matchedItem to end of itemsToAdd
-                        copy ((id of matchedItem) as string) to end of albumExistingIds
                     on error
                         try
-                            set foundItems to (media items whose id contains uStr)
-                            if (count of foundItems) > 0 then
-                                copy (item 1 of foundItems) to end of itemsToAdd
-                                copy ((id of (item 1 of foundItems)) as string) to end of albumExistingIds
-                            end if
+                            set matchedItem to media item id uStr
+                            copy matchedItem to end of itemsToAdd
                         end try
                     end try
                 end if
@@ -7173,10 +7234,10 @@ def _upsert_organizer_album_in_db(
         )
 
     if replace_members:
-        cur.execute("DELETE FROM media_organizer_album_assets WHERE album_pk = ?", (alb_pk,))
-    for aid in source_asset_ids:
-        _insert_album_asset_row_if_missing(cur, alb_pk, aid)
-    cur.execute(
+        _execute_with_retry(cur, "DELETE FROM media_organizer_album_assets WHERE album_pk = ?", (alb_pk,))
+    _bulk_insert_album_asset_rows_if_missing(cur, alb_pk, source_asset_ids)
+    _execute_with_retry(
+        cur,
         "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
         (alb_pk, alb_pk),
     )
@@ -7336,6 +7397,14 @@ def _sync_assets_to_organizer_library(
             stage_base = org_path.parent / ".agy_import_staging"
             try:
                 stage_base.mkdir(parents=True, exist_ok=True)
+                # Best-effort prune stale staging folders older than 1 hour
+                now_ts = time.time()
+                for stale_entry in stage_base.glob("sync_*"):
+                    try:
+                        if stale_entry.is_dir() and (now_ts - stale_entry.stat().st_mtime) > 3600:
+                            shutil.rmtree(stale_entry, ignore_errors=True)
+                    except Exception:
+                        pass
             except OSError:
                 stage_base = Path(tempfile.gettempdir())
 
@@ -7346,7 +7415,7 @@ def _sync_assets_to_organizer_library(
             newly_imported = 0
             import_errors: list[str] = []
 
-            with tempfile.TemporaryDirectory(prefix="sync_", dir=str(stage_base)) as tmp_stage_dir:
+            with tempfile.TemporaryDirectory(prefix="sync_", dir=str(stage_base), ignore_cleanup_errors=True) as tmp_stage_dir:
                 path_to_src_id: dict[str, tuple[str, str]] = {}
                 import_paths: list[str] = []
                 if missing_src_ids:
@@ -7394,8 +7463,41 @@ def _sync_assets_to_organizer_library(
                     _finish_photos_upload_progress(ok=False, message=err_s)
                     return {"ok": False, "error": err_s}
 
-                chunk_size = 12
-                path_chunks = [import_paths[i : i + chunk_size] for i in range(0, len(import_paths), chunk_size)] or [[]]
+                # Omit existing UUIDs that are already verified members of this organizer album in DB
+                already_member_uuids: set[str] = set()
+                if not replace_existing:
+                    try:
+                        for (m_aid,) in cur.execute(
+                            """
+                            SELECT moaa.asset_id
+                            FROM media_organizer_album_assets moaa
+                            JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                            WHERE moa.is_folder = 0
+                              AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
+                              AND LOWER(TRIM(moa.album_name)) = LOWER(?)
+                              AND LOWER(TRIM(COALESCE(moa.parent_folder_name, ''))) = LOWER(?)
+                            """,
+                            (album_name, parent_folder),
+                        ).fetchall():
+                            if m_aid in mapped_by_src:
+                                already_member_uuids.add(mapped_by_src[m_aid])
+                    except Exception:
+                        pass
+                uuids_to_link = [u for u in existing_org_uuids if u not in already_member_uuids]
+
+                uuid_chunk_size = 150
+                uuid_chunks = [uuids_to_link[i : i + uuid_chunk_size] for i in range(0, len(uuids_to_link), uuid_chunk_size)] if uuids_to_link else []
+                path_chunk_size = 12
+                path_chunks = [import_paths[i : i + path_chunk_size] for i in range(0, len(import_paths), path_chunk_size)] if import_paths else []
+
+                # Combine into balanced batches: <= 150 UUIDs and <= 12 file imports per AppleScript invocation
+                batch_pairs: list[tuple[list[str], list[str]]] = []
+                max_batches = max(len(uuid_chunks), len(path_chunks), 1)
+                for b_i in range(max_batches):
+                    u_c = uuid_chunks[b_i] if b_i < len(uuid_chunks) else []
+                    p_c = path_chunks[b_i] if b_i < len(path_chunks) else []
+                    batch_pairs.append((u_c, p_c))
+
                 upload_total = len(import_paths)
 
                 if upload_total > 0:
@@ -7417,15 +7519,14 @@ def _sync_assets_to_organizer_library(
                     )
 
                 items_attempted_so_far = 0
-                for idx, p_chunk in enumerate(path_chunks):
+                for idx, (uuids_arg, p_chunk) in enumerate(batch_pairs):
                     allow_flag = "2" if (replace_existing and idx == 0) else ("1" if (allow_existing or replace_existing or idx > 0) else "0")
-                    uuids_arg = existing_org_uuids if idx == 0 else []
-                    dels_arg = del_names if idx == len(path_chunks) - 1 else []
+                    dels_arg = del_names if idx == len(batch_pairs) - 1 else []
                     if p_chunk:
                         first_fn = os.path.basename(p_chunk[0])
                         _update_photos_upload_progress(
                             current_item=first_fn,
-                            message=f"Uploading {items_attempted_so_far} / {upload_total} asset(s) into '{target_op}' (batch {idx + 1}/{len(path_chunks)} · {first_fn})...",
+                            message=f"Uploading {items_attempted_so_far} / {upload_total} asset(s) into '{target_op}' (batch {idx + 1}/{len(batch_pairs)} · {first_fn})...",
                         )
                     argv = [
                         parent_folder,
@@ -7504,6 +7605,12 @@ def _sync_assets_to_organizer_library(
                             message=f"Uploaded {items_attempted_so_far} / {upload_total} asset(s) into '{target_op}'...",
                         )
 
+                # Best-effort explicit file purge to prevent Errno 66 Directory not empty
+                try:
+                    shutil.rmtree(tmp_stage_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
             if import_paths and newly_imported == 0 and not existing_org_uuids:
                 err_summary = "; ".join(import_errors[:3]) if import_errors else "Photos.app returned 0 imported items"
                 err_z = f"Failed importing {len(import_paths)} asset(s) into Media Organizer library: {err_summary}"
@@ -7564,8 +7671,7 @@ def _mark_assets_ignored_in_db(cur: sqlite3.Cursor, asset_ids: list[str]) -> int
             """,
             (ign_pk,),
         )
-    for aid in clean_ids:
-        _insert_album_asset_row_if_missing(cur, ign_pk, aid)
+    _bulk_insert_album_asset_rows_if_missing(cur, ign_pk, clean_ids)
     cur.execute(
         "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
         (ign_pk, ign_pk),
@@ -9869,12 +9975,13 @@ def _reset_moment_pipeline_to_m100(
         if cleared_album_pks:
             ph_pks = ",".join("?" for _ in cleared_album_pks)
             if "media_organizer_album_assets" in existing_tables:
-                cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_pks})", cleared_album_pks)
-            cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_pks})", cleared_album_pks)
+                _execute_with_retry(cur, f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_pks})", cleared_album_pks)
+            _execute_with_retry(cur, f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_pks})", cleared_album_pks)
 
     if "moment_exports" in existing_tables and all_names:
         ph_n = ",".join("?" for _ in all_names)
-        cur.execute(
+        _execute_with_retry(
+            cur,
             f"DELETE FROM moment_exports WHERE TRIM(LOWER(album_name)) IN ({ph_n})",
             [n.lower() for n in all_names],
         )
@@ -9899,7 +10006,8 @@ def _reset_moment_pipeline_to_m100(
             if "to_be_curated_album" in a_cols:
                 where_clauses.append(f"TRIM(LOWER(COALESCE(to_be_curated_album, ''))) IN ({ph_n})")
                 params_a.extend(lc_names)
-            cur.execute(
+            _execute_with_retry(
+                cur,
                 f"UPDATE assets SET {', '.join(set_parts)} WHERE {' OR '.join(where_clauses)}",
                 params_a,
             )
@@ -9909,14 +10017,16 @@ def _reset_moment_pipeline_to_m100(
                 ph_c = ",".join("?" for _ in chunk_c)
                 extra_s = [p for p in set_parts if not p.startswith("MomentsAlbumName")]
                 assign_sql = ", ".join(["MomentsAlbumName = ?", *extra_s])
-                cur.execute(
+                _execute_with_retry(
+                    cur,
                     f"UPDATE assets SET {assign_sql} WHERE asset_id IN ({ph_c})",
                     [tgt_clean, *chunk_c],
                 )
 
     if "publications" in existing_tables and all_names:
         ph_n = ",".join("?" for _ in all_names)
-        cur.execute(
+        _execute_with_retry(
+            cur,
             f"DELETE FROM publications WHERE TRIM(LOWER(moment_name)) IN ({ph_n})",
             [n.lower() for n in all_names],
         )
@@ -9926,13 +10036,13 @@ def _reset_moment_pipeline_to_m100(
         cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
         if "manually_curated" not in cm_cols:
             try:
-                cur.execute("ALTER TABLE curated_moments ADD COLUMN manually_curated INTEGER DEFAULT 0")
+                _execute_with_retry(cur, "ALTER TABLE curated_moments ADD COLUMN manually_curated INTEGER DEFAULT 0")
                 cm_cols.add("manually_curated")
             except sqlite3.OperationalError:
                 pass
         if "event_total_assets" not in cm_cols:
             try:
-                cur.execute("ALTER TABLE curated_moments ADD COLUMN event_total_assets INTEGER DEFAULT 0")
+                _execute_with_retry(cur, "ALTER TABLE curated_moments ADD COLUMN event_total_assets INTEGER DEFAULT 0")
                 cm_cols.add("event_total_assets")
             except sqlite3.OperationalError:
                 pass
@@ -9945,7 +10055,8 @@ def _reset_moment_pipeline_to_m100(
             if row_prev and ((row_prev[0] or "") in ("M200", "M300", "M400", "M450", "M500") or int(row_prev[1] or 0) > 0):
                 had_prior_curation = True
             if old_nm.lower() != tgt_clean.lower() and row_prev:
-                cur.execute(
+                _execute_with_retry(
+                    cur,
                     """
                     UPDATE curated_moments
                     SET memory_stage = 'Deleted',
@@ -9963,7 +10074,8 @@ def _reset_moment_pipeline_to_m100(
         sf_reset_clause = ", shutterfly_url = NULL" if "shutterfly_url" in cm_cols else ""
         yt_reset_clause = ", youtube_url = NULL" if "youtube_url" in cm_cols else ""
         ev_cnt = len(clean_aids)
-        cur.execute(
+        _execute_with_retry(
+            cur,
             f"""
             INSERT INTO curated_moments (
                 moment_name, to_be_curated_count, curated_count, memory_stage,
@@ -10028,7 +10140,8 @@ def _reset_new_folder_curated_moment_stage(
     ).fetchall()
     if existing_rows:
         if force or all((st or "").strip().lower() in ("", "deleted") for _, st in existing_rows):
-            cur.execute(
+            _execute_with_retry(
+                cur,
                 """
                 UPDATE curated_moments
                 SET memory_stage = ?,
@@ -10044,7 +10157,8 @@ def _reset_new_folder_curated_moment_stage(
             return new_stage
         return (existing_rows[0][1] or new_stage)
 
-    cur.execute(
+    _execute_with_retry(
+        cur,
         """
         INSERT INTO curated_moments (
             moment_name, to_be_curated_count, curated_count, memory_stage,
@@ -10058,7 +10172,8 @@ def _reset_new_folder_curated_moment_stage(
 
 def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> None:
     """Clean up superseded 'organizer'-scoped albums ONLY (All-Media source albums remain 100% read-only)."""
-    alb_rows = cur.execute(
+    alb_rows = _execute_with_retry(
+        cur,
         """
         SELECT album_pk FROM media_organizer_albums
         WHERE is_folder = 0
@@ -10071,20 +10186,23 @@ def _delete_source_albums_from_db(cur: sqlite3.Cursor, source_moment: str) -> No
     pks = [int(r[0]) for r in alb_rows]
     if pks:
         ph = ",".join("?" for _ in pks)
-        cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph})", pks)
-        cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph})", pks)
-    cur.execute(
+        _execute_with_retry(cur, f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph})", pks)
+        _execute_with_retry(cur, f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph})", pks)
+    _execute_with_retry(
+        cur,
         "DELETE FROM moments WHERE COALESCE(album_pk, 0) < 0 AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))",
         (source_moment,),
     )
     if pks:
-        cur.execute("DELETE FROM moment_exports WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))", (source_moment,))
-        cm_exists = cur.execute(
+        _execute_with_retry(cur, "DELETE FROM moment_exports WHERE TRIM(LOWER(album_name)) = TRIM(LOWER(?))", (source_moment,))
+        cm_exists = _execute_with_retry(
+            cur,
             "SELECT 1 FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
             (source_moment,),
         ).fetchone()
         if cm_exists:
-            cur.execute(
+            _execute_with_retry(
+                cur,
                 """
                 UPDATE curated_moments
                 SET memory_stage = 'Deleted',
@@ -10506,6 +10624,32 @@ def _sync_asset_metadata_json(
     )
 
 
+def _parse_tags_from_raw_json(raw_json: Optional[str]) -> list[dict]:
+    """Parse active_tags list stored inside assets.tags_metadata_json string."""
+    if not raw_json:
+        return []
+    try:
+        parsed = json.loads(raw_json)
+        raw_tags = parsed.get("active_tags") or []
+        out: list[dict] = []
+        for t in raw_tags:
+            if not isinstance(t, dict):
+                continue
+            cat = (t.get("category") or "").strip().lower()
+            val = re.sub(r"\s+", " ", (t.get("tag_value") or "").strip())
+            if cat in _TAG_CAT_DISPLAY and val:
+                out.append(
+                    {
+                        "category": cat,
+                        "tag_value": val,
+                        "include_in_name": bool(t.get("include_in_name", True)),
+                    }
+                )
+        return out
+    except Exception:
+        return []
+
+
 def _sync_moment_folder_metadata_json(
     cur: sqlite3.Cursor,
     moment_name: str,
@@ -10540,23 +10684,29 @@ def _sync_moment_folder_metadata_json(
     # 2. Active tags inside assets.tags_metadata_json for assets in this Moment
     hint_ids = [s.strip() for s in (asset_ids_hint or []) if s and s.strip()]
     if hint_ids:
-        ph = ",".join("?" for _ in hint_ids)
-        cur.execute(
-            f"""
-            SELECT asset_id FROM assets
-            WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))
-               OR asset_id IN ({ph})
-            """,
-            [m_name, *hint_ids],
-        )
+        for chunk_h in _iter_id_chunks(hint_ids, 500):
+            ph = ",".join("?" for _ in chunk_h)
+            for (raw_json,) in cur.execute(
+                f"""
+                SELECT tags_metadata_json FROM assets
+                WHERE TRIM(COALESCE(tags_metadata_json, '')) != ''
+                  AND (TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?)) OR asset_id IN ({ph}))
+                """,
+                [m_name, *chunk_h],
+            ).fetchall():
+                if raw_json:
+                    collected.extend(_parse_tags_from_raw_json(raw_json))
     else:
-        cur.execute(
-            "SELECT asset_id FROM assets WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
+        for (raw_json,) in cur.execute(
+            """
+            SELECT tags_metadata_json FROM assets
+            WHERE TRIM(COALESCE(tags_metadata_json, '')) != ''
+              AND TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))
+            """,
             (m_name,),
-        )
-    for (aid,) in cur.fetchall():
-        if aid:
-            collected.extend(_read_asset_metadata_tags(cur, aid))
+        ).fetchall():
+            if raw_json:
+                collected.extend(_parse_tags_from_raw_json(raw_json))
 
     # 3. Any additional incoming tags passed for this confirmation
     for t in extra_union_tags or []:
@@ -10594,12 +10744,14 @@ def _sync_moment_folder_metadata_json(
         return []
 
     # Refresh Moment-level summary rows (asset_id = '') cleanly with the exact asset union
-    cur.execute(
+    _execute_with_retry(
+        cur,
         "DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ''",
         (m_name,),
     )
     for t in union_tags:
-        cur.execute(
+        _execute_with_retry(
+            cur,
             """
             INSERT OR IGNORE INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
             VALUES (?, '', ?, ?, ?, ?, datetime('now'))
@@ -10619,7 +10771,8 @@ def _sync_moment_folder_metadata_json(
     payload["asset_tag_union_count"] = len(union_tags)
     payload_json = json.dumps(payload)
 
-    cur.execute(
+    _execute_with_retry(
+        cur,
         """
         UPDATE moments
         SET tags_metadata_json = ?,
@@ -10629,7 +10782,8 @@ def _sync_moment_folder_metadata_json(
         """,
         (payload_json, paradigm, m_name),
     )
-    cur.execute(
+    _execute_with_retry(
+        cur,
         """
         UPDATE media_organizer_albums
         SET tags_metadata_json = ?,
@@ -10747,26 +10901,7 @@ def _read_asset_metadata_tags(cur: sqlite3.Cursor, asset_id: str) -> list[dict]:
     row = cur.execute("SELECT tags_metadata_json FROM assets WHERE asset_id = ?", (asset_id,)).fetchone()
     if not row or not row[0]:
         return []
-    try:
-        parsed = json.loads(row[0])
-        raw_tags = parsed.get("active_tags") or []
-        out: list[dict] = []
-        for t in raw_tags:
-            if not isinstance(t, dict):
-                continue
-            cat = (t.get("category") or "").strip().lower()
-            val = re.sub(r"\s+", " ", (t.get("tag_value") or "").strip())
-            if cat in _TAG_CAT_DISPLAY and val:
-                out.append(
-                    {
-                        "category": cat,
-                        "tag_value": val,
-                        "include_in_name": bool(t.get("include_in_name", True)),
-                    }
-                )
-        return out
-    except Exception:
-        return []
+    return _parse_tags_from_raw_json(row[0])
 
 
 def _load_per_asset_tags_map(cur: sqlite3.Cursor, asset_ids: list[str]) -> dict[str, list[dict]]:
@@ -10946,7 +11081,8 @@ def _set_moment_has_subevents(
     if "has_subevents" not in cm_cols:
         return
     flag_val = 1 if has_subevents else 0
-    cur.execute(
+    _execute_with_retry(
+        cur,
         """
         INSERT INTO curated_moments (
             moment_name, to_be_curated_count, curated_count, memory_stage,
@@ -11506,13 +11642,34 @@ def _get_disjoint_moment_detail_impl(
             try:
                 cm_cols_d = _ensure_subevent_schema(cur)
                 if cm_cols_d:
+                    cand_names = [m_name]
+                    if suggested_target and suggested_target.strip().lower() != m_name.strip().lower():
+                        cand_names.append(suggested_target.strip())
+                    ph_c = ",".join("?" for _ in cand_names)
                     r_sub = cur.execute(
-                        "SELECT COALESCE(has_subevents, 0), COALESCE(parent_moment_name, '') FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
-                        (m_name,),
+                        f"""
+                        SELECT COALESCE(has_subevents, 0), COALESCE(parent_moment_name, '')
+                        FROM curated_moments
+                        WHERE TRIM(LOWER(moment_name)) IN ({ph_c})
+                        ORDER BY has_subevents DESC
+                        LIMIT 1
+                        """,
+                        [n.strip().lower() for n in cand_names],
                     ).fetchone()
                     if r_sub:
                         has_subevents_flag = bool(r_sub[0])
                         parent_moment_val = (r_sub[1] or "").strip()
+                    if not has_subevents_flag:
+                        child_chk = cur.execute(
+                            f"""
+                            SELECT 1 FROM curated_moments
+                            WHERE TRIM(LOWER(COALESCE(parent_moment_name, ''))) IN ({ph_c})
+                            LIMIT 1
+                            """,
+                            [n.strip().lower() for n in cand_names],
+                        ).fetchone()
+                        if child_chk:
+                            has_subevents_flag = True
             except sqlite3.OperationalError:
                 pass
 
@@ -12835,16 +12992,18 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
             # Collect only selected/combined asset IDs into target album; chunked for 3,900+ asset Moments
             for id_batch in _iter_id_chunks(combined_asset_ids, 800):
                 ph = ",".join("?" for _ in id_batch)
-                cur.execute(
+                _execute_with_retry(
+                    cur,
                     f"UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph})",
                     [target_moment, *id_batch],
                 )
-            for aid in combined_asset_ids:
-                _insert_album_asset_row_if_missing(cur, tgt_pk, aid)
-            cur.execute(
+            _bulk_insert_album_asset_rows_if_missing(cur, tgt_pk, combined_asset_ids)
+            _execute_with_retry(
+                cur,
                 "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
                 (tgt_pk, tgt_pk),
             )
+            _commit_with_retry(conn)
 
             explicit_selection_sent = bool((req.asset_ids or []) or (req.additional_asset_ids or []))
             if req.delete_source_albums:
@@ -12867,22 +13026,25 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                         ]
                         if extra_pks:
                             ph_e = ",".join("?" for _ in extra_pks)
-                            cur.execute(f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_e})", extra_pks)
-                            cur.execute(f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_e})", extra_pks)
+                            _execute_with_retry(cur, f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_e})", extra_pks)
+                            _execute_with_retry(cur, f"DELETE FROM media_organizer_albums WHERE album_pk IN ({ph_e})", extra_pks)
                         continue
 
                     if explicit_selection_sent:
                         # Any assets not selected (e.g. skipped duplicate copies like .MOV paired with .HEIC) are detached from deleted source rather than added to target
-                        cur.execute(
+                        _execute_with_retry(
+                            cur,
                             "UPDATE assets SET MomentsAlbumName = NULL, updated_at_utc = datetime('now') WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
                             (sm,),
                         )
                     else:
-                        cur.execute(
+                        _execute_with_retry(
+                            cur,
                             "UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?))",
                             (target_moment, sm),
                         )
-                    cur.execute(
+                    _execute_with_retry(
+                        cur,
                         """
                         UPDATE OR IGNORE moment_tags
                         SET moment_name = ?, updated_at_utc = datetime('now')
@@ -12890,24 +13052,28 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                         """,
                         (target_moment, sm),
                     )
-                    cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (sm,))
+                    _execute_with_retry(cur, "DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (sm,))
                     try:
-                        cur.execute(
+                        _execute_with_retry(
+                            cur,
                             "UPDATE publications SET moment_name = ? WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
                             (target_moment, sm),
                         )
                     except sqlite3.OperationalError:
                         pass
                     _delete_source_albums_from_db(cur, sm)
+                _commit_with_retry(conn)
 
             _ensure_deduped_moment_groups_table(cur)
-            cur.execute(
+            _execute_with_retry(
+                cur,
                 "DELETE FROM deduped_moment_groups WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
                 (target_moment,),
             )
 
             if req.is_unassigned_cluster and src_moment.lower() != target_moment.lower():
-                cur.execute(
+                _execute_with_retry(
+                    cur,
                     """
                     UPDATE OR IGNORE moment_tags
                     SET moment_name = ?, updated_at_utc = datetime('now')
@@ -12915,29 +13081,34 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     """,
                     (target_moment, src_moment),
                 )
-                cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (src_moment,))
+                _execute_with_retry(cur, "DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (src_moment,))
 
             if unselected_ids_m:
                 for u_batch in _iter_id_chunks(unselected_ids_m, 800):
                     ph_um = ",".join("?" for _ in u_batch)
-                    cur.execute(
+                    _execute_with_retry(
+                        cur,
                         f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_um})",
                         u_batch,
                     )
-                    cur.execute(
+                    _execute_with_retry(
+                        cur,
                         f"DELETE FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id IN ({ph_um})",
                         [tgt_pk, *u_batch],
                     )
-                    cur.execute(
+                    _execute_with_retry(
+                        cur,
                         f"DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id IN ({ph_um})",
                         [target_moment, *u_batch],
                     )
-                cur.execute(
+                _execute_with_retry(
+                    cur,
                     "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
                     (tgt_pk, tgt_pk),
                 )
                 if unselected_action_m == "skip_publishing":
                     _upsert_album_and_assets_in_db(cur, "Moments", "SkipPublishing", unselected_ids_m)
+                _commit_with_retry(conn)
 
             # Tagging / Retagging / Merging into Moments ALWAYS resets pipeline state for these assets & Moment back to M100!
             pipeline_reset_info = _reset_moment_pipeline_to_m100(
@@ -12947,6 +13118,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 event_asset_ids=combined_asset_ids,
                 keep_album_pk=tgt_pk,
             )
+            _commit_with_retry(conn)
             if req.has_subevents is not None:
                 _set_moment_has_subevents(
                     cur,
@@ -12954,6 +13126,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     bool(req.has_subevents),
                     event_total_assets=len(combined_asset_ids),
                 )
+                _commit_with_retry(conn)
 
             # Apply per-Moment distinct tags and/or shared apply_tags across consolidated assets
             clean_apply_tags = _normalize_unique_moment_tags(req.apply_tags)
@@ -12972,7 +13145,8 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                             union_tags.append(t)
 
             if clean_apply_tags or clean_groups:
-                cur.execute(
+                _execute_with_retry(
+                    cur,
                     """
                     INSERT INTO moment_tag_sessions
                         (moment_name, apply_to_folder_name, composed_name, selected_tags_json, asset_count, notes)
@@ -13002,15 +13176,17 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                         for t in tag_list
                     ]
                     if rows_bulk:
-                        cur.executemany(
-                            """
-                            INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
-                            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                            ON CONFLICT(LOWER(moment_name), asset_id, LOWER(tag_value))
-                            DO UPDATE SET category = excluded.category, include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
-                            """,
-                            rows_bulk,
-                        )
+                        for chunk_r in _iter_id_chunks(rows_bulk, 500):
+                            _executemany_with_retry(
+                                cur,
+                                """
+                                INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
+                                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                                ON CONFLICT(LOWER(moment_name), asset_id, LOWER(tag_value))
+                                DO UPDATE SET category = excluded.category, include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
+                                """,
+                                chunk_r,
+                            )
 
                 if union_tags:
                     _upsert_tag_rows([""], union_tags)
@@ -13018,11 +13194,13 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     _upsert_tag_rows(g_aids, g_tags)
                 if clean_apply_tags and combined_asset_ids:
                     _upsert_tag_rows(combined_asset_ids, clean_apply_tags)
+                _commit_with_retry(conn)
 
                 tags_by_aid_map: dict[str, list[dict]] = {}
                 for id_batch in _iter_id_chunks(combined_asset_ids, 800):
                     ph_t = ",".join("?" for _ in id_batch)
-                    for r_aid, r_cat, r_val, r_inc in cur.execute(
+                    for r_aid, r_cat, r_val, r_inc in _execute_with_retry(
+                        cur,
                         f"""
                         SELECT asset_id, category, tag_value, include_in_name
                         FROM moment_tags
@@ -13034,15 +13212,35 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                         tags_by_aid_map.setdefault(r_aid, []).append(
                             {"category": r_cat, "tag_value": r_val, "include_in_name": bool(r_inc)}
                         )
-                for idx_meta, aid in enumerate(combined_asset_ids):
+
+                # Bulk update tags_metadata_json grouped by payload for maximum SQLite efficiency
+                payload_to_aids: dict[str, list[str]] = {}
+                for aid in combined_asset_ids:
                     cur_aid_tags = tags_by_aid_map.get(aid)
                     if cur_aid_tags:
-                        _sync_asset_metadata_json(cur, aid, target_moment, cur_aid_tags, tag_session_id)
-                    if (idx_meta + 1) % 200 == 0 or (idx_meta + 1) == len(combined_asset_ids):
+                        p_struct = _build_tag_metadata_struct(cur_aid_tags, session_id=tag_session_id, moment_name=target_moment)
+                        p_str = json.dumps(p_struct)
+                        payload_to_aids.setdefault(p_str, []).append(aid)
+
+                meta_done = 0
+                for p_str, aids_group in payload_to_aids.items():
+                    for chunk_a in _iter_id_chunks(aids_group, 500):
+                        ph_a = ",".join("?" for _ in chunk_a)
+                        _execute_with_retry(
+                            cur,
+                            f"""
+                            UPDATE assets
+                            SET tags_metadata_json = ?, updated_at_utc = datetime('now')
+                            WHERE asset_id IN ({ph_a})
+                            """,
+                            [p_str, *chunk_a],
+                        )
+                        _commit_with_retry(conn)
+                        meta_done += len(chunk_a)
                         _update_photos_upload_progress(
-                            processed_count=idx_meta + 1,
+                            processed_count=meta_done,
                             phase_total=len(combined_asset_ids),
-                            message=f"Saving asset metadata {idx_meta + 1} / {len(combined_asset_ids)} in media_organizer.db...",
+                            message=f"Saving asset metadata {meta_done} / {len(combined_asset_ids)} in media_organizer.db...",
                         )
                 tags_applied_count = len(union_tags)
 
@@ -13928,8 +14126,7 @@ def _upsert_album_and_assets_in_db(
             """,
             (alb_pk, moment_name, p_pk, parent_folder, full_path),
         )
-    for aid in asset_ids:
-        _insert_album_asset_row_if_missing(cur, alb_pk, aid)
+    _bulk_insert_album_asset_rows_if_missing(cur, alb_pk, asset_ids)
     cur.execute(
         "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
         (alb_pk, alb_pk),

@@ -2304,7 +2304,7 @@
     </div>
 
     <!-- Media Cleanup Asset Preview Modal -->
-    <div class="modal-backdrop" id="modal-cleanup-preview" style="z-index: 320;">
+    <div class="modal-backdrop" id="modal-cleanup-preview" style="z-index: 360;">
       <div class="modal-dialog modal-dialog-preview">
         <div class="modal-header">
           <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
@@ -2904,17 +2904,17 @@
                 <span class="badge badge-xs badge-cyan font-mono">STEP 3</span>
                 <strong style="font-size: 0.83rem; color: #cffafe;">Subevents Designation (Multi-Day / Composite Event)</strong>
               </div>
-              <span class="badge badge-xs badge-outline font-mono" id="resolve-disjoint-step3-lock-badge">🔒 Add Assets in Step 2 to Unlock</span>
+              <span class="badge badge-xs badge-outline font-mono" id="resolve-disjoint-step3-lock-badge">Optional · Multi-Day / Composite</span>
             </div>
             <label id="resolve-disjoint-step3-label"
-              style="display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.75rem; color: #e0f2fe; cursor: not-allowed; opacity: 0.55;">
-              <input type="checkbox" id="resolve-disjoint-step3-has-subevents" disabled style="margin-top: 0.16rem;" />
+              style="display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.75rem; color: #e0f2fe; cursor: pointer;">
+              <input type="checkbox" id="resolve-disjoint-step3-has-subevents" style="margin-top: 0.16rem; cursor: pointer;" />
               <span>
                 <strong>🌿 Mark Event as Containing Subevents:</strong> Keep this Major Event as an Umbrella Event in <code>Moments</code> (it will <strong>not</strong> advance to Curation or Publishing directly) and unlock the <strong>🌿 Split Subevents</strong> button so Subevents can be identified &amp; curated with better context.
               </span>
             </label>
             <div id="resolve-disjoint-step3-hint" class="font-mono text-muted" style="font-size: 0.68rem;">
-              🔒 Step 3 unlocks automatically when Step 2 is used to add same-event assets.
+              💡 Optional for multi-day / composite events: check above if peak assets are not indicative of the overall event and you want to split Subevents before curating.
             </div>
           </div>
 

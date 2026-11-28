@@ -1,0 +1,52 @@
+# Antigravity Indexing Ignore Rules
+
+# Dependencies & Environments
+node_modules/
+.venv/
+venv/
+env/
+ENV/
+
+# Build & Bundles
+dist/
+dist-ssr/
+build/
+develop-eggs/
+eggs/
+.eggs/
+parts/
+var/
+sdist/
+wheels/
+*.egg-info/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# System & OS Files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Version Control
+.git/
+
+# Logs & Temporary Files
+*.log
+run_output/
+scratch/
+
+# Submodules Large Directories
+submodules/**/node_modules/
+submodules/**/.venv/
+submodules/**/venv/
+submodules/**/__pycache__/
+submodules/**/.pytest_cache/
+submodules/**/dist/
+submodules/**/build/

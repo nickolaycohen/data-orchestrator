@@ -600,22 +600,25 @@ function getActivePhotosActionStatusElement(): HTMLElement | null {
 }
 
 function renderLivePhotosUploadProgress(p: PhotosUploadProgressResponse): void {
-  if (!p.active && p.phase !== 'waiting_lock') return;
-  const pct = Math.max(0, Math.min(100, Number.isFinite(p.percent) ? p.percent : 0));
+  if (!p.active && p.phase !== 'waiting_lock' && p.phase !== 'done') return;
+  const isDone = p.phase === 'done';
+  const pct = isDone ? 100 : Math.max(0, Math.min(100, Number.isFinite(p.percent) ? p.percent : 0));
   const phaseLabel =
-    p.phase === 'waiting_lock'
-      ? '⏳ Waiting for Planner Lock'
-      : p.phase === 'reconciling'
-        ? '🔍 Checking Media Organizer Library'
-        : p.phase === 'staging'
-          ? '📦 Staging Originals for Import'
-          : p.phase === 'uploading'
-            ? '📤 Uploading to Apple Photos Library'
-            : p.phase === 'linking'
-              ? '🔗 Linking Existing Library Assets'
-              : p.phase === 'updating_db'
-                ? '💾 Saving Tags & Metadata to DB'
-                : '🍎 Syncing Media Organizer Library';
+    isDone
+      ? '✅ Complete'
+      : p.phase === 'waiting_lock'
+        ? '⏳ Waiting for Planner Lock'
+        : p.phase === 'reconciling'
+          ? '🔍 Checking Media Organizer Library'
+          : p.phase === 'staging'
+            ? '📦 Staging Originals for Import'
+            : p.phase === 'uploading'
+              ? '📤 Uploading to Apple Photos Library'
+              : p.phase === 'linking'
+                ? '🔗 Linking Existing Library Assets'
+                : p.phase === 'updating_db'
+                  ? '💾 Saving Tags & Metadata to DB'
+                  : '🍎 Syncing Media Organizer Library';
 
   const countText =
     p.phase === 'uploading' && p.to_upload_total > 0
@@ -627,10 +630,12 @@ function renderLivePhotosUploadProgress(p: PhotosUploadProgressResponse): void {
           : '';
 
   const etaStr =
-    p.phase === 'uploading' || p.phase === 'staging' || p.phase === 'updating_db'
-      ? `⏱️ ETA ${formatEtaDuration(p.eta_sec)}`
-      : '';
-  const rateStr = p.rate_per_sec && p.rate_per_sec > 0 ? ` · ${p.rate_per_sec.toFixed(1)}/s` : '';
+    isDone
+      ? ''
+      : (p.phase === 'uploading' || p.phase === 'staging' || p.phase === 'updating_db')
+        ? `⏱️ ETA ${formatEtaDuration(p.eta_sec)}`
+        : '';
+  const rateStr = !isDone && p.rate_per_sec && p.rate_per_sec > 0 ? ` · ${p.rate_per_sec.toFixed(1)}/s` : '';
   const elapsedStr = p.elapsed_sec > 0 ? ` · Elapsed ${formatEtaDuration(p.elapsed_sec)}` : '';
   const lockPill = p.lock_status_note
     ? `<span class="badge badge-xs ${p.lock_held ? 'badge-cyan' : 'badge-amber'} font-mono">${escapeHtml(p.lock_status_note)}</span>`
@@ -658,8 +663,8 @@ function renderLivePhotosUploadProgress(p: PhotosUploadProgressResponse): void {
       <div style="width: 100%; display: flex; flex-direction: column; gap: 0.42rem;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
           <div style="display: flex; align-items: center; gap: 0.45rem; min-width: 0;">
-            <div class="spinner-sm"></div>
-            <strong style="font-size: 0.77rem; color: #e2e8f0;">${escapeHtml(phaseLabel)}${p.operation ? `: <code>${escapeHtml(p.operation)}</code>` : ''}</strong>
+            ${isDone ? '<span class="badge badge-xs badge-green font-mono">✅ Complete</span>' : '<div class="spinner-sm"></div>'}
+            <strong style="font-size: 0.77rem; color: ${isDone ? '#a7f3d0' : '#e2e8f0'};">${escapeHtml(phaseLabel)}${p.operation ? `: <code>${escapeHtml(p.operation)}</code>` : ''}</strong>
           </div>
           <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
             ${lockPill}
@@ -668,7 +673,7 @@ function renderLivePhotosUploadProgress(p: PhotosUploadProgressResponse): void {
           </div>
         </div>
         <div style="width: 100%; height: 7px; border-radius: 999px; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(148, 163, 184, 0.25); overflow: hidden;">
-          <div style="height: 100%; width: ${pct.toFixed(1)}%; background: linear-gradient(90deg, #06b6d4, #8b5cf6, #10b981); transition: width 0.35s ease;"></div>
+          <div style="height: 100%; width: ${pct.toFixed(1)}%; background: ${isDone ? '#10b981' : 'linear-gradient(90deg, #06b6d4, #8b5cf6, #10b981)'}; transition: width 0.35s ease;"></div>
         </div>
         <div class="font-mono text-muted" style="font-size: 0.68rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
           <span>${escapeHtml(p.message || photosUploadFallbackMessage)}</span>
@@ -697,7 +702,7 @@ function startPhotosUploadProgressPolling(): void {
       const res = await fetch('/api/media/photos-upload-progress');
       if (!res.ok) return;
       const data: PhotosUploadProgressResponse = await res.json();
-      if (data.ok && (data.active || data.phase === 'waiting_lock')) {
+      if (data.ok && (data.active || data.phase === 'waiting_lock' || data.phase === 'done')) {
         renderLivePhotosUploadProgress(data);
       }
     } catch {
@@ -707,7 +712,7 @@ function startPhotosUploadProgressPolling(): void {
   void pollOnce();
   photosUploadProgressTimer = window.setInterval(() => {
     void pollOnce();
-  }, 900);
+  }, 400);
 }
 
 export function beginApplePhotosSyncLock(message = ''): void {
@@ -1199,6 +1204,7 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   });
   document.getElementById('resolve-disjoint-step3-has-subevents')?.addEventListener('change', (e) => {
     const chk = e.target as HTMLInputElement | null;
+    resolveDisjointStep3UserManuallyToggled = true;
     resolveDisjointStep3HasSubevents = Boolean(chk?.checked);
     refreshResolveDisjointStep3SubeventsUI();
     updateResolveDisjointTargetPreview();
@@ -5920,7 +5926,7 @@ function setResolveDisjointCompletedState(completed: boolean): void {
     btnSubmit.disabled = false;
     if (completed) {
       btnSubmit.className = 'btn btn-green';
-      btnSubmit.textContent = '✅ OK';
+      btnSubmit.textContent = '✅ Done · Close';
     } else {
       btnSubmit.className = 'btn btn-purple';
       updateResolveDisjointTargetPreview();
@@ -7345,14 +7351,21 @@ function getCombinedSelectedAssetCount(): number {
 let resolveDisjointOpenedFromCuration = false;
 let resolveDisjointRetagExpanded = false;
 let resolveDisjointStep3HasSubevents = false;
+let resolveDisjointStep3UserManuallyToggled = false;
 let resolveDisjointExistingAlreadyConsolidated = false;
 
+function isMomentKnownUmbrella(momentName?: string): boolean {
+  const clean = (momentName || '').trim().toLowerCase();
+  if (!clean) return false;
+  const inAll = allGroupingsData?.groupings?.find(g => (g.name || '').trim().toLowerCase() === clean);
+  if (inAll && (inAll.has_subevents || (inAll.subevents && inAll.subevents.length > 0))) {
+    return true;
+  }
+  return false;
+}
+
 function isStep3SubeventsUnlocked(): boolean {
-  return (
-    combinedExtraMoments.size > 0 ||
-    resolveDisjointStep3HasSubevents ||
-    resolveDisjointExistingAlreadyConsolidated
-  );
+  return true;
 }
 
 function refreshResolveDisjointStep3SubeventsUI(): void {
@@ -7367,34 +7380,25 @@ function refreshResolveDisjointStep3SubeventsUI(): void {
   step3El.style.display = isCurationStep ? 'none' : 'flex';
   if (isCurationStep) return;
 
-  const unlocked = isStep3SubeventsUnlocked();
-  if (!unlocked) {
-    resolveDisjointStep3HasSubevents = false;
-  }
   if (cb) {
-    cb.disabled = !unlocked;
-    cb.checked = unlocked && resolveDisjointStep3HasSubevents;
+    cb.disabled = false;
+    cb.checked = resolveDisjointStep3HasSubevents;
   }
   if (lbl) {
-    lbl.style.cursor = unlocked ? 'pointer' : 'not-allowed';
-    lbl.style.opacity = unlocked ? '1' : '0.55';
+    lbl.style.cursor = 'pointer';
+    lbl.style.opacity = '1';
   }
   if (badge) {
-    if (unlocked && resolveDisjointStep3HasSubevents) {
+    if (resolveDisjointStep3HasSubevents) {
       badge.className = 'badge badge-xs badge-cyan font-mono';
       badge.textContent = '🌿 Marked: Contains Subevents';
-    } else if (unlocked) {
-      badge.className = 'badge badge-xs badge-green font-mono';
-      badge.textContent = '🔓 Unlocked';
     } else {
       badge.className = 'badge badge-xs badge-outline font-mono';
-      badge.textContent = '🔒 Add Assets in Step 2 to Unlock';
+      badge.textContent = 'Optional · Multi-Day / Composite';
     }
   }
   if (hint) {
-    if (!unlocked) {
-      hint.innerHTML = '🔒 Step 3 unlocks automatically when Step 2 is used to add same-event assets.';
-    } else if (resolveDisjointStep3HasSubevents) {
+    if (resolveDisjointStep3HasSubevents) {
       hint.innerHTML =
         '✅ Major Event will stay in <code>Moments</code> as an Umbrella Event (locked from advancing to Publishing) and surface <strong>🌿 Split Subevents</strong> on the main screen.';
     } else {
@@ -7552,6 +7556,11 @@ function updateResolveDisjointTargetPreview(): void {
   const rawTarget = (targetInp?.value || '').trim();
   const targetName = rawTarget || '—';
 
+  if (!resolveDisjointStep3UserManuallyToggled && rawTarget && isMomentKnownUmbrella(rawTarget) && !resolveDisjointStep3HasSubevents) {
+    resolveDisjointStep3HasSubevents = true;
+    refreshResolveDisjointStep3SubeventsUI();
+  }
+
   const manualCurateActive = resolveDisjointIsCurateM200 && !resolveDisjointRetagExpanded;
   const isRetagResetMode = resolveDisjointOpenedFromCuration && resolveDisjointRetagExpanded;
 
@@ -7577,8 +7586,8 @@ function updateResolveDisjointTargetPreview(): void {
     }
   }
 
-  const srcGrouping = allGroupingsData?.groupings.find(
-    g => g.name.toLowerCase() === (resolveDisjointMomentName || '').trim().toLowerCase()
+  const srcGrouping = allGroupingsData?.groupings?.find(
+    g => (g.name || '').toLowerCase() === (resolveDisjointMomentName || '').trim().toLowerCase()
   );
   const srcIsOrganizerAlbum = Boolean(srcGrouping?.in_organizer_library);
   const delSrcRowEl = document.getElementById('resolve-disjoint-delete-source-row');
@@ -7684,8 +7693,8 @@ export async function openResolveDisjointModal(
   const isHistorical = Boolean(options?.isHistoricalMoment);
   // Never allow opening Manual Curation for unassigned groupings before Moment Tagging is complete
   const requestedCurate = Boolean(options?.isCurateM200) && !isUnassigned;
-  const srcGroupingInitial = allGroupingsData?.groupings.find(
-    g => g.name.toLowerCase() === momentName.trim().toLowerCase()
+  const srcGroupingInitial = allGroupingsData?.groupings?.find(
+    g => (g.name || '').toLowerCase() === momentName.trim().toLowerCase()
   );
   const knownUntagged = srcGroupingInitial ? !srcGroupingInitial.is_tagged : false;
   const isCurateM200 = requestedCurate && !knownUntagged;
@@ -7696,7 +7705,14 @@ export async function openResolveDisjointModal(
   resolveDisjointIsCurateM200 = isCurateM200;
   resolveDisjointOpenedFromCuration = isCurateM200;
   resolveDisjointRetagExpanded = false;
-  resolveDisjointStep3HasSubevents = Boolean(srcGroupingInitial?.has_subevents);
+  resolveDisjointStep3UserManuallyToggled = false;
+  const isKnownUmbrella = Boolean(
+    srcGroupingInitial?.has_subevents ||
+    (srcGroupingInitial?.subevents && srcGroupingInitial.subevents.length > 0) ||
+    isMomentKnownUmbrella(momentName) ||
+    (suggestedTarget && isMomentKnownUmbrella(suggestedTarget))
+  );
+  resolveDisjointStep3HasSubevents = isKnownUmbrella;
   const initialDatesSpanMultiDay = Boolean(
     srcGroupingInitial?.date_range && srcGroupingInitial.date_range.includes('..')
   );
@@ -7704,7 +7720,9 @@ export async function openResolveDisjointModal(
     Boolean(srcGroupingInitial?.in_organizer_library) &&
     (((srcGroupingInitial?.source_all_media_folders || []).length > 1) || initialDatesSpanMultiDay);
   resolveDisjointExistingAlreadyConsolidated = Boolean(
-    srcGroupingInitial?.has_subevents || initialMultiSourceMerged
+    srcGroupingInitial?.has_subevents ||
+    resolveDisjointStep3HasSubevents ||
+    initialMultiSourceMerged
   );
   resolveDisjointExplicitAssetIds = explicitIds;
   resolveDisjointAssets = [];
@@ -7774,7 +7792,7 @@ export async function openResolveDisjointModal(
   const unselActionSel = document.getElementById('curate-m200-unselected-action') as HTMLSelectElement | null;
   const delTbcCb = document.getElementById('curate-m200-delete-tbc') as HTMLInputElement | null;
   const exportLacieCb = document.getElementById('curate-m200-export-lacie') as HTMLInputElement | null;
-  const srcGrouping = allGroupingsData?.groupings.find(g => g.name.toLowerCase() === momentName.trim().toLowerCase());
+  const srcGrouping = allGroupingsData?.groupings?.find(g => (g.name || '').toLowerCase() === momentName.trim().toLowerCase());
   const srcIsOrganizerAlbum = Boolean(srcGrouping?.in_organizer_library);
   if (manCurToggle) manCurToggle.checked = isCurateM200;
   if (delSrcRowEl) delSrcRowEl.style.display = !isCurateM200 && srcIsOrganizerAlbum ? 'flex' : 'none';
@@ -7869,7 +7887,7 @@ export async function openResolveDisjointModal(
     const distinctDaysInDetail = new Set(
       assets.map(a => (a.date_created_utc || '').slice(0, 10)).filter(Boolean)
     );
-    if (data.has_subevents) {
+    if (data.has_subevents || isMomentKnownUmbrella(momentName) || (suggestedTarget && isMomentKnownUmbrella(suggestedTarget))) {
       resolveDisjointStep3HasSubevents = true;
       resolveDisjointExistingAlreadyConsolidated = true;
       if (resolveDisjointIsCurateM200) {
@@ -8551,7 +8569,7 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
           moment_tag_groups: momentTagGroups,
           delete_source_albums: Boolean(delSrcCb?.checked ?? true),
           is_unassigned_cluster: resolveDisjointIsUnassignedCluster,
-          has_subevents: isMerge && isStep3SubeventsUnlocked() ? resolveDisjointStep3HasSubevents : undefined
+          has_subevents: isMerge ? resolveDisjointStep3HasSubevents : undefined
         })
       });
     }
@@ -8600,7 +8618,31 @@ async function submitResolveDisjoint(action: ResolveDisjointAction): Promise<voi
     ]);
     if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
 
-    closeResolveDisjointModal();
+    stopPhotosUploadProgressPolling();
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      const totalCount = (data as any).assets_total || assetIds.length;
+      statusEl.innerHTML = `
+        <div style="width: 100%; display: flex; flex-direction: column; gap: 0.42rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 0.45rem;">
+              <span class="badge badge-xs badge-green font-mono">✅ Complete</span>
+              <strong style="font-size: 0.8rem; color: #a7f3d0;">
+                ${isCurate ? `Curated & Approved into Curated/${targetMoment}` : `Consolidated & Tagged into ${resolvedParent}/${targetMoment}`}
+              </strong>
+            </div>
+            <span class="badge badge-xs badge-cyan font-mono">${totalCount.toLocaleString()} asset(s)</span>
+          </div>
+          <div style="width: 100%; height: 7px; border-radius: 999px; background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.4); overflow: hidden;">
+            <div style="height: 100%; width: 100%; background: #10b981;"></div>
+          </div>
+          <div class="font-mono text-muted" style="font-size: 0.69rem; color: #94a3b8;">
+            Pipeline reset to M100 · media_organizer.db updated${(data as any).has_subevents ? ' · 🌿 Marked as Containing Subevents' : ''}.
+          </div>
+        </div>
+      `;
+    }
+
     if ((data as any).library_target === 'organizer') {
       cancelApplePhotosSyncLock();
     } else {
@@ -10900,6 +10942,9 @@ function renderSplitSubeventsModalContent(): void {
                   ? `<span class="badge badge-xs badge-cyan font-mono">${secCheckedCount} checked</span>`
                   : ''
               }
+              <button type="button" class="btn btn-xs btn-outline btn-subevent-preview-all" data-section-id="${escapeHtml(sec.section_id)}" title="Open all ${sec.assets.length} asset(s) in the Multi-Asset Lightbox Viewer (curation preview, zoom, logarithmic rule, filmstrip)">
+                🖼️ View All (${sec.assets.length})
+              </button>
               <button type="button" class="btn btn-xs btn-outline btn-remove-subevent-sec" data-section-id="${escapeHtml(sec.section_id)}" style="border-color: rgba(239, 68, 68, 0.45); color: #fca5a5;" title="Remove all ${sec.assets.length} asset(s) in this subgrouping from '${escapeHtml(data.moment_name)}' (detaches from Media Organizer album &amp; restores to original All-Media Moment / Unassigned)">
                 🚫 Remove (${sec.assets.length})
               </button>
@@ -10970,16 +11015,44 @@ function renderSplitSubeventsModalContent(): void {
   });
 
   listEl.querySelectorAll<HTMLElement>('.btn-subevent-preview-asset').forEach(el => {
-    el.addEventListener('click', () => {
+    el.addEventListener('click', (e) => {
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
       const sid = el.dataset.sectionId || '';
       const aid = el.dataset.assetId || '';
       const sec = data.sections.find(s => s.section_id === sid);
       if (!sec || !aid) return;
       openCleanupPreviewModal(aid, {
         assetIds: sec.assets.map(x => x.asset_id),
-        groupLabel: `${sec.title} · Avg ${sec.avg_score.toFixed(4)}`,
+        groupLabel: `#${sec.index} ${sec.title} (${sec.assets.length} assets)`,
         hideMarkRemoved: true,
         selectedIds: splitSubeventsSelectedAssetIds,
+        targetSelectionCount: sec.expected_curated_count,
+        logPoolTotal: sec.unique_assets || sec.total_assets,
+        defaultSort: 'score',
+        onSelectionChange: () => {
+          if (splitSubeventsSelectedAssetIds.size > 0 && !splitSubeventsActiveSectionIds.size) {
+            splitSubeventsActiveSectionIds.add(sec.section_id);
+            initSubeventTagsFromParentAndSections([sec]);
+          }
+          renderSplitSubeventsModalContent();
+        }
+      });
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-subevent-preview-all').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sid = btn.dataset.sectionId || '';
+      const sec = data.sections.find(s => s.section_id === sid);
+      if (!sec || !sec.assets.length) return;
+      const firstAid = sec.assets[0].asset_id;
+      openCleanupPreviewModal(firstAid, {
+        assetIds: sec.assets.map(x => x.asset_id),
+        groupLabel: `#${sec.index} ${sec.title} (${sec.assets.length} assets)`,
+        hideMarkRemoved: true,
+        selectedIds: splitSubeventsSelectedAssetIds,
+        targetSelectionCount: sec.expected_curated_count,
+        logPoolTotal: sec.unique_assets || sec.total_assets,
         defaultSort: 'score',
         onSelectionChange: () => {
           if (splitSubeventsSelectedAssetIds.size > 0 && !splitSubeventsActiveSectionIds.size) {

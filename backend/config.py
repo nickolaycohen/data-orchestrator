@@ -11,10 +11,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 def resolve_repo_path(repo_name: str) -> Path:
     submodule_path = BASE_DIR / "submodules" / repo_name
     sibling_path = BASE_DIR.parent / repo_name
-    if submodule_path.exists() and any(submodule_path.iterdir()):
-        return submodule_path
-    if sibling_path.exists():
-        return sibling_path
+    try:
+        if submodule_path.exists() and any(submodule_path.iterdir()):
+            return submodule_path
+    except OSError:
+        pass
+    try:
+        if sibling_path.exists():
+            return sibling_path
+    except OSError:
+        pass
     return submodule_path
 
 REPOS = {
@@ -26,12 +32,23 @@ REPOS = {
 
 # Resolve SQLite databases with live fallback
 def resolve_db_path(primary: Path, fallbacks: list[Path]) -> Optional[Path]:
-    if primary.exists() and primary.stat().st_size > 0:
-        return primary
+    try:
+        if primary.exists() and primary.stat().st_size > 0:
+            return primary
+    except OSError:
+        pass
     for fb in fallbacks:
-        if fb.exists() and fb.stat().st_size > 0:
-            return fb
-    return primary if primary.exists() else (fallbacks[0] if fallbacks else None)
+        try:
+            if fb.exists() and fb.stat().st_size > 0:
+                return fb
+        except OSError:
+            pass
+    try:
+        if primary.exists():
+            return primary
+    except OSError:
+        pass
+    return fallbacks[0] if fallbacks else None
 
 MEDIA_DB_PATH = resolve_db_path(
     REPOS["media-organizer-pipeline"] / "db" / "media_organizer.db",
@@ -77,12 +94,14 @@ def get_db_connection(db_path: Optional[Path]):
     try:
         # Open in URI read-only mode to prevent write locking
         uri = f"file:{db_path.resolve()}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        conn = sqlite3.connect(uri, uri=True, timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
         conn.row_factory = sqlite3.Row
         return conn
     except Exception:
         try:
-            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn = sqlite3.connect(str(db_path), timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
             conn.row_factory = sqlite3.Row
             return conn
         except Exception:

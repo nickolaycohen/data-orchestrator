@@ -2045,6 +2045,7 @@ export function openCleanupPreviewModal(assetId: string, context?: PreviewGroupC
   const modal = document.getElementById('modal-cleanup-preview');
   const stage = document.getElementById('cleanup-preview-stage');
   if (!modal || !stage) return;
+  modal.style.zIndex = '360';
 
   const seen = new Set<string>();
   const validGroupIds: string[] = [];
