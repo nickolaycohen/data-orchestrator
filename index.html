@@ -2587,6 +2587,8 @@
             <span>Loading curated assets and publication status...</span>
           </div>
 
+          <div id="publish-shutterfly-conflict-gate" style="display: none;"></div>
+
           <div class="publish-folder-bar" id="publish-moment-folder-bar" style="display: none;">
             <div style="min-width: 0; flex: 1;">
               <span class="font-mono text-muted" style="font-size: 0.68rem; display: block;">Publishing Recommendation
@@ -3160,9 +3162,15 @@
             </div>
           </div>
           <div id="split-subevents-status" class="dedup-status-banner" style="display: none; font-size: 0.75rem;"></div>
-          <div style="display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap;">
-            <button type="button" class="btn btn-xs btn-outline" id="btn-cancel-subevent-builder">Clear Selection</button>
-            <button type="button" class="btn btn-sm btn-cyan" id="btn-submit-create-subevent">🌿 Create Subevent in Moments</button>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+            <button type="button" class="btn btn-xs btn-red" id="btn-remove-selected-from-umbrella"
+              title="Remove checked asset(s) that do not belong to this Umbrella Event (detaches from Media Organizer album &amp; restores to original All-Media Moment / Unassigned)">
+              🚫 Remove Checked from Umbrella
+            </button>
+            <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+              <button type="button" class="btn btn-xs btn-outline" id="btn-cancel-subevent-builder">Clear Selection</button>
+              <button type="button" class="btn btn-sm btn-cyan" id="btn-submit-create-subevent">🌿 Create Subevent in Moments</button>
+            </div>
           </div>
         </div>
       </div>

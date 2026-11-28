@@ -77,3 +77,10 @@ npm run dev
 # or unified launcher:
 ./run.sh
 ```
+
+---
+
+## 🍎 Media Pipeline Conventions & Locking
+
+- **Tilde-Suffixed Legacy Folders (`SkipPublishing~` & `Ignore~`)**: Legacy **Skip Publishing** and **Ignore** albums in `All-Media.photoslibrary` have been manually renamed with a trailing tilde (`SkipPublishing~`, `Ignore~`) so they are **not** matched as active exclusion folders (`SkipPublishing` / `Ignore`), allowing their assets to re-enter the pipeline and be reprocessed without being ignored.
+- **Shared Planner & DB Lock (`Photos.sqlite.lock`)**: All Apple Photos imports, album syncs, and `media_organizer.db` write actions in the dashboard acquire the shared planner lock (`status: "planner_active"` in `Photos.sqlite.lock`, while honoring `db/backup.lock` and active background refreshes) and commit `organizer_asset_map` per upload batch to prevent `database is locked` contention with the background DB sync service and cron executor.

@@ -546,6 +546,11 @@ export interface PublishMomentInfoResponse {
   memory_stage?: string;
   shutterfly_url?: string;
   youtube_url?: string;
+  legacy_shutterfly_conflict?: boolean;
+  legacy_shutterfly_url?: string;
+  legacy_shutterfly_renamed_album?: string;
+  legacy_published_count?: number;
+  archived_shutterfly_url?: string;
   curated_count?: number;
   published_count?: number;
   unpublished_count?: number;
@@ -584,6 +589,11 @@ export interface PublishMomentResponse {
   new_stage?: string;
   shutterfly_url?: string;
   youtube_url?: string;
+  legacy_shutterfly_conflict?: boolean;
+  legacy_shutterfly_url?: string;
+  legacy_shutterfly_renamed_album?: string;
+  legacy_published_count?: number;
+  archived_shutterfly_url?: string;
   published_folder_move?: {
     ok?: boolean;
     target_album_path?: string;
@@ -601,6 +611,48 @@ export interface PublishMomentResponse {
     removed_folder?: boolean;
     pub_rec_dir?: string;
   };
+}
+
+export interface ArchiveLegacyShutterflyResponse {
+  ok: boolean;
+  error?: string;
+  moment_name?: string;
+  archived_moment_name?: string;
+  archived_shutterfly_url?: string;
+  moved_publications_count?: number;
+}
+
+export interface RemoveMomentAssetsResponse {
+  ok: boolean;
+  error?: string;
+  moment_name?: string;
+  removed_count?: number;
+  remaining_count?: number;
+  restored_moments?: Record<string, number>;
+  unassigned_count?: number;
+  photos_warning?: string | null;
+}
+
+export interface PhotosUploadProgressResponse {
+  ok: boolean;
+  active: boolean;
+  phase: string;
+  operation: string;
+  lock_held: boolean;
+  lock_status_note: string;
+  total_requested: number;
+  already_in_library: number;
+  to_upload_total: number;
+  staged_count: number;
+  uploaded_count: number;
+  processed_count: number;
+  phase_total: number;
+  percent: number;
+  elapsed_sec: number;
+  rate_per_sec?: number | null;
+  eta_sec?: number | null;
+  current_item?: string;
+  message?: string;
 }
 
 export interface DisjointDetailAsset {

@@ -4,6 +4,7 @@
 
 import type {
   AppleMonthSelectionDetailResponse,
+  ArchiveLegacyShutterflyResponse,
   BatchDeviceSummary,
   CliStep2ConsoleMomentRow,
   CliStep2PendingPublishingRow,
@@ -27,9 +28,11 @@ import type {
   PlannerModeB,
   PlannerModeM,
   PlannerOverviewResponse,
+  PhotosUploadProgressResponse,
   PublishMomentAssetItem,
   PublishMomentInfoResponse,
   PublishMomentResponse,
+  RemoveMomentAssetsResponse,
   ResolveDisjointResponse,
   SaveMomentTagsResponse,
   SearchMomentItem,
@@ -114,6 +117,13 @@ let disjointFilterCuratedOnly = false;
 let isApplyingPublishCuration = false;
 let isSubmittingPublishMoment = false;
 let publishMomentCompleted = false;
+let publishLegacySfConflict = false;
+let publishLegacySfUrl = '';
+let publishLegacySfRenamedAlbum = '';
+let publishLegacyPubCount = 0;
+let publishArchivedSfUrl = '';
+let publishArchiveJustConfirmed = false;
+let isArchivingLegacySf = false;
 
 interface TaggingEngineState {
   mountId: string;
@@ -556,21 +566,166 @@ function setClustersSyncLock(mode: ClustersSyncLockMode, message = ''): void {
   renderClustersSyncUI();
 }
 
+let photosUploadProgressTimer: number | null = null;
+let photosUploadFallbackMessage = '';
+
+function formatEtaDuration(rawSec?: number | null): string {
+  if (rawSec === null || rawSec === undefined || !Number.isFinite(rawSec)) return 'calculating…';
+  const sec = Math.max(0, Math.round(rawSec));
+  if (sec <= 0) return '< 1s';
+  if (sec < 60) return `${sec}s`;
+  const mins = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  if (mins < 60) return `${mins}m ${String(remSec).padStart(2, '0')}s`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hrs}h ${String(remMins).padStart(2, '0')}m`;
+}
+
+function getActivePhotosActionStatusElement(): HTMLElement | null {
+  const candidates: Array<[string, string]> = [
+    ['modal-resolve-disjoint', 'resolve-disjoint-status'],
+    ['modal-create-moment', 'create-moment-status'],
+    ['modal-split-subevents', 'split-subevents-status'],
+    ['modal-publish-moment', 'publish-moment-status']
+  ];
+  for (const [modalId, statusId] of candidates) {
+    const mEl = document.getElementById(modalId);
+    if (mEl?.classList.contains('open')) {
+      const sEl = document.getElementById(statusId);
+      if (sEl) return sEl;
+    }
+  }
+  return null;
+}
+
+function renderLivePhotosUploadProgress(p: PhotosUploadProgressResponse): void {
+  if (!p.active && p.phase !== 'waiting_lock') return;
+  const pct = Math.max(0, Math.min(100, Number.isFinite(p.percent) ? p.percent : 0));
+  const phaseLabel =
+    p.phase === 'waiting_lock'
+      ? '⏳ Waiting for Planner Lock'
+      : p.phase === 'reconciling'
+        ? '🔍 Checking Media Organizer Library'
+        : p.phase === 'staging'
+          ? '📦 Staging Originals for Import'
+          : p.phase === 'uploading'
+            ? '📤 Uploading to Apple Photos Library'
+            : p.phase === 'linking'
+              ? '🔗 Linking Existing Library Assets'
+              : p.phase === 'updating_db'
+                ? '💾 Saving Tags & Metadata to DB'
+                : '🍎 Syncing Media Organizer Library';
+
+  const countText =
+    p.phase === 'uploading' && p.to_upload_total > 0
+      ? `${p.processed_count.toLocaleString()} / ${p.to_upload_total.toLocaleString()} uploaded (${pct.toFixed(1)}%)`
+      : p.phase === 'staging' && p.phase_total > 0
+        ? `${p.processed_count.toLocaleString()} / ${p.phase_total.toLocaleString()} staged (${pct.toFixed(1)}%)`
+        : p.phase_total > 0
+          ? `${p.processed_count.toLocaleString()} / ${p.phase_total.toLocaleString()} (${pct.toFixed(1)}%)`
+          : '';
+
+  const etaStr =
+    p.phase === 'uploading' || p.phase === 'staging' || p.phase === 'updating_db'
+      ? `⏱️ ETA ${formatEtaDuration(p.eta_sec)}`
+      : '';
+  const rateStr = p.rate_per_sec && p.rate_per_sec > 0 ? ` · ${p.rate_per_sec.toFixed(1)}/s` : '';
+  const elapsedStr = p.elapsed_sec > 0 ? ` · Elapsed ${formatEtaDuration(p.elapsed_sec)}` : '';
+  const lockPill = p.lock_status_note
+    ? `<span class="badge badge-xs ${p.lock_held ? 'badge-cyan' : 'badge-amber'} font-mono">${escapeHtml(p.lock_status_note)}</span>`
+    : '';
+  const alreadyNote =
+    p.already_in_library > 0 && p.total_requested > 0
+      ? `✓ ${p.already_in_library.toLocaleString()} of ${p.total_requested.toLocaleString()} already in Media Organizer (copies missing only) · Committed every 12 assets`
+      : p.total_requested > 0
+        ? `Total Moment Assets: ${p.total_requested.toLocaleString()} · Committed every 12 assets`
+        : '';
+
+  clustersSyncLockMessage = [
+    `${phaseLabel}${p.operation ? ` (${p.operation})` : ''}`,
+    countText,
+    etaStr ? `${etaStr}${rateStr}` : ''
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  renderClustersSyncUI();
+
+  const statusEl = getActivePhotosActionStatusElement();
+  if (statusEl) {
+    statusEl.style.display = 'flex';
+    statusEl.innerHTML = `
+      <div style="width: 100%; display: flex; flex-direction: column; gap: 0.42rem;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 0.45rem; min-width: 0;">
+            <div class="spinner-sm"></div>
+            <strong style="font-size: 0.77rem; color: #e2e8f0;">${escapeHtml(phaseLabel)}${p.operation ? `: <code>${escapeHtml(p.operation)}</code>` : ''}</strong>
+          </div>
+          <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+            ${lockPill}
+            ${countText ? `<span class="badge badge-xs badge-purple font-mono" style="font-weight: 700;">${escapeHtml(countText)}</span>` : ''}
+            ${etaStr ? `<span class="badge badge-xs badge-green font-mono">${escapeHtml(`${etaStr}${rateStr}${elapsedStr}`)}</span>` : ''}
+          </div>
+        </div>
+        <div style="width: 100%; height: 7px; border-radius: 999px; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(148, 163, 184, 0.25); overflow: hidden;">
+          <div style="height: 100%; width: ${pct.toFixed(1)}%; background: linear-gradient(90deg, #06b6d4, #8b5cf6, #10b981); transition: width 0.35s ease;"></div>
+        </div>
+        <div class="font-mono text-muted" style="font-size: 0.68rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+          <span>${escapeHtml(p.message || photosUploadFallbackMessage)}</span>
+          ${alreadyNote ? `<span style="color: #93c5fd;">${escapeHtml(alreadyNote)}</span>` : ''}
+        </div>
+      </div>
+    `;
+  }
+}
+
+function stopPhotosUploadProgressPolling(): void {
+  if (photosUploadProgressTimer !== null) {
+    window.clearInterval(photosUploadProgressTimer);
+    photosUploadProgressTimer = null;
+  }
+}
+
+function startPhotosUploadProgressPolling(): void {
+  stopPhotosUploadProgressPolling();
+  const pollOnce = async () => {
+    if (clustersSyncLockMode !== 'running') {
+      stopPhotosUploadProgressPolling();
+      return;
+    }
+    try {
+      const res = await fetch('/api/media/photos-upload-progress');
+      if (!res.ok) return;
+      const data: PhotosUploadProgressResponse = await res.json();
+      if (data.ok && (data.active || data.phase === 'waiting_lock')) {
+        renderLivePhotosUploadProgress(data);
+      }
+    } catch {
+      // Ignore transient poll errors while upload continues
+    }
+  };
+  void pollOnce();
+  photosUploadProgressTimer = window.setInterval(() => {
+    void pollOnce();
+  }, 900);
+}
+
 export function beginApplePhotosSyncLock(message = ''): void {
   appleSyncBaselineRefreshUtc = latestBgSyncStateInfo.latestRefreshUtc || '';
-  setClustersSyncLock(
-    'running',
-    message || '🍎 Updating Apple Photos — UI paused until Background DB Sync refreshes…'
-  );
+  photosUploadFallbackMessage = message || '🍎 Updating Apple Photos — UI paused until Background DB Sync refreshes…';
+  setClustersSyncLock('running', photosUploadFallbackMessage);
+  startPhotosUploadProgressPolling();
 }
 
 export function cancelApplePhotosSyncLock(): void {
+  stopPhotosUploadProgressPolling();
   appleSyncBaselineRefreshUtc = '';
   appleSyncAwaitingSinceMs = 0;
   setClustersSyncLock('idle');
 }
 
 export function finishApplePhotosActionSyncLock(awaitingMessage: string): void {
+  stopPhotosUploadProgressPolling();
   appleSyncAwaitingSinceMs = Date.now();
   setClustersSyncLock('awaiting', awaitingMessage);
   if (plannerRefreshExecutorCb) plannerRefreshExecutorCb();
@@ -1079,6 +1234,9 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   });
   document.getElementById('btn-submit-create-subevent')?.addEventListener('click', () => {
     void submitCreateSubevent();
+  });
+  document.getElementById('btn-remove-selected-from-umbrella')?.addEventListener('click', () => {
+    void removeAssetsFromUmbrellaInSplitModal(Array.from(splitSubeventsSelectedAssetIds));
   });
   document.getElementById('resolve-disjoint-manual-curate-toggle')?.addEventListener('change', (e) => {
     const chk = e.target as HTMLInputElement | null;
@@ -4814,24 +4972,203 @@ async function updateGroupingRules(payload: {
   }
 }
 
+function normalizeUrlForCompare(rawUrl: string): string {
+  return (rawUrl || '').trim().replace(/\/+$/, '').toLowerCase();
+}
+
+function updatePublishSubmitLockState(): void {
+  const btnSubmit = document.getElementById('btn-submit-publish-moment') as HTMLButtonElement | null;
+  const sfInp = document.getElementById('publish-moment-sf-url') as HTMLInputElement | null;
+  if (sfInp) {
+    if (publishLegacySfConflict) {
+      sfInp.disabled = true;
+      sfInp.placeholder = `Rename old Shutterfly album to "${publishLegacySfRenamedAlbum || `${publishMomentName} [All-Media]`}" above first...`;
+    } else {
+      sfInp.disabled = publishMomentCompleted;
+      sfInp.placeholder = publishArchivedSfUrl
+        ? `Paste NEW Shutterfly Album URL for "${publishMomentName}"...`
+        : 'https://photos3.shutterfly.com/album/...';
+    }
+  }
+  if (!btnSubmit || isSubmittingPublishMoment) return;
+  if (publishMomentCompleted) {
+    btnSubmit.disabled = false;
+    btnSubmit.className = 'btn btn-green';
+    btnSubmit.textContent = '✅ OK';
+    return;
+  }
+  if (publishLegacySfConflict) {
+    btnSubmit.disabled = true;
+    btnSubmit.className = 'btn btn-outline';
+    btnSubmit.textContent = '🔒 Rename Old Shutterfly Album First';
+    btnSubmit.title = `Publishing stopped until the existing Shutterfly album is renamed to "${publishLegacySfRenamedAlbum || `${publishMomentName} [All-Media]`}"`;
+  } else {
+    btnSubmit.disabled = false;
+    btnSubmit.className = 'btn btn-purple';
+    btnSubmit.textContent = '✅ Record Publication';
+    btnSubmit.title = '';
+  }
+}
+
+function renderPublishShutterflyConflictGate(): void {
+  const gateEl = document.getElementById('publish-shutterfly-conflict-gate');
+  if (!gateEl) return;
+
+  const renamedAlbum = publishLegacySfRenamedAlbum || `${publishMomentName} [All-Media]`;
+  if (publishLegacySfConflict) {
+    gateEl.style.display = 'block';
+    gateEl.innerHTML = `
+      <div style="padding: 0.75rem 0.9rem; border-radius: 8px; background: rgba(245, 158, 11, 0.12); border: 1.5px solid rgba(245, 158, 11, 0.65); display: flex; flex-direction: column; gap: 0.55rem;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+          <strong style="font-size: 0.82rem; color: #fde68a;">
+            🛑 Publishing Stopped — Existing Shutterfly Link Detected
+          </strong>
+          <span class="badge badge-xs badge-amber font-mono">Action Required</span>
+        </div>
+        <div style="font-size: 0.75rem; color: #e2e8f0; line-height: 1.45;">
+          <code>${escapeHtml(publishMomentName)}</code> already has an existing Shutterfly album${publishLegacyPubCount > 0 ? ` (${publishLegacyPubCount} prior All-Media photo${publishLegacyPubCount === 1 ? '' : 's'})` : ''}.
+          Before publishing, rename the old Shutterfly album by appending <code>[All-Media]</code> so you can use <code>${escapeHtml(publishMomentName)}</code> for the new Album:
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 0.4rem; padding: 0.5rem 0.65rem; border-radius: 6px; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(148, 163, 184, 0.2); font-size: 0.73rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+            <span><strong>1. Rename old Shutterfly album to:</strong> <code style="color: #fcd34d; font-weight: 700;">${escapeHtml(renamedAlbum)}</code></span>
+            <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+              <button type="button" class="btn btn-xs btn-outline" id="btn-copy-legacy-sf-rename">📋 Copy "${escapeHtml(renamedAlbum)}"</button>
+              <a href="${escapeHtml(publishLegacySfUrl || 'https://photos.shutterfly.com/')}" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-amber" style="text-decoration: none;">🔗 Open Existing Shutterfly Album ↗</a>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+            <span><strong>2. Create new Shutterfly album named:</strong> <code style="color: #86efac; font-weight: 700;">${escapeHtml(publishMomentName)}</code></span>
+            <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+              <button type="button" class="btn btn-xs btn-outline" id="btn-copy-new-sf-album-name">📋 Copy "${escapeHtml(publishMomentName)}"</button>
+              <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-outline" style="text-decoration: none;">📷 Open Shutterfly ↗</a>
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+          <span class="font-mono text-muted" style="font-size: 0.67rem;">Old URL: <code>${escapeHtml(publishLegacySfUrl)}</code> (will be archived under <code>${escapeHtml(renamedAlbum)}</code>)</span>
+          <button type="button" class="btn btn-xs btn-green" id="btn-confirm-archive-legacy-sf" ${isArchivingLegacySf ? 'disabled' : ''}>
+            ${isArchivingLegacySf ? 'Archiving Old Link...' : `✅ Confirm Old Album Renamed to "${escapeHtml(renamedAlbum)}" & Continue`}
+          </button>
+        </div>
+      </div>
+    `;
+
+    gateEl.querySelector<HTMLButtonElement>('#btn-copy-legacy-sf-rename')?.addEventListener('click', e => {
+      const btn = e.currentTarget as HTMLButtonElement;
+      void navigator.clipboard?.writeText(renamedAlbum);
+      const prev = btn.textContent || '';
+      btn.textContent = '✓ Copied!';
+      window.setTimeout(() => {
+        btn.textContent = prev;
+      }, 1800);
+    });
+    gateEl.querySelector<HTMLButtonElement>('#btn-copy-new-sf-album-name')?.addEventListener('click', e => {
+      const btn = e.currentTarget as HTMLButtonElement;
+      void navigator.clipboard?.writeText(publishMomentName);
+      const prev = btn.textContent || '';
+      btn.textContent = '✓ Copied!';
+      window.setTimeout(() => {
+        btn.textContent = prev;
+      }, 1800);
+    });
+    gateEl.querySelector<HTMLButtonElement>('#btn-confirm-archive-legacy-sf')?.addEventListener('click', () => {
+      void confirmArchiveLegacyShutterflyAlbum();
+    });
+    updatePublishSubmitLockState();
+    return;
+  }
+
+  if (publishArchiveJustConfirmed && publishArchivedSfUrl) {
+    gateEl.style.display = 'block';
+    gateEl.innerHTML = `
+      <div style="padding: 0.6rem 0.8rem; border-radius: 8px; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.45); display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; font-size: 0.74rem;">
+        <span>
+          ✅ Old Shutterfly album archived as <code>${escapeHtml(renamedAlbum)}</code>.
+          Create the new Shutterfly album named <code style="color: #86efac; font-weight: 700;">${escapeHtml(publishMomentName)}</code> and paste its new URL below.
+        </span>
+        <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+          <button type="button" class="btn btn-xs btn-outline" id="btn-copy-confirmed-new-sf-name">📋 Copy "${escapeHtml(publishMomentName)}"</button>
+          <a href="https://photos.shutterfly.com/" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-outline" style="text-decoration: none;">📷 Open Shutterfly ↗</a>
+        </div>
+      </div>
+    `;
+    gateEl.querySelector<HTMLButtonElement>('#btn-copy-confirmed-new-sf-name')?.addEventListener('click', e => {
+      const btn = e.currentTarget as HTMLButtonElement;
+      void navigator.clipboard?.writeText(publishMomentName);
+      const prev = btn.textContent || '';
+      btn.textContent = '✓ Copied!';
+      window.setTimeout(() => {
+        btn.textContent = prev;
+      }, 1800);
+    });
+    updatePublishSubmitLockState();
+    return;
+  }
+
+  gateEl.style.display = 'none';
+  gateEl.innerHTML = '';
+  updatePublishSubmitLockState();
+}
+
+async function confirmArchiveLegacyShutterflyAlbum(): Promise<void> {
+  if (!publishMomentName || isArchivingLegacySf) return;
+  const statusEl = document.getElementById('publish-moment-status');
+  const sfInp = document.getElementById('publish-moment-sf-url') as HTMLInputElement | null;
+  isArchivingLegacySf = true;
+  renderPublishShutterflyConflictGate();
+
+  try {
+    const res = await fetch('/api/media/memories/archive-legacy-shutterfly', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ moment_name: publishMomentName })
+    });
+    const data: ArchiveLegacyShutterflyResponse = await res.json();
+    if (!res.ok || !data.ok) {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    publishLegacySfConflict = false;
+    publishArchivedSfUrl = data.archived_shutterfly_url || publishLegacySfUrl;
+    publishLegacySfRenamedAlbum = data.archived_moment_name || publishLegacySfRenamedAlbum;
+    publishArchiveJustConfirmed = true;
+    if (sfInp) {
+      sfInp.value = '';
+    }
+    syncPublishOpenLinks();
+    renderPublishShutterflyConflictGate();
+    if (sfInp) {
+      sfInp.focus();
+    }
+    if (statusEl) {
+      statusEl.style.display = 'none';
+      statusEl.innerHTML = '';
+    }
+    if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
+  } catch (err: any) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-red">❌ Network error archiving old Shutterfly link: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  } finally {
+    isArchivingLegacySf = false;
+    renderPublishShutterflyConflictGate();
+  }
+}
+
 function setPublishModalCompletedState(completed: boolean): void {
   publishMomentCompleted = completed;
   const btnCancel = document.getElementById('btn-cancel-publish-moment') as HTMLButtonElement | null;
-  const btnSubmit = document.getElementById('btn-submit-publish-moment') as HTMLButtonElement | null;
   if (btnCancel) {
     btnCancel.style.display = completed ? 'none' : '';
     btnCancel.disabled = false;
   }
-  if (btnSubmit) {
-    btnSubmit.disabled = false;
-    if (completed) {
-      btnSubmit.className = 'btn btn-green';
-      btnSubmit.textContent = '✅ OK';
-    } else {
-      btnSubmit.className = 'btn btn-purple';
-      btnSubmit.textContent = '✅ Record Publication';
-    }
-  }
+  updatePublishSubmitLockState();
 }
 
 function closePublishMomentModal(): void {
@@ -5278,6 +5615,13 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
   publishTargetBatchSize = 9;
   publishFilterCuratedOnly = false;
   publishTagsDirty = false;
+  publishLegacySfConflict = false;
+  publishLegacySfUrl = '';
+  publishLegacySfRenamedAlbum = `${momentName} [All-Media]`;
+  publishLegacyPubCount = 0;
+  publishArchivedSfUrl = '';
+  publishArchiveJustConfirmed = false;
+  isArchivingLegacySf = false;
   publishTagState.momentName = momentName;
   publishTagState.tags = [];
   publishTagState.removedTagValues.clear();
@@ -5289,6 +5633,7 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
   publishTagState.isQueryOpen = false;
   publishTagState.queryData = null;
   setPublishModalCompletedState(false);
+  renderPublishShutterflyConflictGate();
 
   if (titleEl) titleEl.textContent = `📢 Publish / Republish: ${momentName}`;
   if (stageBadgeEl) stageBadgeEl.textContent = '…';
@@ -5319,9 +5664,15 @@ async function openPublishMomentModal(momentName: string): Promise<void> {
     }
 
     if (stageBadgeEl) stageBadgeEl.textContent = data.memory_stage || 'M400';
-    if (sfInp) sfInp.value = data.shutterfly_url || '';
+    publishLegacySfConflict = Boolean(data.legacy_shutterfly_conflict);
+    publishLegacySfUrl = (data.legacy_shutterfly_url || '').trim();
+    publishLegacySfRenamedAlbum = (data.legacy_shutterfly_renamed_album || `${momentName} [All-Media]`).trim();
+    publishLegacyPubCount = data.legacy_published_count ?? 0;
+    publishArchivedSfUrl = (data.archived_shutterfly_url || '').trim();
+    if (sfInp) sfInp.value = publishLegacySfConflict ? '' : (data.shutterfly_url || '');
     if (ytInp) ytInp.value = data.youtube_url || '';
     syncPublishOpenLinks();
+    renderPublishShutterflyConflictGate();
 
     if (summaryEl) {
       const pubCount = data.published_count ?? 0;
@@ -5403,6 +5754,29 @@ async function submitPublishMoment(): Promise<void> {
   const ytInp = document.getElementById('publish-moment-yt-url') as HTMLInputElement | null;
   const accInp = document.getElementById('publish-moment-account') as HTMLInputElement | null;
 
+  if (publishLegacySfConflict) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-amber">🛑 Publishing stopped: rename the existing Shutterfly album to <code>${escapeHtml(publishLegacySfRenamedAlbum || `${publishMomentName} [All-Media]`)}</code> and click confirm above before publishing.</span>`;
+    }
+    document.getElementById('publish-shutterfly-conflict-gate')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return;
+  }
+
+  const enteredSfUrl = (sfInp?.value || '').trim();
+  if (
+    enteredSfUrl &&
+    publishArchivedSfUrl &&
+    normalizeUrlForCompare(enteredSfUrl) === normalizeUrlForCompare(publishArchivedSfUrl)
+  ) {
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-red">⚠️ That Shutterfly URL belongs to the archived <code>${escapeHtml(publishLegacySfRenamedAlbum || `${publishMomentName} [All-Media]`)}</code> album. Create a new Shutterfly album named <code>${escapeHtml(publishMomentName)}</code> and enter its new URL.</span>`;
+    }
+    sfInp?.focus();
+    return;
+  }
+
   if (!assetIds.length) {
     if (statusEl) {
       statusEl.style.display = 'flex';
@@ -5425,6 +5799,7 @@ async function submitPublishMoment(): Promise<void> {
       }</span>`;
   }
 
+  beginApplePhotosSyncLock(`🍎 Publishing ${assetIds.length} asset(s) to Published/${publishMomentName}…`);
   let succeeded = false;
   try {
     if (publishTagsDirty && (publishTagState.tags.length > 0 || publishTagState.removedTagValues.size > 0)) {
@@ -5444,6 +5819,17 @@ async function submitPublishMoment(): Promise<void> {
     });
     const data: PublishMomentResponse = await res.json();
     if (!res.ok || !data.ok) {
+      if (data.legacy_shutterfly_conflict) {
+        publishLegacySfConflict = true;
+        publishLegacySfUrl = (data.legacy_shutterfly_url || publishLegacySfUrl).trim();
+        publishLegacySfRenamedAlbum = (
+          data.legacy_shutterfly_renamed_album ||
+          publishLegacySfRenamedAlbum ||
+          `${publishMomentName} [All-Media]`
+        ).trim();
+        publishLegacyPubCount = data.legacy_published_count ?? publishLegacyPubCount;
+        renderPublishShutterflyConflictGate();
+      }
       if (statusEl) {
         statusEl.style.display = 'flex';
         statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(data.error || `HTTP ${res.status}`)}</span>`;
@@ -5493,6 +5879,7 @@ async function submitPublishMoment(): Promise<void> {
       statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
     }
   } finally {
+    cancelApplePhotosSyncLock();
     isSubmittingPublishMoment = false;
     setPublishModalCompletedState(succeeded);
   }
@@ -8471,12 +8858,16 @@ function getOrInitGroupingSelectedSet(
   gid: string,
   assets: UnifiedGroupingAssetItem[],
   poolTotalHint?: number,
-  isTaggingComplete = true
+  isTaggingComplete = true,
+  isUmbrella = false
 ): Set<string> {
   if (!unifiedGroupingSelectedIds.has(gid)) {
     const sel = new Set<string>();
     const nonDups = assets.filter(a => !a.is_duplicate_copy);
-    if (!isTaggingComplete) {
+    if (isUmbrella) {
+      // For Umbrella Events, check all current member assets so unchecking outliers lets you remove them in 1 click
+      assets.forEach(a => sel.add(a.asset_id));
+    } else if (!isTaggingComplete) {
       // Before Moment Tagging is complete, select ALL non-duplicate event assets for Step 1 Moment Creation
       (nonDups.length ? nonDups : assets).forEach(a => sel.add(a.asset_id));
     } else {
@@ -8506,7 +8897,8 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
     g.grouping_id,
     assets,
     g.event_total_assets || g.total_assets,
-    isTaggingCompleteExp
+    isTaggingCompleteExp,
+    Boolean(g.has_subevents)
   );
   const curatedOnly = unifiedGroupingCuratedOnly.has(g.grouping_id);
   const keeperRankMap = new Map<string, number>();
@@ -8548,7 +8940,12 @@ function renderExpandedGroupingBodyHtml(g: UnifiedGroupingItem, assets: UnifiedG
   const primaryActionBtn = g.is_deduped_group
     ? `<button type="button" class="btn btn-xs btn-red btn-ugrp-exp-open-photos" data-is-remove-link="1" data-library-scope="all_media" data-album-name="${escapeHtml(expRemoveAlbum)}" data-full-path="${escapeHtml(expRemovePath)}" data-sample-aid="${escapeHtml(expSampleAid)}" title="${escapeHtml(`Deduped into '${g.duplicate_of_moment || ''}' — open '${expRemoveAlbum}' in All-Media.photoslibrary to manually delete this Moment in Photos`)}">🗑️ Remove in All-Media ↗</button>`
     : g.has_subevents
-      ? `<button type="button" class="btn btn-xs btn-cyan btn-ugrp-split-subevents" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Split Subevents dialog to inspect location/timestamp subgroupings &amp; their scores">🌿 Split Subevents</button>
+      ? `${
+          assets.length - selCount > 0 && g.in_organizer_library
+            ? `<button type="button" class="btn btn-xs btn-red btn-ugrp-remove-unchecked" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Remove the ${assets.length - selCount} unchecked asset(s) from '${escapeHtml(g.name)}' (detaches from Media Organizer album &amp; restores to original All-Media Moment / Unassigned)">🚫 Remove Unchecked (${assets.length - selCount})</button>`
+            : ''
+        }
+         <button type="button" class="btn btn-xs btn-cyan btn-ugrp-split-subevents" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Open Split Subevents dialog to inspect location/timestamp subgroupings &amp; their scores">🌿 Split Subevents</button>
          <button type="button" class="btn btn-xs btn-outline btn-ugrp-tag-merge" data-grouping-id="${escapeHtml(g.grouping_id)}" title="Edit Umbrella Event tags or Subevents designation">🏷️ Moment Tagging</button>`
       : !isTaggingCompleteExp
       ? g.kind === 'unassigned'
@@ -8737,7 +9134,8 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
     g.grouping_id,
     assets,
     g.event_total_assets || g.total_assets,
-    isTaggingComplete
+    isTaggingComplete,
+    Boolean(g.has_subevents)
   );
   const rerenderBody = () => {
     bodyEl.innerHTML = renderExpandedGroupingBodyHtml(g, assets);
@@ -8809,6 +9207,51 @@ function wireExpandedGroupingBodyEvents(bodyEl: HTMLElement, g: UnifiedGroupingI
 
   bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-split-subevents')?.addEventListener('click', () => {
     void openSplitSubeventsModal(g.name);
+  });
+
+  bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-remove-unchecked')?.addEventListener('click', async e => {
+    const uncheckedIds = assets.filter(a => !selSet.has(a.asset_id)).map(a => a.asset_id);
+    if (!uncheckedIds.length) return;
+    const ok = window.confirm(
+      `Remove ${uncheckedIds.length} unchecked asset(s) from "${g.name}"?\n\n` +
+        `• Removes them from Media Organizer / Moments / ${g.name}\n` +
+        `• Restores them to their other active All-Media Moment (or Unassigned)\n` +
+        `• Leaves All-Media.photoslibrary 100% untouched.`
+    );
+    if (!ok) return;
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    btn.textContent = 'Removing...';
+    beginApplePhotosSyncLock(`🍎 Removing ${uncheckedIds.length} asset(s) from ${g.name}…`);
+    try {
+      const res = await fetch('/api/media/memories/remove-moment-assets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moment_name: g.name, remove_asset_ids: uncheckedIds })
+      });
+      const out: RemoveMomentAssetsResponse = await res.json();
+      cancelApplePhotosSyncLock();
+      if (!res.ok || !out.ok) {
+        alert(`Failed removing assets: ${out.error || `HTTP ${res.status}`}`);
+        btn.disabled = false;
+        rerenderBody();
+        return;
+      }
+      unifiedGroupingAssetsCache.delete(g.grouping_id);
+      unifiedGroupingSelectedIds.delete(g.grouping_id);
+      allGroupingsLoaded = false;
+      await Promise.all([
+        fetchAllUnifiedGroupings(true),
+        fetchPlannerOverview(true, 'm'),
+        fetchMemoriesFolders()
+      ]);
+      if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
+    } catch (err: any) {
+      cancelApplePhotosSyncLock();
+      alert(`Network error removing assets: ${err?.message || 'Unknown error'}`);
+      btn.disabled = false;
+      rerenderBody();
+    }
   });
 
   bodyEl.querySelector<HTMLButtonElement>('.btn-ugrp-tag-merge')?.addEventListener('click', () => {
@@ -10451,12 +10894,15 @@ function renderSplitSubeventsModalContent(): void {
                 </div>
               </div>
             </div>
-            <div style="display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0;">
+            <div style="display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; flex-wrap: wrap;">
               ${
                 secCheckedCount > 0
                   ? `<span class="badge badge-xs badge-cyan font-mono">${secCheckedCount} checked</span>`
                   : ''
               }
+              <button type="button" class="btn btn-xs btn-outline btn-remove-subevent-sec" data-section-id="${escapeHtml(sec.section_id)}" style="border-color: rgba(239, 68, 68, 0.45); color: #fca5a5;" title="Remove all ${sec.assets.length} asset(s) in this subgrouping from '${escapeHtml(data.moment_name)}' (detaches from Media Organizer album &amp; restores to original All-Media Moment / Unassigned)">
+                🚫 Remove (${sec.assets.length})
+              </button>
               <button type="button" class="btn btn-xs ${isSecSelected ? 'btn-purple' : allAssigned ? 'btn-outline' : 'btn-cyan'} btn-identify-subevent-sec" data-section-id="${escapeHtml(sec.section_id)}">
                 ${isSecSelected ? '✓ Active in Builder' : '🌿 Identify Subevent'}
               </button>
@@ -10488,6 +10934,18 @@ function renderSplitSubeventsModalContent(): void {
       const sid = btn.dataset.sectionId || '';
       const sec = data.sections.find(s => s.section_id === sid);
       if (sec) selectSubeventSectionForBuilder(sec, false);
+    });
+  });
+
+  listEl.querySelectorAll<HTMLButtonElement>('.btn-remove-subevent-sec').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sid = btn.dataset.sectionId || '';
+      const sec = data.sections.find(s => s.section_id === sid);
+      if (!sec) return;
+      void removeAssetsFromUmbrellaInSplitModal(
+        sec.assets.map(a => a.asset_id),
+        `Section #${sec.index} (${sec.title})`
+      );
     });
   });
 
@@ -10554,6 +11012,11 @@ function renderSplitSubeventsModalContent(): void {
         submitBtn.disabled = isSubmittingCreateSubevent;
         submitBtn.textContent = `🌿 Create Subevent in Moments (${selTotal} assets)`;
       }
+      const remBtn = document.getElementById('btn-remove-selected-from-umbrella') as HTMLButtonElement | null;
+      if (remBtn) {
+        remBtn.disabled = isSubmittingCreateSubevent;
+        remBtn.textContent = `🚫 Remove Checked from Umbrella (${selTotal})`;
+      }
 
       // Render quick-pick chips for Parent Event's Location & Activity tags so user can pick the city/activity in 1 click
       const parentLocAndAct = (data.parent_saved_tags || []).filter(
@@ -10599,6 +11062,88 @@ function renderSplitSubeventsModalContent(): void {
     } else {
       builderEl.style.display = 'none';
     }
+  }
+}
+
+async function removeAssetsFromUmbrellaInSplitModal(assetIds: string[], contextLabel?: string): Promise<void> {
+  if (isSubmittingCreateSubevent || !splitSubeventsParentMoment || !assetIds.length) return;
+  const labelNote = contextLabel ? ` from ${contextLabel}` : '';
+  const ok = window.confirm(
+    `Remove ${assetIds.length} asset(s)${labelNote} from "${splitSubeventsParentMoment}"?\n\n` +
+      `• Removes them from Media Organizer / Moments / ${splitSubeventsParentMoment}\n` +
+      `• Restores them to their other active All-Media Moment (e.g. Eva, Six Flags) or Unassigned\n` +
+      `• Leaves All-Media.photoslibrary 100% untouched.`
+  );
+  if (!ok) return;
+
+  const statusEl = document.getElementById('split-subevents-status');
+  const remBtn = document.getElementById('btn-remove-selected-from-umbrella') as HTMLButtonElement | null;
+  isSubmittingCreateSubevent = true;
+  if (remBtn) {
+    remBtn.disabled = true;
+    remBtn.textContent = 'Removing...';
+  }
+  if (statusEl) {
+    statusEl.style.display = 'flex';
+    statusEl.innerHTML = `<div class="spinner-sm"></div><span>Removing ${assetIds.length} asset(s) from <code>${escapeHtml(splitSubeventsParentMoment)}</code>...</span>`;
+  }
+
+  beginApplePhotosSyncLock(`🍎 Removing ${assetIds.length} asset(s) from ${splitSubeventsParentMoment}…`);
+  try {
+    const res = await fetch('/api/media/memories/remove-moment-assets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        moment_name: splitSubeventsParentMoment,
+        remove_asset_ids: assetIds
+      })
+    });
+    const out: RemoveMomentAssetsResponse = await res.json();
+    cancelApplePhotosSyncLock();
+    if (!res.ok || !out.ok) {
+      if (statusEl) {
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML = `<span class="text-red">❌ ${escapeHtml(out.error || `HTTP ${res.status}`)}</span>`;
+      }
+      return;
+    }
+
+    splitSubeventsActiveSectionIds.clear();
+    splitSubeventsSelectedAssetIds.clear();
+    unifiedGroupingAssetsCache.clear();
+    unifiedGroupingSelectedIds.clear();
+    allGroupingsLoaded = false;
+    await Promise.all([
+      loadSplitSubeventsSuggestions(splitSubeventsParentMoment, splitSubeventsGranularity),
+      fetchPlannerOverview(true, 'm'),
+      fetchMemoriesFolders(),
+      ...(activePlannerModeView === 'g' ? [fetchAllUnifiedGroupings(true)] : [])
+    ]);
+    if (plannerRefreshMediaMetricsCb) plannerRefreshMediaMetricsCb();
+
+    const bannerEl = document.getElementById('split-subevents-summary-banner');
+    if (bannerEl) {
+      const restoredEntries = Object.entries(out.restored_moments || {});
+      const restoredNote = restoredEntries.length
+        ? ` · Restored to: ${restoredEntries.map(([m, c]) => `<code>${escapeHtml(m)}</code> (${c})`).join(', ')}`
+        : '';
+      const unassNote = (out.unassigned_count ?? 0) > 0 ? ` · ${out.unassigned_count} returned to Unassigned` : '';
+      bannerEl.innerHTML = `
+        <span class="text-green">
+          ✅ Removed <strong>${out.removed_count ?? assetIds.length}</strong> asset(s) from <code>${escapeHtml(splitSubeventsParentMoment)}</code>
+          (${out.remaining_count ?? 0} remaining in Umbrella Event${restoredNote}${unassNote}).
+        </span>
+      `;
+    }
+  } catch (err: any) {
+    cancelApplePhotosSyncLock();
+    if (statusEl) {
+      statusEl.style.display = 'flex';
+      statusEl.innerHTML = `<span class="text-red">❌ Network error: ${escapeHtml(err?.message || 'Unknown error')}</span>`;
+    }
+  } finally {
+    isSubmittingCreateSubevent = false;
+    renderSplitSubeventsModalContent();
   }
 }
 

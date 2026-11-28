@@ -7,6 +7,9 @@ import time
 import errno
 import shutil
 import signal
+import socket
+import threading
+import contextlib
 import tempfile
 import subprocess
 import sqlite3
@@ -51,7 +54,332 @@ def _safe_is_dir(p: Path) -> bool:
     except OSError:
         return False
 
+
+_PLANNER_DB_LOCK_CANDIDATES = [
+    Path("/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite.lock"),
+    Path("/Volumes/Macintosh HD/Users/nickolaycohen/Photos Library DB/All-Media-Extreme/database/Photos.sqlite.lock"),
+]
+_PLANNER_LOCK_MUTEX = threading.RLock()
+_PLANNER_LOCK_STATE = threading.local()
+_ENSURED_SCHEMA_DB_PATHS: set[str] = set()
+
+_PHOTOS_PROGRESS_LOCK = threading.Lock()
+_PHOTOS_UPLOAD_PROGRESS: dict = {
+    "active": False,
+    "phase": "idle",
+    "operation": "",
+    "lock_held": False,
+    "lock_status_note": "",
+    "total_requested": 0,
+    "already_in_library": 0,
+    "to_upload_total": 0,
+    "staged_count": 0,
+    "uploaded_count": 0,
+    "processed_count": 0,
+    "phase_total": 0,
+    "percent": 0.0,
+    "started_at_ts": 0.0,
+    "phase_started_at_ts": 0.0,
+    "last_tick_ts": 0.0,
+    "rate_per_sec": None,
+    "eta_sec": None,
+    "current_item": "",
+    "message": "",
+}
+
+
+def _iter_id_chunks(ids: list[str], size: int = 800):
+    for i in range(0, len(ids), size):
+        yield ids[i : i + size]
+
+
+def _is_pid_alive_safe(pid_val) -> bool:
+    try:
+        pid_int = int(pid_val)
+        if pid_int <= 0:
+            return False
+        os.kill(pid_int, 0)
+        return True
+    except OSError as err:
+        return err.errno == errno.EPERM
+    except (TypeError, ValueError):
+        return False
+
+
+def _resolve_planner_lock_file_path() -> Optional[Path]:
+    for cand in _PLANNER_DB_LOCK_CANDIDATES:
+        try:
+            if cand.exists() or cand.parent.exists():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _update_photos_upload_progress(
+    *,
+    active: Optional[bool] = None,
+    phase: Optional[str] = None,
+    operation: Optional[str] = None,
+    lock_held: Optional[bool] = None,
+    lock_status_note: Optional[str] = None,
+    total_requested: Optional[int] = None,
+    already_in_library: Optional[int] = None,
+    to_upload_total: Optional[int] = None,
+    staged_count: Optional[int] = None,
+    uploaded_count: Optional[int] = None,
+    processed_count: Optional[int] = None,
+    phase_total: Optional[int] = None,
+    current_item: Optional[str] = None,
+    message: Optional[str] = None,
+    reset: bool = False,
+) -> None:
+    now = time.time()
+    with _PHOTOS_PROGRESS_LOCK:
+        if reset:
+            _PHOTOS_UPLOAD_PROGRESS.update(
+                {
+                    "active": True,
+                    "phase": "starting",
+                    "operation": operation or "",
+                    "total_requested": 0,
+                    "already_in_library": 0,
+                    "to_upload_total": 0,
+                    "staged_count": 0,
+                    "uploaded_count": 0,
+                    "processed_count": 0,
+                    "phase_total": 0,
+                    "percent": 0.0,
+                    "started_at_ts": now,
+                    "phase_started_at_ts": now,
+                    "last_tick_ts": now,
+                    "rate_per_sec": None,
+                    "eta_sec": None,
+                    "current_item": "",
+                    "message": message or "",
+                }
+            )
+        prev_phase = _PHOTOS_UPLOAD_PROGRESS.get("phase")
+        if active is not None:
+            _PHOTOS_UPLOAD_PROGRESS["active"] = bool(active)
+            if active and not _PHOTOS_UPLOAD_PROGRESS.get("started_at_ts"):
+                _PHOTOS_UPLOAD_PROGRESS["started_at_ts"] = now
+        if phase is not None:
+            _PHOTOS_UPLOAD_PROGRESS["phase"] = phase
+            if phase != prev_phase:
+                _PHOTOS_UPLOAD_PROGRESS["phase_started_at_ts"] = now
+                _PHOTOS_UPLOAD_PROGRESS["rate_per_sec"] = None
+                _PHOTOS_UPLOAD_PROGRESS["eta_sec"] = None
+        if operation is not None:
+            _PHOTOS_UPLOAD_PROGRESS["operation"] = operation
+        if lock_held is not None:
+            _PHOTOS_UPLOAD_PROGRESS["lock_held"] = bool(lock_held)
+        if lock_status_note is not None:
+            _PHOTOS_UPLOAD_PROGRESS["lock_status_note"] = lock_status_note
+        if total_requested is not None:
+            _PHOTOS_UPLOAD_PROGRESS["total_requested"] = int(total_requested)
+        if already_in_library is not None:
+            _PHOTOS_UPLOAD_PROGRESS["already_in_library"] = int(already_in_library)
+        if to_upload_total is not None:
+            _PHOTOS_UPLOAD_PROGRESS["to_upload_total"] = int(to_upload_total)
+        if staged_count is not None:
+            _PHOTOS_UPLOAD_PROGRESS["staged_count"] = int(staged_count)
+        if uploaded_count is not None:
+            _PHOTOS_UPLOAD_PROGRESS["uploaded_count"] = int(uploaded_count)
+        if processed_count is not None:
+            _PHOTOS_UPLOAD_PROGRESS["processed_count"] = int(processed_count)
+        if phase_total is not None:
+            _PHOTOS_UPLOAD_PROGRESS["phase_total"] = int(phase_total)
+        if current_item is not None:
+            _PHOTOS_UPLOAD_PROGRESS["current_item"] = current_item
+        if message is not None:
+            _PHOTOS_UPLOAD_PROGRESS["message"] = message
+
+        p_cnt = int(_PHOTOS_UPLOAD_PROGRESS.get("processed_count") or 0)
+        p_tot = int(_PHOTOS_UPLOAD_PROGRESS.get("phase_total") or 0)
+        if p_tot > 0:
+            _PHOTOS_UPLOAD_PROGRESS["percent"] = round(min(100.0, (p_cnt / p_tot) * 100.0), 1)
+            phase_dt = max(0.001, now - float(_PHOTOS_UPLOAD_PROGRESS.get("phase_started_at_ts") or now))
+            if p_cnt > 0 and phase_dt >= 0.25:
+                rate = p_cnt / phase_dt
+                _PHOTOS_UPLOAD_PROGRESS["rate_per_sec"] = round(rate, 2)
+                rem = max(0, p_tot - p_cnt)
+                _PHOTOS_UPLOAD_PROGRESS["eta_sec"] = round(rem / rate, 1) if rate > 0 else None
+        _PHOTOS_UPLOAD_PROGRESS["last_tick_ts"] = now
+
+
+def _finish_photos_upload_progress(ok: bool = True, message: str = "") -> None:
+    with _PHOTOS_PROGRESS_LOCK:
+        _PHOTOS_UPLOAD_PROGRESS["active"] = False
+        _PHOTOS_UPLOAD_PROGRESS["phase"] = "done" if ok else "error"
+        if ok:
+            _PHOTOS_UPLOAD_PROGRESS["percent"] = 100.0
+            _PHOTOS_UPLOAD_PROGRESS["eta_sec"] = 0.0
+        if message:
+            _PHOTOS_UPLOAD_PROGRESS["message"] = message
+        _PHOTOS_UPLOAD_PROGRESS["last_tick_ts"] = time.time()
+
+
+@contextlib.contextmanager
+def _planner_db_lock(operation: str = "Media Organizer Update", wait_timeout_sec: float = 240.0):
+    """Acquire shared planner lock (`Photos.sqlite.lock` -> `status: 'planner_active'`) matching `pipeline_planner.py`,
+    coordinating with `pipeline_executor.py`, `bg_copy_db_service.py`, `upload_to_google_photos.py`, and `db/backup.lock`.
+    """
+    depth = getattr(_PLANNER_LOCK_STATE, "depth", 0)
+    if depth > 0:
+        _PLANNER_LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _PLANNER_LOCK_STATE.depth = depth
+        return
+
+    with _PLANNER_LOCK_MUTEX:
+        _PLANNER_LOCK_STATE.depth = 1
+        lock_file = _resolve_planner_lock_file_path()
+        backup_lock = (MEDIA_DB_PATH.parent / "backup.lock") if MEDIA_DB_PATH else None
+        wrote_file_lock = False
+        saved_last_refresh = "—"
+        deadline = time.time() + max(5.0, wait_timeout_sec)
+
+        try:
+            while True:
+                if backup_lock and _safe_path_exists(backup_lock):
+                    if time.time() >= deadline:
+                        raise TimeoutError("Database backup is currently in progress (db/backup.lock). Please retry shortly.")
+                    _update_photos_upload_progress(
+                        active=True,
+                        phase="waiting_lock",
+                        operation=operation,
+                        lock_held=False,
+                        lock_status_note="⏳ Waiting for db/backup.lock...",
+                        message="Waiting for active database backup (db/backup.lock) to finish...",
+                    )
+                    time.sleep(2.0)
+                    continue
+
+                if lock_file is not None:
+                    lock_data = None
+                    try:
+                        if lock_file.exists():
+                            lock_data = json.loads(lock_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        lock_data = None
+
+                    if isinstance(lock_data, dict):
+                        saved_last_refresh = str(lock_data.get("latest_successful_refresh_utc") or "—")
+                        status = str(lock_data.get("status") or "available")
+                        holder_pid = lock_data.get("pid")
+                        if status in ("refreshing", "planner_active", "executor_active") and holder_pid != os.getpid():
+                            if _is_pid_alive_safe(holder_pid):
+                                if time.time() >= deadline:
+                                    raise TimeoutError(
+                                        f"Planner lock is currently held by '{status}' (PID {holder_pid}). Close or wait for the active planner/sync job and retry."
+                                    )
+                                _update_photos_upload_progress(
+                                    active=True,
+                                    phase="waiting_lock",
+                                    operation=operation,
+                                    lock_held=False,
+                                    lock_status_note=f"⏳ Waiting for {status} (PID {holder_pid})",
+                                    message=f"Waiting for shared Planner lock (currently held by {status}, PID {holder_pid})...",
+                                )
+                                time.sleep(2.0)
+                                continue
+
+                    try:
+                        payload = {
+                            "status": "planner_active",
+                            "pid": os.getpid(),
+                            "started_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                            "host": socket.gethostname(),
+                            "operation": operation,
+                            "latest_successful_refresh_utc": saved_last_refresh,
+                        }
+                        lock_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                        wrote_file_lock = True
+                    except OSError:
+                        wrote_file_lock = False
+                break
+
+            _update_photos_upload_progress(
+                lock_held=True,
+                lock_status_note=f"🔐 Planner Lock Active (PID {os.getpid()})",
+            )
+            yield
+        finally:
+            if wrote_file_lock and lock_file is not None:
+                try:
+                    cur_lock = json.loads(lock_file.read_text(encoding="utf-8")) if lock_file.exists() else {}
+                    if not cur_lock or cur_lock.get("pid") == os.getpid():
+                        release_payload = {
+                            "status": "available",
+                            "pid": None,
+                            "started_at_utc": None,
+                            "host": socket.gethostname(),
+                            "latest_successful_refresh_utc": cur_lock.get("latest_successful_refresh_utc", saved_last_refresh),
+                        }
+                        lock_file.write_text(json.dumps(release_payload, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
+            _update_photos_upload_progress(lock_held=False, lock_status_note="")
+            _PLANNER_LOCK_STATE.depth = 0
+
+
+def _open_rw_media_db(timeout: float = 60.0) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=timeout)
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
+    return conn
+
+
+def _commit_with_retry(conn: sqlite3.Connection, max_attempts: int = 8) -> None:
+    """Commit SQLite transaction with exponential backoff if a background reader/writer briefly holds a lock."""
+    for attempt in range(max_attempts):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as err:
+            if "locked" not in str(err).lower() or attempt == max_attempts - 1:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+
+
 router = APIRouter(prefix="/api/media", tags=["media"])
+
+
+@router.get("/photos-upload-progress")
+def get_photos_upload_progress():
+    """Return real-time progress, counts, planner lock state, and ETA for active Apple Photos Library uploads."""
+    now = time.time()
+    with _PHOTOS_PROGRESS_LOCK:
+        snap = dict(_PHOTOS_UPLOAD_PROGRESS)
+    started_ts = float(snap.get("started_at_ts") or 0.0)
+    elapsed_sec = round(max(0.0, now - started_ts), 1) if (snap.get("active") and started_ts > 0) else 0.0
+    eta_sec = snap.get("eta_sec")
+    if snap.get("active") and eta_sec is not None:
+        since_tick = max(0.0, now - float(snap.get("last_tick_ts") or now))
+        eta_sec = round(max(0.0, float(eta_sec) - since_tick), 1)
+    return {
+        "ok": True,
+        "active": bool(snap.get("active")),
+        "phase": snap.get("phase") or "idle",
+        "operation": snap.get("operation") or "",
+        "lock_held": bool(snap.get("lock_held")),
+        "lock_status_note": snap.get("lock_status_note") or "",
+        "total_requested": int(snap.get("total_requested") or 0),
+        "already_in_library": int(snap.get("already_in_library") or 0),
+        "to_upload_total": int(snap.get("to_upload_total") or 0),
+        "staged_count": int(snap.get("staged_count") or 0),
+        "uploaded_count": int(snap.get("uploaded_count") or 0),
+        "processed_count": int(snap.get("processed_count") or 0),
+        "phase_total": int(snap.get("phase_total") or 0),
+        "percent": float(snap.get("percent") or 0.0),
+        "elapsed_sec": elapsed_sec,
+        "rate_per_sec": snap.get("rate_per_sec"),
+        "eta_sec": eta_sec,
+        "current_item": snap.get("current_item") or "",
+        "message": snap.get("message") or "",
+    }
 
 class BgServiceControlRequest(BaseModel):
     action: str  # "start" or "stop"
@@ -156,11 +484,15 @@ def _infer_origin(camera_model: Optional[str], camera_make: Optional[str], filen
 
 def _ensure_published_url_schema():
     """Ensure migration 060 columns (published_url, shutterfly_url, youtube_url) exist in media_organizer.db."""
-    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+    if not MEDIA_DB_PATH or not _safe_path_exists(MEDIA_DB_PATH):
+        return
+    db_key = str(MEDIA_DB_PATH)
+    if db_key in _ENSURED_SCHEMA_DB_PATHS:
         return
     try:
-        rw_conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=5)
+        rw_conn = sqlite3.connect(db_key, timeout=10)
         try:
+            rw_conn.execute("PRAGMA busy_timeout = 10000")
             c = rw_conn.cursor()
             c.execute("PRAGMA table_info(publications)")
             pub_cols = {r[1] for r in c.fetchall()}
@@ -178,7 +510,9 @@ def _ensure_published_url_schema():
                     c.execute("ALTER TABLE curated_moments ADD COLUMN youtube_url TEXT")
                     changed = True
             if changed:
-                rw_conn.commit()
+                _commit_with_retry(rw_conn)
+            if pub_cols and cm_cols:
+                _ENSURED_SCHEMA_DB_PATHS.add(db_key)
         finally:
             rw_conn.close()
     except Exception:
@@ -6271,7 +6605,9 @@ _ORGANIZER_SYNC_APPLESCRIPT = r'''
 on run argv
     set parentFolderName to item 1 of argv
     set targetAlbumName to item 2 of argv
-    set allowExisting to (item 3 of argv) is "1"
+    set allowMode to (item 3 of argv) as string
+    set allowExisting to (allowMode is "1" or allowMode is "2")
+    set replaceExisting to (allowMode is "2")
     set existingUuidCount to (item 4 of argv) as integer
     set existingUuids to {}
     if existingUuidCount > 0 then
@@ -6306,11 +6642,19 @@ on run argv
             set containerFolder to folder parentFolderName
             set actionState to "created"
             if exists album targetAlbumName of containerFolder then
-                if not allowExisting then
+                if replaceExisting then
+                    try
+                        delete album id (id of (album targetAlbumName of containerFolder))
+                    end try
+                    make new album named targetAlbumName at containerFolder
+                    set targetAlbum to album targetAlbumName of containerFolder
+                    set actionState to "replaced"
+                else if not allowExisting then
                     return "ERROR|Album '" & targetAlbumName & "' already exists under " & parentFolderName
+                else
+                    set targetAlbum to album targetAlbumName of containerFolder
+                    set actionState to "existing"
                 end if
-                set targetAlbum to album targetAlbumName of containerFolder
-                set actionState to "existing"
             else
                 make new album named targetAlbumName at containerFolder
                 set targetAlbum to album targetAlbumName of containerFolder
@@ -6318,8 +6662,17 @@ on run argv
         else
             set actionState to "created"
             if exists album targetAlbumName then
-                set targetAlbum to album targetAlbumName
-                set actionState to "existing"
+                if replaceExisting then
+                    try
+                        delete album id (id of (album targetAlbumName))
+                    end try
+                    make new album named targetAlbumName
+                    set targetAlbum to album targetAlbumName
+                    set actionState to "replaced"
+                else
+                    set targetAlbum to album targetAlbumName
+                    set actionState to "existing"
+                end if
             else
                 make new album named targetAlbumName
                 set targetAlbum to album targetAlbumName
@@ -6362,8 +6715,15 @@ on run argv
                 end if
             end repeat
             if (count of itemsToAdd) > 0 then
-                add itemsToAdd to targetAlbum
-                set addedCount to addedCount + (count of itemsToAdd)
+                set totalToAdd to count of itemsToAdd
+                set batchStart to 1
+                repeat while batchStart <= totalToAdd
+                    set batchEnd to batchStart + 99
+                    if batchEnd > totalToAdd then set batchEnd to totalToAdd
+                    add (items batchStart thru batchEnd of itemsToAdd) to targetAlbum
+                    set batchStart to batchEnd + 1
+                end repeat
+                set addedCount to addedCount + totalToAdd
             end if
         end if
 
@@ -6442,27 +6802,34 @@ def _resolve_source_originals_map(cur: sqlite3.Cursor, asset_ids: list[str]) -> 
     if not asset_ids:
         return {}
     out: dict[str, tuple[Path, str]] = {}
-    ph = ",".join("?" for _ in asset_ids)
     rows: list[tuple] = []
     try:
-        rows = cur.execute(
-            f"""
-            SELECT za.ZUUID, za.ZDIRECTORY, za.ZFILENAME, COALESCE(a.original_filename, za.ZFILENAME, '')
-            FROM ZASSET za
-            LEFT JOIN assets a ON a.asset_id = za.ZUUID
-            WHERE za.ZUUID IN ({ph})
-            """,
-            asset_ids,
-        ).fetchall()
+        for id_batch in _iter_id_chunks(asset_ids, 800):
+            ph = ",".join("?" for _ in id_batch)
+            rows.extend(
+                cur.execute(
+                    f"""
+                    SELECT za.ZUUID, za.ZDIRECTORY, za.ZFILENAME, COALESCE(a.original_filename, za.ZFILENAME, '')
+                    FROM ZASSET za
+                    LEFT JOIN assets a ON a.asset_id = za.ZUUID
+                    WHERE za.ZUUID IN ({ph})
+                    """,
+                    id_batch,
+                ).fetchall()
+            )
     except sqlite3.OperationalError:
         src_db = APPLE_PHOTOS_LIBRARY_PATH / "database" / "Photos.sqlite"
-        if src_db.exists():
+        if _safe_path_exists(src_db):
             c_ro = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True, timeout=10)
             try:
-                rows = c_ro.execute(
-                    f"SELECT ZUUID, ZDIRECTORY, ZFILENAME, COALESCE(ZFILENAME, '') FROM ZASSET WHERE ZUUID IN ({ph})",
-                    asset_ids,
-                ).fetchall()
+                for id_batch in _iter_id_chunks(asset_ids, 800):
+                    ph = ",".join("?" for _ in id_batch)
+                    rows.extend(
+                        c_ro.execute(
+                            f"SELECT ZUUID, ZDIRECTORY, ZFILENAME, COALESCE(ZFILENAME, '') FROM ZASSET WHERE ZUUID IN ({ph})",
+                            id_batch,
+                        ).fetchall()
+                    )
             finally:
                 c_ro.close()
 
@@ -6747,6 +7114,8 @@ def _upsert_organizer_album_in_db(
     parent_folder: str,
     album_name: str,
     source_asset_ids: list[str],
+    *,
+    replace_members: bool = False,
 ) -> tuple[int, str]:
     """Upsert an 'organizer'-scoped album and its member source_asset_ids in media_organizer.db."""
     _ensure_organizer_library_tables(cur)
@@ -6803,6 +7172,8 @@ def _upsert_organizer_album_in_db(
             (alb_pk, album_name, parent_pk, parent_folder, full_path),
         )
 
+    if replace_members:
+        cur.execute("DELETE FROM media_organizer_album_assets WHERE album_pk = ?", (alb_pk,))
     for aid in source_asset_ids:
         _insert_album_asset_row_if_missing(cur, alb_pk, aid)
     cur.execute(
@@ -6819,14 +7190,11 @@ def _sync_assets_to_organizer_library(
     source_asset_ids: list[str],
     *,
     allow_existing: bool = True,
+    replace_existing: bool = False,
     delete_organizer_albums: Optional[list[str]] = None,
 ) -> dict:
     """Import missing originals from All-Media (read-only) into Media Organizer.photoslibrary and place in <parent_folder>/<album_name>."""
-    _ensure_organizer_library_tables(cur)
-    ok_active, err_active, org_path = _ensure_organizer_library_active_in_photos()
-    if not ok_active:
-        return {"ok": False, "error": err_active}
-
+    target_op = f"{parent_folder}/{album_name}" if parent_folder else album_name
     clean_ids: list[str] = []
     seen: set[str] = set()
     for raw_id in source_asset_ids or []:
@@ -6835,177 +7203,340 @@ def _sync_assets_to_organizer_library(
             seen.add(s)
             clean_ids.append(s)
 
-    mapped_by_src: dict[str, str] = {}
-    if clean_ids:
-        ph = ",".join("?" for _ in clean_ids)
-        for src_id, org_uuid in cur.execute(
-            f"SELECT source_asset_id, organizer_asset_uuid FROM organizer_asset_map WHERE source_asset_id IN ({ph})",
-            clean_ids,
-        ).fetchall():
-            if src_id and org_uuid:
-                mapped_by_src[src_id] = str(org_uuid).split("/")[0]
+    _update_photos_upload_progress(
+        reset=True,
+        operation=target_op,
+        phase="waiting_lock",
+        total_requested=len(clean_ids),
+        processed_count=0,
+        phase_total=max(1, len(clean_ids)),
+        message=f"Acquiring Planner lock for '{target_op}' ({len(clean_ids)} asset(s))...",
+    )
 
-    org_db = org_path / "database" / "Photos.sqlite"
-    if mapped_by_src and org_db.exists():
-        try:
-            c_org = sqlite3.connect(f"file:{org_db}?mode=ro", uri=True, timeout=5)
-            try:
-                uuids_chk = list(mapped_by_src.values())
-                ph_u = ",".join("?" for _ in uuids_chk)
-                present_uuids = {
-                    r[0]
-                    for r in c_org.execute(
-                        f"SELECT ZUUID FROM ZASSET WHERE ZUUID IN ({ph_u}) AND COALESCE(ZTRASHEDSTATE, 0) = 0",
-                        uuids_chk,
-                    ).fetchall()
-                    if r[0]
-                }
-                mapped_by_src = {k: v for k, v in mapped_by_src.items() if v in present_uuids}
-            finally:
-                c_org.close()
-        except Exception:
-            pass
-
-    existing_org_uuids = [mapped_by_src[aid] for aid in clean_ids if aid in mapped_by_src]
-    missing_src_ids = [aid for aid in clean_ids if aid not in mapped_by_src]
-    src_files_map = _resolve_source_originals_map(cur, missing_src_ids) if missing_src_ids else {}
-
-    if missing_src_ids and not src_files_map and not existing_org_uuids:
-        return {
-            "ok": False,
-            "error": (
-                f"Could not locate original files in All-Media.photoslibrary for {len(missing_src_ids)} asset(s). "
-                "Verify '/Volumes/Extreme Pro' is mounted."
-            ),
-        }
-
-    stage_base = org_path.parent / ".agy_import_staging"
     try:
-        stage_base.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        stage_base = Path(tempfile.gettempdir())
+        with _planner_db_lock(f"Photos Sync: {target_op}"):
+            _ensure_organizer_library_tables(cur)
+            _commit_with_retry(cur.connection)
+            _update_photos_upload_progress(
+                phase="reconciling",
+                message=f"Checking Media Organizer.photoslibrary for '{target_op}' ({len(clean_ids)} asset(s))...",
+            )
+            ok_active, err_active, org_path = _ensure_organizer_library_active_in_photos()
+            if not ok_active:
+                _finish_photos_upload_progress(ok=False, message=err_active or "Photos library unavailable")
+                return {"ok": False, "error": err_active}
 
-    del_names = [d.strip() for d in (delete_organizer_albums or []) if d and d.strip()]
-    action_state = "created"
-    total_added = 0
-    total_deleted = 0
-    newly_imported = 0
-    import_errors: list[str] = []
+            mapped_by_src: dict[str, str] = {}
+            for id_batch in _iter_id_chunks(clean_ids, 800):
+                ph = ",".join("?" for _ in id_batch)
+                for src_id, org_uuid in cur.execute(
+                    f"SELECT source_asset_id, organizer_asset_uuid FROM organizer_asset_map WHERE source_asset_id IN ({ph})",
+                    id_batch,
+                ).fetchall():
+                    if src_id and org_uuid:
+                        mapped_by_src[src_id] = str(org_uuid).split("/")[0]
 
-    with tempfile.TemporaryDirectory(prefix="sync_", dir=str(stage_base)) as tmp_stage_dir:
-        path_to_src_id: dict[str, tuple[str, str]] = {}
-        import_paths: list[str] = []
-        for slot_idx, aid in enumerate(missing_src_ids):
-            info = src_files_map.get(aid)
-            if not info:
-                continue
-            src_file, orig_fn = info
-            raw_fn = os.path.basename((orig_fn or "").strip())
-            raw_fn = re.sub(r'[|:/\\\x00-\x1f]+', "_", raw_fn).strip()
-            if not raw_fn:
-                raw_fn = src_file.name
-            elif Path(raw_fn).suffix.lower() != src_file.suffix.lower() and src_file.suffix:
-                raw_fn = f"{Path(raw_fn).stem or src_file.stem}{src_file.suffix}"
-            slot_dir = Path(tmp_stage_dir) / f"{slot_idx:04d}"
-            slot_dir.mkdir(parents=True, exist_ok=True)
-            staged_file = (slot_dir / raw_fn).resolve()
+            org_db = org_path / "database" / "Photos.sqlite"
+            if org_db.exists():
+                try:
+                    c_org = sqlite3.connect(f"file:{org_db}?mode=ro", uri=True, timeout=5)
+                    try:
+                        if mapped_by_src:
+                            uuids_all = list(mapped_by_src.values())
+                            present_uuids: set[str] = set()
+                            for u_batch in _iter_id_chunks(uuids_all, 800):
+                                ph_u = ",".join("?" for _ in u_batch)
+                                for (zu,) in c_org.execute(
+                                    f"SELECT ZUUID FROM ZASSET WHERE ZUUID IN ({ph_u}) AND COALESCE(ZTRASHEDSTATE, 0) = 0",
+                                    u_batch,
+                                ).fetchall():
+                                    if zu:
+                                        present_uuids.add(zu)
+                            mapped_by_src = {k: v for k, v in mapped_by_src.items() if v in present_uuids}
+
+                        # Recover any unmapped assets already imported into Media Organizer.photoslibrary (e.g. from an interrupted prior run)
+                        unmapped_chk = [aid for aid in clean_ids if aid not in mapped_by_src]
+                        if unmapped_chk:
+                            unmapped_lookup: dict[tuple[str, str], list[str]] = {}
+                            for u_batch in _iter_id_chunks(unmapped_chk, 800):
+                                ph_um = ",".join("?" for _ in u_batch)
+                                try:
+                                    for s_aid, s_fn, s_dt in cur.execute(
+                                        f"SELECT asset_id, COALESCE(original_filename, ''), substr(COALESCE(date_created_utc, ''), 1, 16) FROM assets WHERE asset_id IN ({ph_um})",
+                                        u_batch,
+                                    ).fetchall():
+                                        if s_aid and s_fn and s_dt:
+                                            unmapped_lookup.setdefault((str(s_fn).strip().lower(), str(s_dt)), []).append(str(s_aid))
+                                except sqlite3.OperationalError:
+                                    break
+                            if unmapped_lookup:
+                                already_claimed_org_uuids = set(mapped_by_src.values())
+                                try:
+                                    org_rows = c_org.execute(
+                                        """
+                                        SELECT z.ZUUID, COALESCE(aaa.ZORIGINALFILENAME, z.ZFILENAME, ''),
+                                               substr(datetime(z.ZDATECREATED + 978307200, 'unixepoch'), 1, 16)
+                                        FROM ZASSET z
+                                        LEFT JOIN ZADDITIONALASSETATTRIBUTES aaa ON aaa.ZASSET = z.Z_PK
+                                        WHERE COALESCE(z.ZTRASHEDSTATE, 0) = 0 AND z.ZUUID IS NOT NULL
+                                        """
+                                    ).fetchall()
+                                except sqlite3.OperationalError:
+                                    org_rows = []
+                                recovered_pairs: list[tuple[str, str, str]] = []
+                                for oz_uuid, oz_fn, oz_dt in org_rows:
+                                    cu = str(oz_uuid or "").strip().split("/")[0]
+                                    if not cu or cu in already_claimed_org_uuids or not oz_fn or not oz_dt:
+                                        continue
+                                    cand_sids = unmapped_lookup.get((str(oz_fn).strip().lower(), str(oz_dt)))
+                                    if cand_sids:
+                                        sid_match = cand_sids.pop(0)
+                                        mapped_by_src[sid_match] = cu
+                                        already_claimed_org_uuids.add(cu)
+                                        recovered_pairs.append((sid_match, cu, str(oz_fn)))
+                                if recovered_pairs:
+                                    cur.executemany(
+                                        """
+                                        INSERT INTO organizer_asset_map (source_asset_id, organizer_asset_uuid, original_filename, imported_at_utc)
+                                        VALUES (?, ?, ?, datetime('now'))
+                                        ON CONFLICT(source_asset_id) DO UPDATE SET
+                                            organizer_asset_uuid = excluded.organizer_asset_uuid,
+                                            original_filename = excluded.original_filename,
+                                            imported_at_utc = datetime('now')
+                                        """,
+                                        recovered_pairs,
+                                    )
+                                    _commit_with_retry(cur.connection)
+                    finally:
+                        c_org.close()
+                except Exception:
+                    pass
+
+            existing_org_uuids = [mapped_by_src[aid] for aid in clean_ids if aid in mapped_by_src]
+            missing_src_ids = [aid for aid in clean_ids if aid not in mapped_by_src]
+            src_files_map = _resolve_source_originals_map(cur, missing_src_ids) if missing_src_ids else {}
+
+            # Commit read transaction BEFORE long staging / AppleScript calls so media_organizer.db holds ZERO locks during upload!
+            _commit_with_retry(cur.connection)
+
+            if missing_src_ids and not src_files_map and not existing_org_uuids:
+                err_msg = (
+                    f"Could not locate original files in All-Media.photoslibrary for {len(missing_src_ids)} asset(s). "
+                    "Verify '/Volumes/Extreme Pro' is mounted."
+                )
+                _finish_photos_upload_progress(ok=False, message=err_msg)
+                return {"ok": False, "error": err_msg}
+
+            _update_photos_upload_progress(
+                total_requested=len(clean_ids),
+                already_in_library=len(existing_org_uuids),
+                to_upload_total=len(missing_src_ids),
+            )
+
+            stage_base = org_path.parent / ".agy_import_staging"
             try:
-                shutil.copy2(src_file, staged_file)
-            except Exception as copy_err:
-                import_errors.append(f"{raw_fn}: stage copy failed ({copy_err})")
-                continue
-            p_str = str(staged_file)
-            path_to_src_id[p_str] = (aid, raw_fn)
-            import_paths.append(p_str)
+                stage_base.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                stage_base = Path(tempfile.gettempdir())
 
-        if missing_src_ids and not import_paths and not existing_org_uuids:
-            detail = "; ".join(import_errors[:3]) if import_errors else "could not stage original files"
-            return {"ok": False, "error": f"Failed staging originals for Media Organizer import: {detail}"}
+            del_names = [d.strip() for d in (delete_organizer_albums or []) if d and d.strip()]
+            action_state = "created"
+            total_added = 0
+            total_deleted = 0
+            newly_imported = 0
+            import_errors: list[str] = []
 
-        chunk_size = 40
-        path_chunks = [import_paths[i : i + chunk_size] for i in range(0, len(import_paths), chunk_size)] or [[]]
+            with tempfile.TemporaryDirectory(prefix="sync_", dir=str(stage_base)) as tmp_stage_dir:
+                path_to_src_id: dict[str, tuple[str, str]] = {}
+                import_paths: list[str] = []
+                if missing_src_ids:
+                    _update_photos_upload_progress(
+                        phase="staging",
+                        staged_count=0,
+                        processed_count=0,
+                        phase_total=len(missing_src_ids),
+                        message=f"Staging 0 / {len(missing_src_ids)} original(s) for '{target_op}'...",
+                    )
+                for slot_idx, aid in enumerate(missing_src_ids):
+                    info = src_files_map.get(aid)
+                    if not info:
+                        continue
+                    src_file, orig_fn = info
+                    raw_fn = os.path.basename((orig_fn or "").strip())
+                    raw_fn = re.sub(r'[|:/\\\x00-\x1f]+', "_", raw_fn).strip()
+                    if not raw_fn:
+                        raw_fn = src_file.name
+                    elif Path(raw_fn).suffix.lower() != src_file.suffix.lower() and src_file.suffix:
+                        raw_fn = f"{Path(raw_fn).stem or src_file.stem}{src_file.suffix}"
+                    slot_dir = Path(tmp_stage_dir) / f"{slot_idx:04d}"
+                    slot_dir.mkdir(parents=True, exist_ok=True)
+                    staged_file = (slot_dir / raw_fn).resolve()
+                    try:
+                        shutil.copy2(src_file, staged_file)
+                    except Exception as copy_err:
+                        import_errors.append(f"{raw_fn}: stage copy failed ({copy_err})")
+                        continue
+                    p_str = str(staged_file)
+                    path_to_src_id[p_str] = (aid, raw_fn)
+                    import_paths.append(p_str)
+                    if (slot_idx + 1) % 5 == 0 or (slot_idx + 1) == len(missing_src_ids):
+                        _update_photos_upload_progress(
+                            staged_count=len(import_paths),
+                            processed_count=slot_idx + 1,
+                            phase_total=len(missing_src_ids),
+                            current_item=raw_fn,
+                            message=f"Staging {slot_idx + 1} / {len(missing_src_ids)} original(s) for '{target_op}'...",
+                        )
 
-        for idx, p_chunk in enumerate(path_chunks):
-            allow_flag = "1" if (allow_existing or idx > 0) else "0"
-            uuids_arg = existing_org_uuids if idx == 0 else []
-            dels_arg = del_names if idx == len(path_chunks) - 1 else []
-            argv = [
+                if missing_src_ids and not import_paths and not existing_org_uuids:
+                    detail = "; ".join(import_errors[:3]) if import_errors else "could not stage original files"
+                    err_s = f"Failed staging originals for Media Organizer import: {detail}"
+                    _finish_photos_upload_progress(ok=False, message=err_s)
+                    return {"ok": False, "error": err_s}
+
+                chunk_size = 12
+                path_chunks = [import_paths[i : i + chunk_size] for i in range(0, len(import_paths), chunk_size)] or [[]]
+                upload_total = len(import_paths)
+
+                if upload_total > 0:
+                    _update_photos_upload_progress(
+                        phase="uploading",
+                        to_upload_total=upload_total,
+                        uploaded_count=0,
+                        processed_count=0,
+                        phase_total=upload_total,
+                        current_item=os.path.basename(import_paths[0]),
+                        message=f"Uploading 0 / {upload_total} new asset(s) into Media Organizer ({target_op})...",
+                    )
+                else:
+                    _update_photos_upload_progress(
+                        phase="linking",
+                        processed_count=len(existing_org_uuids),
+                        phase_total=max(1, len(existing_org_uuids)),
+                        message=f"Linking {len(existing_org_uuids)} already-imported asset(s) into '{target_op}'...",
+                    )
+
+                items_attempted_so_far = 0
+                for idx, p_chunk in enumerate(path_chunks):
+                    allow_flag = "2" if (replace_existing and idx == 0) else ("1" if (allow_existing or replace_existing or idx > 0) else "0")
+                    uuids_arg = existing_org_uuids if idx == 0 else []
+                    dels_arg = del_names if idx == len(path_chunks) - 1 else []
+                    if p_chunk:
+                        first_fn = os.path.basename(p_chunk[0])
+                        _update_photos_upload_progress(
+                            current_item=first_fn,
+                            message=f"Uploading {items_attempted_so_far} / {upload_total} asset(s) into '{target_op}' (batch {idx + 1}/{len(path_chunks)} · {first_fn})...",
+                        )
+                    argv = [
+                        parent_folder,
+                        album_name,
+                        allow_flag,
+                        str(len(uuids_arg)),
+                        *uuids_arg,
+                        str(len(dels_arg)),
+                        *dels_arg,
+                        *p_chunk,
+                    ]
+                    try:
+                        proc = subprocess.run(
+                            ["osascript", "-", *argv],
+                            input=_ORGANIZER_SYNC_APPLESCRIPT,
+                            capture_output=True,
+                            text=True,
+                            timeout=240,
+                        )
+                    except Exception as e:
+                        err_a = f"Failed running AppleScript on Media Organizer library: {e}"
+                        _finish_photos_upload_progress(ok=False, message=err_a)
+                        return {"ok": False, "error": err_a}
+
+                    out = (proc.stdout or "").strip()
+                    if proc.returncode != 0 or out.startswith("ERROR|"):
+                        err_detail = out.split("|", 1)[1] if out.startswith("ERROR|") else (out or (proc.stderr or "").strip())
+                        err_f = err_detail or f"AppleScript failed (exit {proc.returncode})"
+                        _finish_photos_upload_progress(ok=False, message=err_f)
+                        return {"ok": False, "error": err_f}
+
+                    parts = out.split("@@AGY_FIELD@@")
+                    if idx == 0 and parts and parts[0]:
+                        action_state = parts[0]
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        total_added += int(parts[1])
+                    if len(parts) >= 3 and parts[2].isdigit():
+                        total_deleted += int(parts[2])
+                    chunk_mapped = 0
+                    if len(parts) >= 4 and parts[3]:
+                        for pair in parts[3].split("@@AGY_ITEM@@"):
+                            if ":::" not in pair:
+                                continue
+                            p_key, raw_new_id = pair.split(":::", 1)
+                            clean_new_uuid = raw_new_id.strip().split("/")[0]
+                            src_entry = path_to_src_id.get(p_key) or path_to_src_id.get(str(Path(p_key).resolve()))
+                            if src_entry and clean_new_uuid:
+                                src_aid, orig_fn = src_entry
+                                cur.execute(
+                                    """
+                                    INSERT INTO organizer_asset_map (source_asset_id, organizer_asset_uuid, original_filename, imported_at_utc)
+                                    VALUES (?, ?, ?, datetime('now'))
+                                    ON CONFLICT(source_asset_id) DO UPDATE SET
+                                        organizer_asset_uuid = excluded.organizer_asset_uuid,
+                                        original_filename = excluded.original_filename,
+                                        imported_at_utc = datetime('now')
+                                    """,
+                                    (src_aid, clean_new_uuid, orig_fn),
+                                )
+                                newly_imported += 1
+                                chunk_mapped += 1
+                    if chunk_mapped > 0:
+                        # Durably commit every batch to organizer_asset_map so progress is never lost and DB stays unlocked between batches!
+                        _commit_with_retry(cur.connection)
+                    if len(parts) >= 5 and parts[4]:
+                        for err_item in parts[4].split("@@AGY_ITEM@@"):
+                            if err_item.strip():
+                                import_errors.append(err_item.strip())
+
+                    items_attempted_so_far += len(p_chunk)
+                    if upload_total > 0:
+                        _update_photos_upload_progress(
+                            uploaded_count=newly_imported,
+                            processed_count=items_attempted_so_far,
+                            phase_total=upload_total,
+                            message=f"Uploaded {items_attempted_so_far} / {upload_total} asset(s) into '{target_op}'...",
+                        )
+
+            if import_paths and newly_imported == 0 and not existing_org_uuids:
+                err_summary = "; ".join(import_errors[:3]) if import_errors else "Photos.app returned 0 imported items"
+                err_z = f"Failed importing {len(import_paths)} asset(s) into Media Organizer library: {err_summary}"
+                _finish_photos_upload_progress(ok=False, message=err_z)
+                return {"ok": False, "error": err_z}
+
+            _update_photos_upload_progress(
+                phase="updating_db",
+                processed_count=len(clean_ids),
+                phase_total=max(1, len(clean_ids)),
+                message=f"Updating Media Organizer DB album & tags for '{target_op}' ({len(clean_ids)} asset(s))...",
+            )
+            alb_pk, full_path = _upsert_organizer_album_in_db(
+                cur,
                 parent_folder,
                 album_name,
-                allow_flag,
-                str(len(uuids_arg)),
-                *uuids_arg,
-                str(len(dels_arg)),
-                *dels_arg,
-                *p_chunk,
-            ]
-            try:
-                proc = subprocess.run(
-                    ["osascript", "-", *argv],
-                    input=_ORGANIZER_SYNC_APPLESCRIPT,
-                    capture_output=True,
-                    text=True,
-                    timeout=240,
-                )
-            except Exception as e:
-                return {"ok": False, "error": f"Failed running AppleScript on Media Organizer library: {e}"}
-
-            out = (proc.stdout or "").strip()
-            if proc.returncode != 0 or out.startswith("ERROR|"):
-                err_detail = out.split("|", 1)[1] if out.startswith("ERROR|") else (out or (proc.stderr or "").strip())
-                return {"ok": False, "error": err_detail or f"AppleScript failed (exit {proc.returncode})"}
-
-            parts = out.split("@@AGY_FIELD@@")
-            if idx == 0 and parts and parts[0]:
-                action_state = parts[0]
-            if len(parts) >= 2 and parts[1].isdigit():
-                total_added += int(parts[1])
-            if len(parts) >= 3 and parts[2].isdigit():
-                total_deleted += int(parts[2])
-            if len(parts) >= 4 and parts[3]:
-                for pair in parts[3].split("@@AGY_ITEM@@"):
-                    if ":::" not in pair:
-                        continue
-                    p_key, raw_new_id = pair.split(":::", 1)
-                    clean_new_uuid = raw_new_id.strip().split("/")[0]
-                    src_entry = path_to_src_id.get(p_key) or path_to_src_id.get(str(Path(p_key).resolve()))
-                    if src_entry and clean_new_uuid:
-                        src_aid, orig_fn = src_entry
-                        cur.execute(
-                            """
-                            INSERT INTO organizer_asset_map (source_asset_id, organizer_asset_uuid, original_filename, imported_at_utc)
-                            VALUES (?, ?, ?, datetime('now'))
-                            ON CONFLICT(source_asset_id) DO UPDATE SET
-                                organizer_asset_uuid = excluded.organizer_asset_uuid,
-                                original_filename = excluded.original_filename,
-                                imported_at_utc = datetime('now')
-                            """,
-                            (src_aid, clean_new_uuid, orig_fn),
-                        )
-                        newly_imported += 1
-            if len(parts) >= 5 and parts[4]:
-                for err_item in parts[4].split("@@AGY_ITEM@@"):
-                    if err_item.strip():
-                        import_errors.append(err_item.strip())
-
-    if import_paths and newly_imported == 0 and not existing_org_uuids:
-        err_summary = "; ".join(import_errors[:3]) if import_errors else "Photos.app returned 0 imported items"
-        return {
-            "ok": False,
-            "error": f"Failed importing {len(import_paths)} asset(s) into Media Organizer library: {err_summary}",
-        }
-
-    alb_pk, full_path = _upsert_organizer_album_in_db(cur, parent_folder, album_name, clean_ids)
-    return {
-        "ok": True,
-        "action_state": action_state,
-        "album_pk": alb_pk,
-        "full_path": full_path,
-        "photos_added": total_added,
-        "newly_imported": newly_imported,
-        "albums_deleted": total_deleted,
-        "import_warnings": import_errors,
-    }
+                clean_ids,
+                replace_members=replace_existing,
+            )
+            _commit_with_retry(cur.connection)
+            return {
+                "ok": True,
+                "action_state": action_state,
+                "album_pk": alb_pk,
+                "full_path": full_path,
+                "photos_added": total_added,
+                "newly_imported": newly_imported,
+                "albums_deleted": total_deleted,
+                "import_warnings": import_errors,
+            }
+    except TimeoutError as lock_err:
+        _finish_photos_upload_progress(ok=False, message=str(lock_err))
+        return {"ok": False, "error": str(lock_err)}
 
 
 def _mark_assets_ignored_in_db(cur: sqlite3.Cursor, asset_ids: list[str]) -> int:
@@ -7329,68 +7860,71 @@ def create_moment_via_applescript(req: CreateMomentRequest):
             clean_ignore_ids.append(s)
 
     try:
-        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
-        conn.execute("PRAGMA busy_timeout = 30000")
-        try:
-            cur = conn.cursor()
-            sync_res = _sync_assets_to_organizer_library(
-                cur,
-                parent_folder,
-                moment_name,
-                clean_ids,
-                allow_existing=bool(req.allow_existing),
-            )
-            if not sync_res.get("ok"):
-                return sync_res
+        with _planner_db_lock(f"Create Moment: {parent_folder}/{moment_name}"):
+            conn = _open_rw_media_db(60.0)
+            try:
+                cur = conn.cursor()
+                sync_res = _sync_assets_to_organizer_library(
+                    cur,
+                    parent_folder,
+                    moment_name,
+                    clean_ids,
+                    allow_existing=bool(req.allow_existing),
+                )
+                if not sync_res.get("ok"):
+                    return sync_res
 
-            album_pk_out = sync_res["album_pk"]
-            full_path = sync_res["full_path"]
-            action_state = sync_res["action_state"]
-            total_photos_added = sync_res["photos_added"]
+                album_pk_out = sync_res["album_pk"]
+                full_path = sync_res["full_path"]
+                action_state = sync_res["action_state"]
+                total_photos_added = sync_res["photos_added"]
 
-            if parent_folder.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments"):
-                mom_exists = cur.execute(
-                    """
-                    SELECT 1 FROM moments
-                    WHERE LOWER(TRIM(album_name)) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?)
-                    LIMIT 1
-                    """,
-                    (moment_name, parent_folder),
-                ).fetchone()
-                if not mom_exists:
-                    cur.execute(
-                        "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, ?)",
-                        (album_pk_out, moment_name, parent_folder),
+                if parent_folder.lower() in ("moments", "memories", "curated", "tobecurated", "generic moments"):
+                    mom_exists = cur.execute(
+                        """
+                        SELECT 1 FROM moments
+                        WHERE LOWER(TRIM(album_name)) = LOWER(?) AND LOWER(COALESCE(parent_folder_name, '')) = LOWER(?)
+                        LIMIT 1
+                        """,
+                        (moment_name, parent_folder),
+                    ).fetchone()
+                    if not mom_exists:
+                        cur.execute(
+                            "INSERT INTO moments (album_pk, album_name, parent_folder_pk, parent_folder_name) VALUES (?, ?, NULL, ?)",
+                            (album_pk_out, moment_name, parent_folder),
+                        )
+
+                db_updated_moments_col = 0
+                if clean_ids and parent_folder.lower() in ("moments", "curated", "tobecurated", "generic moments"):
+                    for id_batch in _iter_id_chunks(clean_ids, 800):
+                        placeholders = ",".join("?" for _ in id_batch)
+                        cur.execute(
+                            f"""
+                            UPDATE assets
+                            SET MomentsAlbumName = ?, updated_at_utc = datetime('now')
+                            WHERE asset_id IN ({placeholders})
+                              AND (MomentsAlbumName IS NULL OR TRIM(MomentsAlbumName) = '')
+                            """,
+                            [moment_name, *id_batch],
+                        )
+                        db_updated_moments_col += cur.rowcount or 0
+
+                if action_state == "created":
+                    _reset_new_folder_curated_moment_stage(
+                        cur,
+                        moment_name,
+                        parent_folder,
+                        asset_count=len(clean_ids),
+                        force=True,
                     )
 
-            db_updated_moments_col = 0
-            if clean_ids and parent_folder.lower() in ("moments", "curated", "tobecurated", "generic moments"):
-                placeholders = ",".join("?" for _ in clean_ids)
-                cur.execute(
-                    f"""
-                    UPDATE assets
-                    SET MomentsAlbumName = ?, updated_at_utc = datetime('now')
-                    WHERE asset_id IN ({placeholders})
-                      AND (MomentsAlbumName IS NULL OR TRIM(MomentsAlbumName) = '')
-                    """,
-                    [moment_name, *clean_ids],
-                )
-                db_updated_moments_col = cur.rowcount or 0
-
-            if action_state == "created":
-                _reset_new_folder_curated_moment_stage(
-                    cur,
-                    moment_name,
-                    parent_folder,
-                    asset_count=len(clean_ids),
-                    force=True,
-                )
-
-            ignored_db_updated = _mark_assets_ignored_in_db(cur, clean_ignore_ids) if clean_ignore_ids else 0
-            conn.commit()
-        finally:
-            conn.close()
+                ignored_db_updated = _mark_assets_ignored_in_db(cur, clean_ignore_ids) if clean_ignore_ids else 0
+                _commit_with_retry(conn)
+                _finish_photos_upload_progress(ok=True, message=f"Created '{full_path}' ({len(clean_ids)} asset(s)).")
+            finally:
+                conn.close()
     except Exception as e:
+        _finish_photos_upload_progress(ok=False, message=str(e))
         return {"ok": False, "error": str(e)}
 
     if _intake_dedup_cache["dup_ids"]:
@@ -7422,6 +7956,170 @@ class PublishMomentRequest(BaseModel):
     youtube_url: Optional[str] = None
     account: Optional[str] = "nickolay.cohen@gmail.com"
     custom_platform: Optional[str] = None
+
+
+class ArchiveLegacyShutterflyRequest(BaseModel):
+    moment_name: str
+
+
+class RemoveMomentAssetsRequest(BaseModel):
+    moment_name: str
+    remove_asset_ids: list[str]
+
+
+def _normalize_url_for_compare(url: Optional[str]) -> str:
+    return (url or "").strip().rstrip("/").lower()
+
+
+def _detect_legacy_shutterfly_conflict(cur: sqlite3.Cursor, moment_name: str) -> dict:
+    """Detect if `moment_name` has a prior/All-Media Shutterfly link that must be renamed to `<moment_name> [All-Media]` before publishing."""
+    m_name = (moment_name or "").strip()
+    renamed_album = f"{m_name} [All-Media]" if m_name else "[All-Media]"
+    base_res = {
+        "conflict": False,
+        "legacy_shutterfly_url": "",
+        "renamed_album_name": renamed_album,
+        "new_album_name": m_name,
+        "archived_shutterfly_url": "",
+        "legacy_published_count": 0,
+    }
+    if not m_name or m_name.lower().endswith("[all-media]"):
+        return base_res
+
+    cm_stage = ""
+    cm_sf_url = ""
+    cm_manual = False
+    try:
+        cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+        mc_expr = "COALESCE(manually_curated, 0)" if "manually_curated" in cm_cols else "0"
+        sf_expr = "COALESCE(shutterfly_url, '')" if "shutterfly_url" in cm_cols else "''"
+        r_cm = cur.execute(
+            f"""
+            SELECT COALESCE(memory_stage, ''), {sf_expr}, {mc_expr}
+            FROM curated_moments
+            WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+            LIMIT 1
+            """,
+            (m_name,),
+        ).fetchone()
+        if r_cm:
+            cm_stage = str(r_cm[0] or "").strip().upper()
+            cm_sf_url = str(r_cm[1] or "").strip()
+            cm_manual = bool(r_cm[2])
+
+        r_arch = cur.execute(
+            f"""
+            SELECT {sf_expr}
+            FROM curated_moments
+            WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+            LIMIT 1
+            """,
+            (renamed_album,),
+        ).fetchone()
+        if r_arch and r_arch[0]:
+            base_res["archived_shutterfly_url"] = str(r_arch[0]).strip()
+    except sqlite3.OperationalError:
+        pass
+
+    pub_sf_url = ""
+    total_pub_cnt = 0
+    unmapped_pub_cnt = 0
+    try:
+        pub_cols = {r[1] for r in cur.execute("PRAGMA table_info(publications)").fetchall()}
+        has_pub_url = "published_url" in pub_cols
+        has_oam = bool(
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='organizer_asset_map'"
+            ).fetchone()
+        )
+        if has_pub_url:
+            r_psf = cur.execute(
+                """
+                SELECT MAX(TRIM(published_url))
+                FROM publications
+                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                  AND TRIM(COALESCE(published_url, '')) != ''
+                  AND (
+                      LOWER(COALESCE(platform, '')) LIKE '%shutterfly%'
+                      OR COALESCE(platform, '') = ''
+                  )
+                """,
+                (m_name,),
+            ).fetchone()
+            if r_psf and r_psf[0]:
+                pub_sf_url = str(r_psf[0]).strip()
+
+            if not base_res["archived_shutterfly_url"]:
+                r_arch_pub = cur.execute(
+                    """
+                    SELECT MAX(TRIM(published_url))
+                    FROM publications
+                    WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                      AND TRIM(COALESCE(published_url, '')) != ''
+                      AND LOWER(COALESCE(platform, '')) LIKE '%shutterfly%'
+                    """,
+                    (renamed_album,),
+                ).fetchone()
+                if r_arch_pub and r_arch_pub[0]:
+                    base_res["archived_shutterfly_url"] = str(r_arch_pub[0]).strip()
+
+        if has_oam:
+            r_cnts = cur.execute(
+                """
+                SELECT
+                    COUNT(DISTINCT p.asset_uuid),
+                    COUNT(DISTINCT CASE WHEN oam.organizer_asset_uuid IS NULL THEN p.asset_uuid END)
+                FROM publications p
+                LEFT JOIN organizer_asset_map oam ON oam.source_asset_id = p.asset_uuid
+                WHERE TRIM(LOWER(p.moment_name)) = TRIM(LOWER(?))
+                """,
+                (m_name,),
+            ).fetchone()
+            if r_cnts:
+                total_pub_cnt = int(r_cnts[0] or 0)
+                unmapped_pub_cnt = int(r_cnts[1] or 0)
+        else:
+            r_cnt = cur.execute(
+                "SELECT COUNT(DISTINCT asset_uuid) FROM publications WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+                (m_name,),
+            ).fetchone()
+            total_pub_cnt = int(r_cnt[0] or 0) if r_cnt else 0
+    except sqlite3.OperationalError:
+        pass
+
+    has_org_published_album = False
+    try:
+        has_org_published_album = bool(
+            cur.execute(
+                """
+                SELECT 1
+                FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND COALESCE(library_scope, 'all_media') = 'organizer'
+                  AND LOWER(COALESCE(parent_folder_name, '')) = 'published'
+                  AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                LIMIT 1
+                """,
+                (m_name,),
+            ).fetchone()
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    existing_sf_url = cm_sf_url or pub_sf_url
+    if not existing_sf_url:
+        return base_res
+
+    is_conflict = (
+        cm_stage in ("", "M100", "M200", "M300", "M400")
+        or unmapped_pub_cnt > 0
+        or (not has_org_published_album and not (cm_manual and cm_stage in ("M450", "M500")))
+    )
+    if is_conflict:
+        base_res["conflict"] = True
+        base_res["legacy_shutterfly_url"] = existing_sf_url
+        base_res["legacy_published_count"] = total_pub_cnt
+    return base_res
 
 
 class CuratePublishBatchRequest(BaseModel):
@@ -7912,13 +8610,16 @@ def get_moment_publish_info(moment_name: str):
                     ),
                 }
             cur.execute(
-                "SELECT memory_stage, shutterfly_url, youtube_url FROM curated_moments WHERE moment_name = ?",
+                "SELECT memory_stage, shutterfly_url, youtube_url FROM curated_moments WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) LIMIT 1",
                 (m_name,),
             )
             cm_row = cur.fetchone()
             stage = (cm_row[0] if cm_row and cm_row[0] else "M400")
             sf_url = (cm_row[1] if cm_row and cm_row[1] else "") or ""
             yt_url = (cm_row[2] if cm_row and cm_row[2] else "") or ""
+            sf_conflict = _detect_legacy_shutterfly_conflict(cur, m_name)
+            if sf_conflict["conflict"]:
+                sf_url = ""
 
             sync_res = _sync_publishing_recommendation_for_moment(cur, m_name)
 
@@ -7963,6 +8664,11 @@ def get_moment_publish_info(moment_name: str):
                 "memory_stage": stage,
                 "shutterfly_url": sf_url,
                 "youtube_url": yt_url,
+                "legacy_shutterfly_conflict": sf_conflict["conflict"],
+                "legacy_shutterfly_url": sf_conflict["legacy_shutterfly_url"],
+                "legacy_shutterfly_renamed_album": sf_conflict["renamed_album_name"],
+                "legacy_published_count": sf_conflict["legacy_published_count"],
+                "archived_shutterfly_url": sf_conflict["archived_shutterfly_url"],
                 "curated_count": curated_total,
                 "published_count": len(moment_pub_aids),
                 "unpublished_count": len(unpublished_rows),
@@ -8344,6 +9050,110 @@ def _move_published_moment_to_published_folder(
     }
 
 
+@router.post("/memories/archive-legacy-shutterfly")
+def archive_legacy_shutterfly_album(req: ArchiveLegacyShutterflyRequest):
+    """Archive an existing All-Media Shutterfly link & legacy publications onto `<moment_name> [All-Media]` so `<moment_name>` can be used for the new Album."""
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+    m_name = (req.moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+    if m_name.lower().endswith("[all-media]"):
+        return {"ok": False, "error": f"'{m_name}' already ends with [All-Media]"}
+
+    _ensure_published_url_schema()
+    try:
+        with _planner_db_lock(f"Archive Legacy Shutterfly: {m_name}"):
+            conn = _open_rw_media_db(60.0)
+            try:
+                cur = conn.cursor()
+                sf_conflict = _detect_legacy_shutterfly_conflict(cur, m_name)
+                archived_name = sf_conflict["renamed_album_name"]
+                old_sf_url = sf_conflict["legacy_shutterfly_url"] or sf_conflict["archived_shutterfly_url"]
+                if not old_sf_url:
+                    return {
+                        "ok": False,
+                        "error": f"No existing Shutterfly link found for '{m_name}'.",
+                    }
+
+                moved_pubs = 0
+                if sf_conflict["conflict"]:
+                    pub_cols = {r[1] for r in cur.execute("PRAGMA table_info(publications)").fetchall()}
+                    if "published_url" in pub_cols:
+                        cur.execute(
+                            """
+                            UPDATE publications
+                            SET published_url = COALESCE(NULLIF(TRIM(published_url), ''), ?)
+                            WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                              AND (
+                                  LOWER(COALESCE(platform, '')) LIKE '%shutterfly%'
+                                  OR COALESCE(platform, '') = ''
+                              )
+                            """,
+                            (old_sf_url, m_name),
+                        )
+                    cur.execute(
+                        """
+                        UPDATE publications
+                        SET moment_name = ?
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                          AND (
+                              LOWER(COALESCE(platform, '')) LIKE '%shutterfly%'
+                              OR COALESCE(platform, '') = ''
+                          )
+                        """,
+                        (archived_name, m_name),
+                    )
+                    moved_pubs = int(cur.rowcount or 0)
+
+                    cm_cols = {r[1] for r in cur.execute("PRAGMA table_info(curated_moments)").fetchall()}
+                    if "photos_curated_exists" in cm_cols:
+                        cur.execute(
+                            """
+                            INSERT INTO curated_moments (moment_name, memory_stage, shutterfly_url, photos_curated_exists, curated_count)
+                            VALUES (?, 'M500', ?, 0, ?)
+                            ON CONFLICT(moment_name) DO UPDATE SET
+                                memory_stage = 'M500',
+                                photos_curated_exists = 0,
+                                shutterfly_url = COALESCE(NULLIF(TRIM(excluded.shutterfly_url), ''), curated_moments.shutterfly_url)
+                            """,
+                            (archived_name, old_sf_url, moved_pubs),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO curated_moments (moment_name, memory_stage, shutterfly_url, curated_count)
+                            VALUES (?, 'M500', ?, ?)
+                            ON CONFLICT(moment_name) DO UPDATE SET
+                                memory_stage = 'M500',
+                                shutterfly_url = COALESCE(NULLIF(TRIM(excluded.shutterfly_url), ''), curated_moments.shutterfly_url)
+                            """,
+                            (archived_name, old_sf_url, moved_pubs),
+                        )
+
+                    cur.execute(
+                        """
+                        UPDATE curated_moments
+                        SET shutterfly_url = NULL
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                        """,
+                        (m_name,),
+                    )
+                    _commit_with_retry(conn)
+
+                return {
+                    "ok": True,
+                    "moment_name": m_name,
+                    "archived_moment_name": archived_name,
+                    "archived_shutterfly_url": old_sf_url,
+                    "moved_publications_count": moved_pubs,
+                }
+            finally:
+                conn.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @router.post("/memories/publish")
 def publish_moment_assets(req: PublishMomentRequest):
     """Record publication/republication of Moment assets in media_organizer.db (Shutterfly/YouTube + URLs)."""
@@ -8369,9 +9179,7 @@ def publish_moment_assets(req: PublishMomentRequest):
     custom_plat = (req.custom_platform or "").strip() or None
 
     try:
-        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
-        conn.execute("PRAGMA busy_timeout = 30000")
-        try:
+        with _planner_db_lock(f"Publish Moment: {m_name}"), contextlib.closing(_open_rw_media_db(60.0)) as conn:
             cur = conn.cursor()
             if _moment_is_umbrella_with_subevents(cur, m_name):
                 return {
@@ -8379,6 +9187,34 @@ def publish_moment_assets(req: PublishMomentRequest):
                     "error": (
                         f"Cannot publish '{m_name}': it is an Umbrella Event containing Subevents. "
                         "Split and curate its Subevents to publish."
+                    ),
+                }
+            sf_conflict = _detect_legacy_shutterfly_conflict(cur, m_name)
+            if sf_conflict["conflict"]:
+                return {
+                    "ok": False,
+                    "legacy_shutterfly_conflict": True,
+                    "legacy_shutterfly_url": sf_conflict["legacy_shutterfly_url"],
+                    "legacy_shutterfly_renamed_album": sf_conflict["renamed_album_name"],
+                    "legacy_published_count": sf_conflict["legacy_published_count"],
+                    "error": (
+                        f"Publishing stopped: '{m_name}' already has an existing Shutterfly link. "
+                        f"Please rename the existing Shutterfly album to '{sf_conflict['renamed_album_name']}', "
+                        f"confirm the rename, and use '{m_name}' for the new Shutterfly album."
+                    ),
+                }
+            req_sf_clean = (req.shutterfly_url or "").strip()
+            if (
+                req_sf_clean
+                and sf_conflict["archived_shutterfly_url"]
+                and _normalize_url_for_compare(req_sf_clean) == _normalize_url_for_compare(sf_conflict["archived_shutterfly_url"])
+            ):
+                return {
+                    "ok": False,
+                    "archived_shutterfly_url": sf_conflict["archived_shutterfly_url"],
+                    "error": (
+                        f"The Shutterfly URL entered belongs to the old '{sf_conflict['renamed_album_name']}' album. "
+                        f"Create a new Shutterfly album named '{m_name}' and enter its new URL."
                     ),
                 }
             cur_rows_chk, pub_aids_chk = _get_curated_asset_rows_for_moment(cur, m_name)
@@ -8531,8 +9367,9 @@ def publish_moment_assets(req: PublishMomentRequest):
                     (yt_url_val, m_name),
                 )
 
-            conn.commit()
+            _commit_with_retry(conn)
             pub_rec_sync = _sync_publishing_recommendation_for_moment(cur, m_name)
+            _finish_photos_upload_progress(ok=True, message=f"Published '{m_name}' ({len(pub_rows)} recorded).")
             return {
                 "ok": True,
                 "moment_name": m_name,
@@ -8550,9 +9387,8 @@ def publish_moment_assets(req: PublishMomentRequest):
                 "pub_rec_sync": pub_rec_sync,
                 "published_folder_move": published_folder_move,
             }
-        finally:
-            conn.close()
     except Exception as e:
+        _finish_photos_upload_progress(ok=False, message=str(e))
         return {"ok": False, "error": str(e)}
 
 
@@ -10862,6 +11698,7 @@ def save_moment_tags(req: SaveMomentTagsRequest):
     if not m_name:
         return {"ok": False, "error": "moment_name is required"}
 
+
     clean_tags = _normalize_unique_moment_tags(req.tags or [])
     incoming_lc = {t["tag_value"].lower() for t in clean_tags}
     removed_lc = {
@@ -11878,16 +12715,15 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
     albums_deleted = 0
     newly_imported = 0
 
-    # Import / place selected assets into Media Organizer.photoslibrary AND update DB + tags in one transaction
+    # Import / place selected assets into Media Organizer.photoslibrary AND update DB + tags under shared Planner lock
     tag_session_id = None
     tags_applied_count = 0
     try:
-        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
-        conn.execute("PRAGMA busy_timeout = 30000")
-        try:
+        with _planner_db_lock(f"Consolidate Moment: {target_parent}/{target_moment}"), contextlib.closing(_open_rw_media_db(60.0)) as conn:
             cur = conn.cursor()
             _ensure_moment_tag_tables(cur)
             _ensure_organizer_library_tables(cur)
+            _commit_with_retry(conn)
 
             if not combined_asset_ids:
                 where_m, params_m = _moment_membership_where_sql(src_moment)
@@ -11920,6 +12756,25 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 if target_parent.lower() == "curated"
                 else list(unselected_ids_m)
             )
+            should_replace_org_album = False
+            if unselected_ids_m and target_parent.lower() == "moments":
+                for u_batch in _iter_id_chunks(unselected_ids_m, 800):
+                    ph_chk_u = ",".join("?" for _ in u_batch)
+                    if cur.execute(
+                        f"""
+                        SELECT 1
+                        FROM media_organizer_album_assets moaa
+                        JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                        WHERE moa.is_folder = 0
+                          AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
+                          AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+                          AND moaa.asset_id IN ({ph_chk_u})
+                        LIMIT 1
+                        """,
+                        [target_moment, *u_batch],
+                    ).fetchone():
+                        should_replace_org_album = True
+                        break
             sync_res = _sync_assets_to_organizer_library(
                 cur,
                 target_parent,
@@ -11927,6 +12782,7 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 combined_asset_ids,
                 allow_existing=True,
                 delete_organizer_albums=del_org_albums,
+                **({"replace_existing": True} if should_replace_org_album else {}),
             )
             if not sync_res.get("ok"):
                 return sync_res
@@ -11970,12 +12826,18 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                         (tgt_pk, target_moment, target_parent),
                     )
 
-            # Collect only selected/combined asset IDs into target album; clear orphaned Moment ref on skipped/unchecked items when deleting source
-            if combined_asset_ids:
-                ph = ",".join("?" for _ in combined_asset_ids)
+            _update_photos_upload_progress(
+                phase="updating_db",
+                processed_count=0,
+                phase_total=max(1, len(combined_asset_ids)),
+                message=f"Saving Moment metadata & tags in media_organizer.db for '{target_moment}' ({len(combined_asset_ids)} asset(s))...",
+            )
+            # Collect only selected/combined asset IDs into target album; chunked for 3,900+ asset Moments
+            for id_batch in _iter_id_chunks(combined_asset_ids, 800):
+                ph = ",".join("?" for _ in id_batch)
                 cur.execute(
                     f"UPDATE assets SET MomentsAlbumName = ?, updated_at_utc = datetime('now') WHERE asset_id IN ({ph})",
-                    [target_moment, *combined_asset_ids],
+                    [target_moment, *id_batch],
                 )
             for aid in combined_asset_ids:
                 _insert_album_asset_row_if_missing(cur, tgt_pk, aid)
@@ -12056,10 +12918,23 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 cur.execute("DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))", (src_moment,))
 
             if unselected_ids_m:
-                ph_um = ",".join("?" for _ in unselected_ids_m)
+                for u_batch in _iter_id_chunks(unselected_ids_m, 800):
+                    ph_um = ",".join("?" for _ in u_batch)
+                    cur.execute(
+                        f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_um})",
+                        u_batch,
+                    )
+                    cur.execute(
+                        f"DELETE FROM media_organizer_album_assets WHERE album_pk = ? AND asset_id IN ({ph_um})",
+                        [tgt_pk, *u_batch],
+                    )
+                    cur.execute(
+                        f"DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id IN ({ph_um})",
+                        [target_moment, *u_batch],
+                    )
                 cur.execute(
-                    f"UPDATE assets SET MomentsAlbumName = NULL, curated_album = NULL, updated_at_utc = datetime('now') WHERE asset_id IN ({ph_um})",
-                    unselected_ids_m,
+                    "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
+                    (tgt_pk, tgt_pk),
                 )
                 if unselected_action_m == "skip_publishing":
                     _upsert_album_and_assets_in_db(cur, "Moments", "SkipPublishing", unselected_ids_m)
@@ -12114,24 +12989,28 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 tag_session_id = int(cur.lastrowid)
 
                 def _upsert_tag_rows(aid_list: list[str], tag_list: list[dict]) -> None:
-                    for aid in aid_list:
-                        for t in tag_list:
-                            cur.execute(
-                                """
-                                INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
-                                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                                ON CONFLICT(LOWER(moment_name), asset_id, LOWER(tag_value))
-                                DO UPDATE SET category = excluded.category, include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
-                                """,
-                                (
-                                    target_moment,
-                                    aid,
-                                    t["category"],
-                                    t["tag_value"],
-                                    1 if t["include_in_name"] else 0,
-                                    tag_session_id,
-                                ),
-                            )
+                    rows_bulk = [
+                        (
+                            target_moment,
+                            aid,
+                            t["category"],
+                            t["tag_value"],
+                            1 if t["include_in_name"] else 0,
+                            tag_session_id,
+                        )
+                        for aid in aid_list
+                        for t in tag_list
+                    ]
+                    if rows_bulk:
+                        cur.executemany(
+                            """
+                            INSERT INTO moment_tags (moment_name, asset_id, category, tag_value, include_in_name, session_id, updated_at_utc)
+                            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                            ON CONFLICT(LOWER(moment_name), asset_id, LOWER(tag_value))
+                            DO UPDATE SET category = excluded.category, include_in_name = excluded.include_in_name, session_id = excluded.session_id, updated_at_utc = datetime('now')
+                            """,
+                            rows_bulk,
+                        )
 
                 if union_tags:
                     _upsert_tag_rows([""], union_tags)
@@ -12139,22 +13018,32 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                     _upsert_tag_rows(g_aids, g_tags)
                 if clean_apply_tags and combined_asset_ids:
                     _upsert_tag_rows(combined_asset_ids, clean_apply_tags)
-                for aid in combined_asset_ids:
-                    cur_aid_rows = cur.execute(
-                        """
-                        SELECT category, tag_value, include_in_name
+
+                tags_by_aid_map: dict[str, list[dict]] = {}
+                for id_batch in _iter_id_chunks(combined_asset_ids, 800):
+                    ph_t = ",".join("?" for _ in id_batch)
+                    for r_aid, r_cat, r_val, r_inc in cur.execute(
+                        f"""
+                        SELECT asset_id, category, tag_value, include_in_name
                         FROM moment_tags
-                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id = ?
+                        WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?)) AND asset_id IN ({ph_t})
                         ORDER BY id ASC
                         """,
-                        (target_moment, aid),
-                    ).fetchall()
-                    cur_aid_tags = [
-                        {"category": r[0], "tag_value": r[1], "include_in_name": bool(r[2])}
-                        for r in cur_aid_rows
-                    ]
+                        [target_moment, *id_batch],
+                    ).fetchall():
+                        tags_by_aid_map.setdefault(r_aid, []).append(
+                            {"category": r_cat, "tag_value": r_val, "include_in_name": bool(r_inc)}
+                        )
+                for idx_meta, aid in enumerate(combined_asset_ids):
+                    cur_aid_tags = tags_by_aid_map.get(aid)
                     if cur_aid_tags:
                         _sync_asset_metadata_json(cur, aid, target_moment, cur_aid_tags, tag_session_id)
+                    if (idx_meta + 1) % 200 == 0 or (idx_meta + 1) == len(combined_asset_ids):
+                        _update_photos_upload_progress(
+                            processed_count=idx_meta + 1,
+                            phase_total=len(combined_asset_ids),
+                            message=f"Saving asset metadata {idx_meta + 1} / {len(combined_asset_ids)} in media_organizer.db...",
+                        )
                 tags_applied_count = len(union_tags)
 
             moment_union_tags = _sync_moment_folder_metadata_json(
@@ -12165,10 +13054,13 @@ def resolve_disjoint_moment(req: ResolveDisjointRequest):
                 extra_union_tags=union_tags,
             )
 
-            conn.commit()
-        finally:
-            conn.close()
+            _commit_with_retry(conn)
+            _finish_photos_upload_progress(
+                ok=True,
+                message=f"Completed '{target_parent}/{target_moment}' ({len(combined_asset_ids)} asset(s)).",
+            )
     except Exception as e:
+        _finish_photos_upload_progress(ok=False, message=str(e))
         return {"ok": False, "error": f"Failed updating DB after Photos merge: {e}"}
 
     return {
@@ -12708,13 +13600,12 @@ def create_subevent_from_parent(req: CreateSubeventRequest):
     clean_tags = _normalize_unique_moment_tags(req.tags or [])
 
     try:
-        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
-        conn.execute("PRAGMA busy_timeout = 30000")
-        try:
+        with _planner_db_lock(f"Create Subevent: Moments/{sub_m}"), contextlib.closing(_open_rw_media_db(60.0)) as conn:
             cur = conn.cursor()
             _ensure_moment_tag_tables(cur)
             _ensure_organizer_library_tables(cur)
             _ensure_subevent_schema(cur)
+            _commit_with_retry(conn)
 
             # Sync selected subgroup assets into Media Organizer.photoslibrary / Moments / <subevent_name>
             # (leaving Moments/<parent_m> intact as the Umbrella album and All-Media 100% read-only)
@@ -12822,7 +13713,8 @@ def create_subevent_from_parent(req: CreateSubeventRequest):
                 )
 
             exp_cur, exp_ln = _compute_expected_curated_stats(len(clean_ids))
-            conn.commit()
+            _commit_with_retry(conn)
+            _finish_photos_upload_progress(ok=True, message=f"Created Subevent 'Moments/{sub_m}' ({len(clean_ids)} asset(s)).")
             return {
                 "ok": True,
                 "library_target": "organizer",
@@ -12836,9 +13728,8 @@ def create_subevent_from_parent(req: CreateSubeventRequest):
                 "expected_curated_ln": exp_ln,
                 "tags_saved": len(clean_tags),
             }
-        finally:
-            conn.close()
     except Exception as e:
+        _finish_photos_upload_progress(ok=False, message=str(e))
         return {"ok": False, "error": str(e)}
 
 
@@ -13046,6 +13937,239 @@ def _upsert_album_and_assets_in_db(
     return alb_pk
 
 
+@router.post("/memories/remove-moment-assets")
+def remove_moment_assets_action(req: RemoveMomentAssetsRequest):
+    """Remove wrongly included asset(s) from a Media Organizer Moment / Umbrella Event, rebuilding its Media Organizer album
+    with the remaining assets and restoring evicted assets to their other active All-Media Moment (or Unassigned).
+    """
+    if not MEDIA_DB_PATH or not MEDIA_DB_PATH.exists():
+        return {"ok": False, "error": "Media database unavailable"}
+
+    m_name = (req.moment_name or "").strip()
+    if not m_name:
+        return {"ok": False, "error": "moment_name is required"}
+
+    remove_ids: list[str] = []
+    seen_rem: set[str] = set()
+    for raw_id in req.remove_asset_ids or []:
+        s = (raw_id or "").strip()
+        if s and s not in seen_rem:
+            seen_rem.add(s)
+            remove_ids.append(s)
+    if not remove_ids:
+        return {"ok": False, "error": "Select at least one asset to remove"}
+
+    remove_set = set(remove_ids)
+    try:
+        with _planner_db_lock(f"Remove Assets: {m_name}"), contextlib.closing(_open_rw_media_db(60.0)) as conn:
+            cur = conn.cursor()
+            _ensure_organizer_library_tables(cur)
+            _ensure_moment_tag_tables(cur)
+            _ensure_subevent_schema(cur)
+            _commit_with_retry(conn)
+
+            org_alb_rows = cur.execute(
+                """
+                SELECT album_pk, COALESCE(parent_folder_name, 'Moments')
+                FROM media_organizer_albums
+                WHERE is_folder = 0
+                  AND COALESCE(library_scope, 'all_media') = 'organizer'
+                  AND TRIM(LOWER(album_name)) = TRIM(LOWER(?))
+                  AND LOWER(COALESCE(parent_folder_name, '')) IN ('moments', 'generic moments', 'tobecurated', 'curated')
+                ORDER BY CASE LOWER(COALESCE(parent_folder_name, ''))
+                    WHEN 'moments' THEN 1
+                    WHEN 'curated' THEN 2
+                    WHEN 'tobecurated' THEN 3
+                    ELSE 4
+                END ASC
+                """,
+                (m_name,),
+            ).fetchall()
+
+            current_ids: list[str] = []
+            seen_cur: set[str] = set()
+            primary_parent = "Moments"
+            if org_alb_rows:
+                primary_parent = str(org_alb_rows[0][1] or "Moments").strip() or "Moments"
+                pks = [int(r[0]) for r in org_alb_rows]
+                ph_pks = ",".join("?" for _ in pks)
+                for (aid_row,) in cur.execute(
+                    f"SELECT asset_id FROM media_organizer_album_assets WHERE album_pk IN ({ph_pks})",
+                    pks,
+                ).fetchall():
+                    if aid_row and aid_row not in seen_cur:
+                        seen_cur.add(aid_row)
+                        current_ids.append(str(aid_row))
+            else:
+                for (aid_row,) in cur.execute(
+                    "SELECT asset_id FROM assets WHERE TRIM(LOWER(COALESCE(MomentsAlbumName, ''))) = TRIM(LOWER(?)) AND COALESCE(removed_from_source, 0) = 0",
+                    (m_name,),
+                ).fetchall():
+                    if aid_row and aid_row not in seen_cur:
+                        seen_cur.add(aid_row)
+                        current_ids.append(str(aid_row))
+
+            actually_removed = [aid for aid in current_ids if aid in remove_set]
+            if not actually_removed:
+                actually_removed = list(remove_ids)
+            remaining_ids = [aid for aid in current_ids if aid not in remove_set]
+            if current_ids and not remaining_ids:
+                return {
+                    "ok": False,
+                    "error": f"Cannot remove all {len(current_ids)} asset(s) from '{m_name}'. Leave at least 1 asset in the Moment.",
+                }
+
+            photos_warning: Optional[str] = None
+            if org_alb_rows and remaining_ids:
+                sync_res = _sync_assets_to_organizer_library(
+                    cur,
+                    primary_parent,
+                    m_name,
+                    remaining_ids,
+                    allow_existing=True,
+                    replace_existing=True,
+                )
+                if not sync_res.get("ok"):
+                    photos_warning = sync_res.get("error")
+                    _upsert_organizer_album_in_db(
+                        cur,
+                        primary_parent,
+                        m_name,
+                        remaining_ids,
+                        replace_members=True,
+                    )
+
+            child_sub_names = [
+                str(r[0]).strip()
+                for r in cur.execute(
+                    "SELECT moment_name FROM curated_moments WHERE TRIM(LOWER(COALESCE(parent_moment_name, ''))) = TRIM(LOWER(?))",
+                    (m_name,),
+                ).fetchall()
+                if r[0]
+            ]
+            target_names_lc = [m_name.lower(), *(s.lower() for s in child_sub_names)]
+            ph_nms = ",".join("?" for _ in target_names_lc)
+            affected_org_pks = [
+                int(r[0])
+                for r in cur.execute(
+                    f"""
+                    SELECT album_pk FROM media_organizer_albums
+                    WHERE is_folder = 0
+                      AND COALESCE(library_scope, 'all_media') = 'organizer'
+                      AND TRIM(LOWER(album_name)) IN ({ph_nms})
+                    """,
+                    target_names_lc,
+                ).fetchall()
+            ]
+            if affected_org_pks:
+                ph_apks = ",".join("?" for _ in affected_org_pks)
+                for r_batch in _iter_id_chunks(remove_ids, 800):
+                    ph_rem = ",".join("?" for _ in r_batch)
+                    cur.execute(
+                        f"DELETE FROM media_organizer_album_assets WHERE album_pk IN ({ph_apks}) AND asset_id IN ({ph_rem})",
+                        [*affected_org_pks, *r_batch],
+                    )
+                for apk in affected_org_pks:
+                    cur.execute(
+                        "UPDATE media_organizer_albums SET asset_count = (SELECT COUNT(*) FROM media_organizer_album_assets WHERE album_pk = ?), synced_at_utc = datetime('now') WHERE album_pk = ?",
+                        (apk, apk),
+                    )
+
+            for r_batch in _iter_id_chunks(remove_ids, 800):
+                ph_rem = ",".join("?" for _ in r_batch)
+                cur.execute(
+                    f"DELETE FROM moment_tags WHERE TRIM(LOWER(moment_name)) IN ({ph_nms}) AND asset_id IN ({ph_rem})",
+                    [*target_names_lc, *r_batch],
+                )
+
+            restored_moments: dict[str, int] = {}
+            unassigned_cnt = 0
+            for aid in remove_ids:
+                alt_row = cur.execute(
+                    f"""
+                    SELECT moa.album_name
+                    FROM media_organizer_album_assets moaa
+                    JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                    LEFT JOIN curated_moments cm ON TRIM(LOWER(cm.moment_name)) = TRIM(LOWER(moa.album_name))
+                    WHERE moaa.asset_id = ?
+                      AND moa.is_folder = 0
+                      AND COALESCE(moa.library_scope, 'all_media') != 'organizer'
+                      AND LOWER(COALESCE(moa.parent_folder_name, '')) IN ('moments', 'generic moments')
+                      AND LOWER(TRIM(COALESCE(moa.album_name, ''))) NOT IN ('', 'ignore', 'skippublishing', 'topscore excluded', 'highrated assets')
+                      AND TRIM(LOWER(moa.album_name)) NOT IN ({ph_nms})
+                      AND LOWER(COALESCE(cm.memory_stage, '')) != 'deleted'
+                    ORDER BY moa.album_pk DESC
+                    LIMIT 1
+                    """,
+                    [aid, *target_names_lc],
+                ).fetchone()
+                restored_name = str(alt_row[0]).strip() if (alt_row and alt_row[0]) else None
+                if restored_name:
+                    restored_moments[restored_name] = restored_moments.get(restored_name, 0) + 1
+                else:
+                    unassigned_cnt += 1
+                try:
+                    cur.execute(
+                        """
+                        UPDATE assets
+                        SET MomentsAlbumName = ?,
+                            curated_album = CASE WHEN TRIM(LOWER(COALESCE(curated_album, ''))) IN ({ph_nms}) THEN NULL ELSE curated_album END,
+                            tags_metadata_json = NULL,
+                            updated_at_utc = datetime('now')
+                        WHERE asset_id = ?
+                        """.format(ph_nms=ph_nms),
+                        [restored_name, *target_names_lc, aid],
+                    )
+                except sqlite3.OperationalError:
+                    cur.execute(
+                        "UPDATE assets SET MomentsAlbumName = ? WHERE asset_id = ?",
+                        (restored_name, aid),
+                    )
+
+            cur.execute(
+                """
+                UPDATE curated_moments
+                SET event_total_assets = ?,
+                    last_pipeline_sync = datetime('now')
+                WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))
+                """,
+                (len(remaining_ids), m_name),
+            )
+            for sub_nm in child_sub_names:
+                sub_cnt_row = cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT moaa.asset_id)
+                    FROM media_organizer_album_assets moaa
+                    JOIN media_organizer_albums moa ON moa.album_pk = moaa.album_pk
+                    WHERE moa.is_folder = 0
+                      AND COALESCE(moa.library_scope, 'all_media') = 'organizer'
+                      AND TRIM(LOWER(moa.album_name)) = TRIM(LOWER(?))
+                    """,
+                    (sub_nm,),
+                ).fetchone()
+                if sub_cnt_row and sub_cnt_row[0] is not None:
+                    cur.execute(
+                        "UPDATE curated_moments SET event_total_assets = ? WHERE TRIM(LOWER(moment_name)) = TRIM(LOWER(?))",
+                        (int(sub_cnt_row[0]), sub_nm),
+                    )
+
+            _sync_moment_folder_metadata_json(cur, m_name, None, asset_ids_hint=remaining_ids)
+            _commit_with_retry(conn)
+            _finish_photos_upload_progress(ok=True, message=f"Removed {len(actually_removed)} asset(s) from '{m_name}'.")
+            return {
+                "ok": True,
+                "moment_name": m_name,
+                "removed_count": len(actually_removed),
+                "remaining_count": len(remaining_ids),
+                "restored_moments": restored_moments,
+                "unassigned_count": unassigned_cnt,
+                "photos_warning": photos_warning,
+            }
+    except Exception as e:
+        _finish_photos_upload_progress(ok=False, message=str(e))
+        return {"ok": False, "error": str(e)}
+
+
 @router.post("/memories/curate-moment")
 def curate_moment_action(req: CurateMomentRequest):
     """Manually curate any Moment or Unassigned Grouping into Media Organizer.photoslibrary / Curated / <target_moment>
@@ -13125,12 +14249,11 @@ def curate_moment_action(req: CurateMomentRequest):
     highrated_max_keeper_score = 0.0
     highrated_error = None
     try:
-        conn = sqlite3.connect(str(MEDIA_DB_PATH), timeout=30)
-        conn.execute("PRAGMA busy_timeout = 30000")
-        try:
+        with _planner_db_lock(f"Curate Moment: Curated/{target_moment}"), contextlib.closing(_open_rw_media_db(60.0)) as conn:
             cur = conn.cursor()
             _ensure_moment_tag_tables(cur)
             _ensure_organizer_library_tables(cur)
+            _commit_with_retry(conn)
 
             if _moment_is_umbrella_with_subevents(cur, src_moment) or _moment_is_umbrella_with_subevents(cur, target_moment):
                 return {
@@ -13457,10 +14580,10 @@ def curate_moment_action(req: CurateMomentRequest):
                         (target_moment,),
                     )
 
-            conn.commit()
-        finally:
-            conn.close()
+            _commit_with_retry(conn)
+            _finish_photos_upload_progress(ok=True, message=f"Curated 'Curated/{target_moment}' ({len(selected_ids)} keeper(s)).")
     except Exception as e:
+        _finish_photos_upload_progress(ok=False, message=str(e))
         return {"ok": False, "error": f"Curated in Media Organizer Photos, but failed updating DB: {e}"}
 
     return {
