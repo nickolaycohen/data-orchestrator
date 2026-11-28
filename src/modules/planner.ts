@@ -327,6 +327,7 @@ const splitSubeventsActiveSectionIds = new Set<string>();
 const splitSubeventsSelectedAssetIds = new Set<string>();
 let splitSubeventsNameManuallyEdited = false;
 let splitSubeventsLastAutoName = '';
+let splitSubeventsSearchQuery = '';
 let isSubmittingCreateSubevent = false;
 
 const subeventTagState: TaggingEngineState = createEmptyTaggingState(
@@ -1232,6 +1233,18 @@ export function setupPlannerOverview(onRefreshExecutor?: () => void, onRefreshMe
   document.getElementById('split-subevents-name-input')?.addEventListener('input', (e) => {
     const curVal = ((e.target as HTMLInputElement)?.value || '').trim();
     splitSubeventsNameManuallyEdited = curVal !== '' && curVal !== splitSubeventsLastAutoName;
+  });
+  const subSearchInp = document.getElementById('split-subevents-search-input') as HTMLInputElement | null;
+  const subClearBtn = document.getElementById('btn-split-subevents-clear-search') as HTMLButtonElement | null;
+  subSearchInp?.addEventListener('input', () => {
+    splitSubeventsSearchQuery = (subSearchInp.value || '').trim();
+    renderSplitSubeventsModalContent();
+  });
+  subClearBtn?.addEventListener('click', () => {
+    if (subSearchInp) subSearchInp.value = '';
+    splitSubeventsSearchQuery = '';
+    renderSplitSubeventsModalContent();
+    subSearchInp?.focus();
   });
   document.getElementById('btn-cancel-subevent-builder')?.addEventListener('click', () => {
     splitSubeventsActiveSectionIds.clear();
@@ -10629,6 +10642,7 @@ export async function openSplitSubeventsModal(momentName: string): Promise<void>
   splitSubeventsSelectedAssetIds.clear();
   splitSubeventsNameManuallyEdited = false;
   splitSubeventsLastAutoName = '';
+  splitSubeventsSearchQuery = '';
 
   const modal = document.getElementById('modal-split-subevents');
   const titleEl = document.getElementById('split-subevents-modal-title');
@@ -10636,6 +10650,16 @@ export async function openSplitSubeventsModal(momentName: string): Promise<void>
   const listEl = document.getElementById('split-subevents-sections-list');
   const builderEl = document.getElementById('split-subevents-builder-panel');
   const statusEl = document.getElementById('split-subevents-status');
+  const searchInp = document.getElementById('split-subevents-search-input') as HTMLInputElement | null;
+  const clearBtn = document.getElementById('btn-split-subevents-clear-search') as HTMLButtonElement | null;
+  const searchCountPill = document.getElementById('split-subevents-search-count-pill');
+
+  if (searchInp) searchInp.value = '';
+  if (clearBtn) clearBtn.style.display = 'none';
+  if (searchCountPill) {
+    searchCountPill.style.display = 'none';
+    searchCountPill.textContent = '';
+  }
 
   if (titleEl) titleEl.textContent = `🌿 Split Subevents — ${mClean}`;
   if (badgeEl) badgeEl.textContent = 'loading...';
@@ -10814,8 +10838,56 @@ function renderSplitSubeventsModalContent(): void {
   const submitBtn = document.getElementById('btn-submit-create-subevent') as HTMLButtonElement | null;
   if (!data || !listEl) return;
 
+  const rawQuery = (splitSubeventsSearchQuery || '').trim();
+  const q = rawQuery.toLowerCase();
+  const clearBtn = document.getElementById('btn-split-subevents-clear-search') as HTMLButtonElement | null;
+  const searchCountPill = document.getElementById('split-subevents-search-count-pill');
+
+  if (clearBtn) {
+    clearBtn.style.display = rawQuery ? 'inline-flex' : 'none';
+  }
+
+  const isAssetMatch = (a: SubeventSectionAssetItem): boolean => {
+    if (!q) return false;
+    return Boolean(
+      (a.original_filename && a.original_filename.toLowerCase().includes(q)) ||
+      (a.asset_id && a.asset_id.toLowerCase().includes(q)) ||
+      (a.date_created_utc && a.date_created_utc.toLowerCase().includes(q))
+    );
+  };
+
+  let totalMatchingAssets = 0;
+  const filteredSections = data.sections.filter(sec => {
+    if (!q) return true;
+    const secMatchesMeta =
+      sec.title.toLowerCase().includes(q) ||
+      (sec.basis_label && sec.basis_label.toLowerCase().includes(q)) ||
+      (sec.location_hint && sec.location_hint.toLowerCase().includes(q)) ||
+      (sec.date_label && sec.date_label.toLowerCase().includes(q)) ||
+      `#${sec.index}`.includes(q);
+    const matchingCount = sec.assets.filter(a => isAssetMatch(a)).length;
+    if (matchingCount > 0) totalMatchingAssets += matchingCount;
+    return secMatchesMeta || matchingCount > 0;
+  });
+
+  if (searchCountPill) {
+    if (q) {
+      searchCountPill.style.display = 'inline-flex';
+      searchCountPill.textContent = `${filteredSections.length} section${filteredSections.length === 1 ? '' : 's'}${
+        totalMatchingAssets > 0 ? ` · ${totalMatchingAssets} asset${totalMatchingAssets === 1 ? '' : 's'}` : ''
+      } match`;
+    } else {
+      searchCountPill.style.display = 'none';
+      searchCountPill.textContent = '';
+    }
+  }
+
   if (secPillEl) {
-    secPillEl.textContent = `${data.sections.length} proposed section${data.sections.length === 1 ? '' : 's'}`;
+    if (q) {
+      secPillEl.textContent = `${filteredSections.length} / ${data.sections.length} proposed section${data.sections.length === 1 ? '' : 's'}`;
+    } else {
+      secPillEl.textContent = `${data.sections.length} proposed section${data.sections.length === 1 ? '' : 's'}`;
+    }
   }
   if (bannerEl) {
     const peakNote = data.parent_peak_asset
@@ -10860,111 +10932,161 @@ function renderSplitSubeventsModalContent(): void {
     }
   }
 
-  listEl.innerHTML = data.sections
-    .map(sec => {
-      const isSecSelected = splitSubeventsActiveSectionIds.has(sec.section_id);
-      const secCheckedCount = sec.assets.filter(a => splitSubeventsSelectedAssetIds.has(a.asset_id)).length;
-      const allAssigned = sec.unsplit_assets === 0 && sec.assigned_subevents.length > 0;
-      const peakBadge = sec.has_parent_peak_asset
-        ? `<span class="badge badge-xs badge-amber font-mono" style="font-weight: 700;" title="Contains the highest-scoring asset of the entire Major Event (${escapeHtml(sec.peak_asset_filename)} · ${sec.peak_asset_score.toFixed(4)})">🔥 Event Peak: ${escapeHtml(sec.peak_asset_filename)} (${sec.peak_asset_score.toFixed(4)})</span>`
-        : '';
-      const assignedBadge =
-        sec.assigned_subevents.length > 0
-          ? `<span class="badge badge-xs badge-green font-mono">✅ Split ➜ ${escapeHtml(sec.assigned_subevents.join(', '))}${sec.unsplit_assets > 0 ? ` (${sec.unsplit_assets} unsplit)` : ''}</span>`
-          : `<span class="badge badge-xs badge-outline font-mono">${sec.unsplit_assets} unsplit</span>`;
+  if (filteredSections.length === 0) {
+    listEl.innerHTML = `
+      <div style="text-align: center; padding: 2.5rem 1rem; color: var(--text-muted); background: rgba(15, 23, 42, 0.4); border-radius: 8px; border: 1px dashed var(--border-subtle); margin: 0.5rem 0;">
+        <div style="font-size: 1.8rem; margin-bottom: 0.4rem;">🔍</div>
+        <div style="font-weight: 600; font-size: 0.88rem; color: var(--text-primary); margin-bottom: 0.25rem;">No sections or assets matched "${escapeHtml(rawQuery)}"</div>
+        <div style="font-size: 0.74rem; margin-bottom: 0.85rem;">Try searching by filename (e.g. <code>IMG_8587</code>), date, location (e.g. <code>Trenton</code>), or section number.</div>
+        <button type="button" class="btn btn-xs btn-outline" id="btn-split-subevents-reset-empty-search">✕ Clear Search</button>
+      </div>
+    `;
+    document.getElementById('btn-split-subevents-reset-empty-search')?.addEventListener('click', () => {
+      const subSearchInp = document.getElementById('split-subevents-search-input') as HTMLInputElement | null;
+      if (subSearchInp) subSearchInp.value = '';
+      splitSubeventsSearchQuery = '';
+      renderSplitSubeventsModalContent();
+      subSearchInp?.focus();
+    });
+  } else {
+    listEl.innerHTML = filteredSections
+      .map(sec => {
+        const isSecSelected = splitSubeventsActiveSectionIds.has(sec.section_id);
+        const secCheckedCount = sec.assets.filter(a => splitSubeventsSelectedAssetIds.has(a.asset_id)).length;
+        const allAssigned = sec.unsplit_assets === 0 && sec.assigned_subevents.length > 0;
+        const secMatchesMeta = q !== '' && (
+          sec.title.toLowerCase().includes(q) ||
+          (sec.basis_label && sec.basis_label.toLowerCase().includes(q)) ||
+          (sec.location_hint && sec.location_hint.toLowerCase().includes(q)) ||
+          (sec.date_label && sec.date_label.toLowerCase().includes(q)) ||
+          `#${sec.index}`.includes(q)
+        );
+        const matchingAssetsInSec = q ? sec.assets.filter(a => isAssetMatch(a)).length : 0;
+        const searchMatchBadge =
+          matchingAssetsInSec > 0
+            ? `<span class="badge badge-xs badge-cyan font-mono" style="font-weight: 700;">🔍 ${matchingAssetsInSec} asset match${matchingAssetsInSec === 1 ? '' : 'es'}</span>`
+            : secMatchesMeta
+              ? `<span class="badge badge-xs badge-cyan font-mono" style="font-weight: 700;">🔍 Section Match</span>`
+              : '';
 
-      const thumbsHtml = sec.assets
-        .slice(0, 12)
-        .map(a => {
-          const isChecked = splitSubeventsSelectedAssetIds.has(a.asset_id);
-          const alreadySub = Boolean(a.already_in_subevent);
-          return `
-            <div class="tag-db-asset-card${a.is_duplicate_copy ? ' is-dup-copy' : ''}" style="${
-              isChecked
-                ? 'border-color: rgba(6, 182, 212, 0.75); background: rgba(6, 182, 212, 0.12);'
-                : alreadySub
-                  ? 'opacity: 0.55;'
-                  : ''
-            }" title="${escapeHtml(`${a.original_filename} · Score ${a.score_normalized.toFixed(4)} · ${a.date_created_utc}${a.already_in_subevent ? ` · In Subevent: ${a.already_in_subevent}` : ''}`)}">
-              <input type="checkbox" class="subevent-sec-asset-cb" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" ${isChecked ? 'checked' : ''} style="cursor: pointer; flex-shrink: 0;" />
-              <img class="tag-db-asset-thumb btn-subevent-preview-asset" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
-              <div class="btn-subevent-preview-asset" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" style="min-width: 0; flex: 1; cursor: pointer;">
-                <div class="font-mono" style="font-size: 0.67rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                  ${escapeHtml(a.original_filename)}
-                </div>
-                <div class="font-mono text-muted" style="font-size: 0.61rem; display: flex; align-items: center; gap: 0.2rem; flex-wrap: wrap;">
-                  <span style="color: #fbbf24; font-weight: 600;">${a.qualified ? '★ ' : ''}${a.score_normalized.toFixed(4)}</span>
-                  <span>· ${escapeHtml((a.date_created_utc || '').slice(11, 16) || (a.date_created_utc || '').slice(0, 10))}</span>
-                  ${a.is_duplicate_copy ? '<span class="badge badge-xs badge-amber font-mono" style="font-size:0.54rem;">♻️ Dup</span>' : ''}
+        const peakBadge = sec.has_parent_peak_asset
+          ? `<span class="badge badge-xs badge-amber font-mono" style="font-weight: 700;" title="Contains the highest-scoring asset of the entire Major Event (${escapeHtml(sec.peak_asset_filename)} · ${sec.peak_asset_score.toFixed(4)})">🔥 Event Peak: ${escapeHtml(sec.peak_asset_filename)} (${sec.peak_asset_score.toFixed(4)})</span>`
+          : '';
+        const assignedBadge =
+          sec.assigned_subevents.length > 0
+            ? `<span class="badge badge-xs badge-green font-mono">✅ Split ➜ ${escapeHtml(sec.assigned_subevents.join(', '))}${sec.unsplit_assets > 0 ? ` (${sec.unsplit_assets} unsplit)` : ''}</span>`
+            : `<span class="badge badge-xs badge-outline font-mono">${sec.unsplit_assets} unsplit</span>`;
+
+        // Sort matching assets to the front so they appear immediately in the thumbnail preview grid!
+        const sortedAssets = [...sec.assets];
+        if (q) {
+          sortedAssets.sort((a, b) => {
+            const aM = isAssetMatch(a) ? 1 : 0;
+            const bM = isAssetMatch(b) ? 1 : 0;
+            return bM - aM;
+          });
+        }
+
+        const thumbsHtml = sortedAssets
+          .slice(0, 12)
+          .map(a => {
+            const isChecked = splitSubeventsSelectedAssetIds.has(a.asset_id);
+            const alreadySub = Boolean(a.already_in_subevent);
+            const matches = isAssetMatch(a);
+            return `
+              <div class="tag-db-asset-card${a.is_duplicate_copy ? ' is-dup-copy' : ''}" style="${
+                matches
+                  ? 'border: 2px solid #06b6d4; background: rgba(6, 182, 212, 0.22); box-shadow: 0 0 8px rgba(6, 182, 212, 0.35);'
+                  : isChecked
+                    ? 'border-color: rgba(6, 182, 212, 0.75); background: rgba(6, 182, 212, 0.12);'
+                    : alreadySub
+                      ? 'opacity: 0.55;'
+                      : ''
+              }" title="${escapeHtml(`${a.original_filename} · Score ${a.score_normalized.toFixed(4)} · ${a.date_created_utc}${a.already_in_subevent ? ` · In Subevent: ${a.already_in_subevent}` : ''}${matches ? ' (Matches Search)' : ''}`)}">
+                <input type="checkbox" class="subevent-sec-asset-cb" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" ${isChecked ? 'checked' : ''} style="cursor: pointer; flex-shrink: 0;" />
+                <img class="tag-db-asset-thumb btn-subevent-preview-asset" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" src="/api/media/cleanup/thumbnail/${encodeURIComponent(a.asset_id)}" alt="${escapeHtml(a.original_filename)}" loading="lazy" />
+                <div class="btn-subevent-preview-asset" data-section-id="${escapeHtml(sec.section_id)}" data-asset-id="${escapeHtml(a.asset_id)}" style="min-width: 0; flex: 1; cursor: pointer;">
+                  <div class="font-mono" style="font-size: 0.67rem; font-weight: 600; color: ${matches ? '#38bdf8' : 'var(--text-primary)'}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    ${escapeHtml(a.original_filename)}
+                  </div>
+                  <div class="font-mono text-muted" style="font-size: 0.61rem; display: flex; align-items: center; gap: 0.2rem; flex-wrap: wrap;">
+                    <span style="color: #fbbf24; font-weight: 600;">${a.qualified ? '★ ' : ''}${a.score_normalized.toFixed(4)}</span>
+                    <span>· ${escapeHtml((a.date_created_utc || '').slice(11, 16) || (a.date_created_utc || '').slice(0, 10))}</span>
+                    ${matches ? '<span class="badge badge-xs badge-cyan font-mono" style="font-size:0.52rem; padding: 0.05rem 0.22rem;">🔍 Match</span>' : ''}
+                    ${a.is_duplicate_copy ? '<span class="badge badge-xs badge-amber font-mono" style="font-size:0.54rem;">♻️ Dup</span>' : ''}
+                  </div>
                 </div>
               </div>
-            </div>
-          `;
-        })
-        .join('');
-      const extraCnt = Math.max(0, sec.assets.length - 12);
+            `;
+          })
+          .join('');
+        const extraCnt = Math.max(0, sec.assets.length - 12);
 
-      return `
-        <div class="subevent-section-card" data-section-id="${escapeHtml(sec.section_id)}" style="padding: 0.68rem 0.8rem; border-radius: 8px; background: ${
-          isSecSelected ? 'rgba(6, 182, 212, 0.11)' : 'rgba(15, 23, 42, 0.65)'
-        }; border: 1px solid ${
-          isSecSelected
-            ? 'rgba(6, 182, 212, 0.68)'
-            : sec.has_parent_peak_asset
-              ? 'rgba(245, 158, 11, 0.48)'
-              : 'rgba(148, 163, 184, 0.22)'
-        }; display: flex; flex-direction: column; gap: 0.5rem;">
-          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 0.65rem; flex-wrap: wrap;">
-            <div style="display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; flex: 1;">
-              <input type="checkbox" class="subevent-section-toggle-cb" data-section-id="${escapeHtml(sec.section_id)}" ${isSecSelected ? 'checked' : ''} style="margin-top: 0.2rem; cursor: pointer;" title="Check multiple sections to combine them into a single Subevent" />
-              <div style="min-width: 0; flex: 1;">
-                <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
-                  <span class="badge badge-xs badge-cyan font-mono">#${sec.index}</span>
-                  <strong style="font-size: 0.84rem; color: var(--text-primary);">${escapeHtml(sec.title)}</strong>
-                  ${peakBadge}
-                  ${assignedBadge}
-                </div>
-                <div class="font-mono text-muted" style="font-size: 0.7rem; margin-top: 0.16rem;">
-                  ${escapeHtml(sec.basis_label)}
-                </div>
-                <div style="display: flex; align-items: center; gap: 0.38rem; flex-wrap: wrap; margin-top: 0.3rem;">
-                  <span class="badge badge-xs badge-amber font-mono" style="font-weight: 700;">⭐ Avg ${sec.avg_score.toFixed(4)}</span>
-                  <span class="badge badge-xs badge-green font-mono">★ Qual Avg ${sec.qualified_avg_score.toFixed(4)} (${sec.qualified_assets}/${sec.total_assets})</span>
-                  <span class="badge badge-xs badge-outline font-mono">Range ${sec.min_score.toFixed(3)}..${sec.max_score.toFixed(3)}</span>
-                  <span class="badge badge-xs badge-blue font-mono" title="Aesthetic rank score = qual_avg * ln(qual_count + 1)">🏆 Rank ${sec.rank_score.toFixed(2)}</span>
-                  <span class="badge badge-xs badge-purple font-mono" title="Expected curated keepers if split into its own Subevent: round(ln(${sec.unique_assets || sec.total_assets})) = ${sec.expected_curated_count}">🎯 Exp Cur: ${sec.expected_curated_count} (ln ${sec.unique_assets || sec.total_assets}=${sec.expected_curated_ln.toFixed(2)})</span>
+        return `
+          <div class="subevent-section-card" data-section-id="${escapeHtml(sec.section_id)}" style="padding: 0.68rem 0.8rem; border-radius: 8px; background: ${
+            isSecSelected ? 'rgba(6, 182, 212, 0.11)' : 'rgba(15, 23, 42, 0.65)'
+          }; border: 1px solid ${
+            isSecSelected
+              ? 'rgba(6, 182, 212, 0.68)'
+              : (secMatchesMeta || matchingAssetsInSec > 0)
+                ? 'rgba(6, 182, 212, 0.55)'
+                : sec.has_parent_peak_asset
+                  ? 'rgba(245, 158, 11, 0.48)'
+                  : 'rgba(148, 163, 184, 0.22)'
+          }; display: flex; flex-direction: column; gap: 0.5rem;">
+            <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 0.65rem; flex-wrap: wrap;">
+              <div style="display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; flex: 1;">
+                <input type="checkbox" class="subevent-section-toggle-cb" data-section-id="${escapeHtml(sec.section_id)}" ${isSecSelected ? 'checked' : ''} style="margin-top: 0.2rem; cursor: pointer;" title="Check multiple sections to combine them into a single Subevent" />
+                <div style="min-width: 0; flex: 1;">
+                  <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                    <span class="badge badge-xs badge-cyan font-mono">#${sec.index}</span>
+                    <strong style="font-size: 0.84rem; color: var(--text-primary);">${escapeHtml(sec.title)}</strong>
+                    ${searchMatchBadge}
+                    ${peakBadge}
+                    ${assignedBadge}
+                  </div>
+                  <div class="font-mono text-muted" style="font-size: 0.7rem; margin-top: 0.16rem;">
+                    ${escapeHtml(sec.basis_label)}
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 0.38rem; flex-wrap: wrap; margin-top: 0.3rem;">
+                    <span class="badge badge-xs badge-amber font-mono" style="font-weight: 700;">⭐ Avg ${sec.avg_score.toFixed(4)}</span>
+                    <span class="badge badge-xs badge-green font-mono">★ Qual Avg ${sec.qualified_avg_score.toFixed(4)} (${sec.qualified_assets}/${sec.total_assets})</span>
+                    <span class="badge badge-xs badge-outline font-mono">Range ${sec.min_score.toFixed(3)}..${sec.max_score.toFixed(3)}</span>
+                    <span class="badge badge-xs badge-blue font-mono" title="Aesthetic rank score = qual_avg * ln(qual_count + 1)">🏆 Rank ${sec.rank_score.toFixed(2)}</span>
+                    <span class="badge badge-xs badge-purple font-mono" title="Expected curated keepers if split into its own Subevent: round(ln(${sec.unique_assets || sec.total_assets})) = ${sec.expected_curated_count}">🎯 Exp Cur: ${sec.expected_curated_count} (ln ${sec.unique_assets || sec.total_assets}=${sec.expected_curated_ln.toFixed(2)})</span>
+                  </div>
                 </div>
               </div>
+              <div style="display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; flex-wrap: wrap;">
+                ${
+                  secCheckedCount > 0
+                    ? `<span class="badge badge-xs badge-cyan font-mono">${secCheckedCount} checked</span>`
+                    : ''
+                }
+                <button type="button" class="btn btn-xs btn-outline btn-subevent-preview-all" data-section-id="${escapeHtml(sec.section_id)}" title="Open all ${sec.assets.length} asset(s) in the Multi-Asset Lightbox Viewer (curation preview, zoom, logarithmic rule, filmstrip)">
+                  🖼️ View All (${sec.assets.length})
+                </button>
+                <button type="button" class="btn btn-xs btn-outline btn-remove-subevent-sec" data-section-id="${escapeHtml(sec.section_id)}" style="border-color: rgba(239, 68, 68, 0.45); color: #fca5a5;" title="Remove all ${sec.assets.length} asset(s) in this subgrouping from '${escapeHtml(data.moment_name)}' (detaches from Media Organizer album &amp; restores to original All-Media Moment / Unassigned)">
+                  🚫 Remove (${sec.assets.length})
+                </button>
+                <button type="button" class="btn btn-xs ${isSecSelected ? 'btn-purple' : allAssigned ? 'btn-outline' : 'btn-cyan'} btn-identify-subevent-sec" data-section-id="${escapeHtml(sec.section_id)}">
+                  ${isSecSelected ? '✓ Active in Builder' : '🌿 Identify Subevent'}
+                </button>
+              </div>
             </div>
-            <div style="display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; flex-wrap: wrap;">
-              ${
-                secCheckedCount > 0
-                  ? `<span class="badge badge-xs badge-cyan font-mono">${secCheckedCount} checked</span>`
-                  : ''
-              }
-              <button type="button" class="btn btn-xs btn-outline btn-subevent-preview-all" data-section-id="${escapeHtml(sec.section_id)}" title="Open all ${sec.assets.length} asset(s) in the Multi-Asset Lightbox Viewer (curation preview, zoom, logarithmic rule, filmstrip)">
-                🖼️ View All (${sec.assets.length})
-              </button>
-              <button type="button" class="btn btn-xs btn-outline btn-remove-subevent-sec" data-section-id="${escapeHtml(sec.section_id)}" style="border-color: rgba(239, 68, 68, 0.45); color: #fca5a5;" title="Remove all ${sec.assets.length} asset(s) in this subgrouping from '${escapeHtml(data.moment_name)}' (detaches from Media Organizer album &amp; restores to original All-Media Moment / Unassigned)">
-                🚫 Remove (${sec.assets.length})
-              </button>
-              <button type="button" class="btn btn-xs ${isSecSelected ? 'btn-purple' : allAssigned ? 'btn-outline' : 'btn-cyan'} btn-identify-subevent-sec" data-section-id="${escapeHtml(sec.section_id)}">
-                ${isSecSelected ? '✓ Active in Builder' : '🌿 Identify Subevent'}
-              </button>
+            <div class="tag-db-assets-grid" style="max-height: 175px; overflow-y: auto;">
+              ${thumbsHtml}
             </div>
+            ${
+              extraCnt > 0
+                ? `<div class="font-mono text-muted" style="font-size: 0.66rem;">+${extraCnt} more asset(s) in this section — click any thumbnail to browse &amp; toggle all ${sec.assets.length} section assets in the Lightbox.</div>`
+                : ''
+            }
           </div>
-          <div class="tag-db-assets-grid" style="max-height: 175px; overflow-y: auto;">
-            ${thumbsHtml}
-          </div>
-          ${
-            extraCnt > 0
-              ? `<div class="font-mono text-muted" style="font-size: 0.66rem;">+${extraCnt} more asset(s) in this section — click any thumbnail to browse &amp; toggle all ${sec.assets.length} section assets in the Lightbox.</div>`
-              : ''
-          }
-        </div>
-      `;
-    })
-    .join('');
+        `;
+      })
+      .join('');
+  }
 
   listEl.querySelectorAll<HTMLInputElement>('.subevent-section-toggle-cb').forEach(cb => {
     cb.addEventListener('change', () => {

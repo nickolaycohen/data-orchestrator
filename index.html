@@ -3133,6 +3133,17 @@
           </div>
         </div>
 
+        <!-- Subevent & Asset Search Filter -->
+        <div style="display: flex; align-items: center; gap: 0.5rem; background: rgba(15, 23, 42, 0.65); padding: 0.45rem 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+          <span style="font-size: 0.85rem; opacity: 0.75;">🔍</span>
+          <input type="text" id="split-subevents-search-input" class="form-control form-control-xs"
+            placeholder="Search assets by filename (e.g. IMG_8587), date, location, or section title to locate in list..."
+            style="flex: 1; min-width: 0; background: transparent; border: none; font-size: 0.76rem; box-shadow: none; outline: none; color: var(--text-primary);" />
+          <button type="button" class="btn btn-xs btn-outline" id="btn-split-subevents-clear-search"
+            style="display: none; padding: 0.1rem 0.4rem; font-size: 0.65rem;" title="Clear search">✕ Clear</button>
+          <span class="badge badge-xs badge-cyan font-mono" id="split-subevents-search-count-pill" style="display: none;"></span>
+        </div>
+
         <div id="split-subevents-existing-bar"
           style="display: none; align-items: center; gap: 0.4rem; flex-wrap: wrap; padding: 0.45rem 0.65rem; border-radius: 6px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.3); font-size: 0.73rem;">
         </div>
